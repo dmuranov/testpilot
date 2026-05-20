@@ -1,0 +1,27 @@
+{
+  "name": "MultiRoleConfig",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "User-given label for template"
+    },
+    "app": {
+      "type": "string",
+      "description": "Relation to App"
+    },
+    "roles": {
+      "type": "object",
+      "description": "Array of {name, email, password, scenario}"
+    },
+    "owner_email": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "name",
+    "app",
+    "roles",
+    "owner_email"
+  ]
+}

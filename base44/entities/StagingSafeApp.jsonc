@@ -1,0 +1,55 @@
+{
+  "name": "StagingSafeApp",
+  "type": "object",
+  "properties": {
+    "app": {
+      "type": "string",
+      "description": "Relation to App"
+    },
+    "github_repo": {
+      "type": "string",
+      "description": "owner/repo-name"
+    },
+    "github_connected_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "netlify_site_id": {
+      "type": "string"
+    },
+    "staging_url": {
+      "type": "string",
+      "description": "Stable Netlify URL"
+    },
+    "last_commit_sha": {
+      "type": "string"
+    },
+    "last_commit_message": {
+      "type": "string"
+    },
+    "learn_status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "done",
+        "error"
+      ],
+      "default": "pending"
+    },
+    "baseline_run_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "monitoring_paused": {
+      "type": "boolean",
+      "default": false
+    },
+    "owner_email": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "app",
+    "owner_email"
+  ]
+}

@@ -1,0 +1,55 @@
+{
+  "name": "App",
+  "type": "object",
+  "properties": {
+    "app_id": {
+      "type": "string",
+      "description": "External ID from Azure backend"
+    },
+    "name": {
+      "type": "string",
+      "description": "Display name of the app"
+    },
+    "url": {
+      "type": "string",
+      "description": "Target app URL for testing"
+    },
+    "description": {
+      "type": "string",
+      "description": "What the app does"
+    },
+    "owner_email": {
+      "type": "string",
+      "description": "User email who owns this app"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "learning",
+        "ready",
+        "error"
+      ],
+      "default": "learning",
+      "description": "Learning status"
+    },
+    "learned_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When crawl completed"
+    },
+    "summary": {
+      "type": "object",
+      "description": "Cached app summary from platform map"
+    },
+    "platform_map_url": {
+      "type": "string",
+      "description": "URL to fetch full platform map from Azure"
+    }
+  },
+  "required": [
+    "app_id",
+    "name",
+    "url",
+    "owner_email"
+  ]
+}

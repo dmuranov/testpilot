@@ -1,0 +1,93 @@
+{
+  "name": "TestRun",
+  "type": "object",
+  "properties": {
+    "test_id": {
+      "type": "string",
+      "description": "External testId from Azure"
+    },
+    "app": {
+      "type": "string",
+      "description": "Relation to App entity"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "scenario",
+        "multi_role",
+        "security",
+        "staging_safe"
+      ],
+      "description": "Type of test"
+    },
+    "scenario": {
+      "type": "string",
+      "description": "English scenario prompt"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "running",
+        "completed",
+        "completed_with_bugs",
+        "blocked",
+        "blocked_loop",
+        "aborted_budget",
+        "error"
+      ],
+      "description": "Test status"
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "finished_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "steps_total": {
+      "type": "number"
+    },
+    "steps_passed": {
+      "type": "number"
+    },
+    "steps_failed": {
+      "type": "number"
+    },
+    "bugs_count": {
+      "type": "number"
+    },
+    "retries_count": {
+      "type": "number"
+    },
+    "summary_md": {
+      "type": "string",
+      "description": "Markdown summary"
+    },
+    "bugs_json": {
+      "type": "object",
+      "description": "Array of bugs"
+    },
+    "live_view_url": {
+      "type": "string",
+      "description": "URL for live streaming"
+    },
+    "report_url": {
+      "type": "string",
+      "description": "URL for downloadable PDF"
+    },
+    "owner_email": {
+      "type": "string"
+    },
+    "multi_role_group_id": {
+      "type": "string",
+      "description": "For grouping multi-role tests"
+    }
+  },
+  "required": [
+    "test_id",
+    "app",
+    "kind",
+    "owner_email"
+  ]
+}

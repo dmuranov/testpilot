@@ -1,0 +1,69 @@
+{
+  "name": "SecurityScan",
+  "type": "object",
+  "properties": {
+    "app": {
+      "type": "string",
+      "description": "Relation to App"
+    },
+    "user_a_name": {
+      "type": "string"
+    },
+    "user_a_email": {
+      "type": "string"
+    },
+    "user_b_name": {
+      "type": "string"
+    },
+    "user_b_email": {
+      "type": "string"
+    },
+    "destructive": {
+      "type": "boolean",
+      "default": false
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "running",
+        "completed",
+        "error"
+      ],
+      "default": "running"
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "finished_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "total_tests": {
+      "type": "number"
+    },
+    "vulns_count": {
+      "type": "number"
+    },
+    "suspicious_count": {
+      "type": "number"
+    },
+    "safe_count": {
+      "type": "number"
+    },
+    "report_json": {
+      "type": "object",
+      "description": "Full report payload"
+    },
+    "report_url": {
+      "type": "string"
+    },
+    "owner_email": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "app",
+    "owner_email"
+  ]
+}
