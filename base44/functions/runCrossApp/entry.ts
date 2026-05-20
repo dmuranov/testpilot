@@ -97,11 +97,17 @@ Deno.serve(async (req) => {
       await azurePost(`/api/chat/${sessionId}/end`, { userEmail: user.email }, azureKey).catch(() => {});
     }
 
-    // 6. Build summary and create TestRun entity
+    // 6. Build summary and create TestRun entity.
+    // Base44 entity relations are keyed by the entity's internal `id`,
+    // not by custom fields like `app_id`. appMeta[<azureAppId>] is the
+    // resolved App entity from the ownership check in step 1 — use its
+    // `.id` so TestRun.app actually links back to a real App row
+    // (history / app-detail filters depend on this).
     const summaryMd = stepResults.join('\n\n');
+    const primaryApp = appMeta[appBlocks[0]?.appId];
     const testRun = await base44.entities.TestRun.create({
       test_id: `crossapp-${Date.now()}`,
-      app: appBlocks[0]?.appId || '',
+      app: primaryApp?.id || '',
       kind: 'crossapp',
       status: 'completed',
       scenario,

@@ -16,7 +16,8 @@
         "scenario",
         "multi_role",
         "security",
-        "staging_safe"
+        "staging_safe",
+        "crossapp"
       ],
       "description": "Type of test"
     },
