@@ -14,6 +14,10 @@ import SecurityScanPage from '@/pages/SecurityScan';
 import Settings from '@/pages/Settings';
 import TestRunDetail from '@/pages/TestRunDetail';
 import TestHistory from '@/pages/TestHistory';
+import MultiRole from '@/pages/MultiRole';
+import CrossApp from '@/pages/CrossApp';
+import InteractiveTest from '@/pages/InteractiveTest';
+import StagingSafe from '@/pages/StagingSafe';
 
 const AuthenticatedApp = () => {
   const { isLoadingAuth, isLoadingPublicSettings, authError, navigateToLogin } = useAuth();
@@ -48,6 +52,10 @@ const AuthenticatedApp = () => {
         <Route path="/test" element={<ScenarioTest />} />
         <Route path="/test/:id" element={<TestRunDetail />} />
         <Route path="/history" element={<TestHistory />} />
+        <Route path="/interactive" element={<InteractiveTest />} />
+        <Route path="/multirole" element={<MultiRole />} />
+        <Route path="/crossapp" element={<CrossApp />} />
+        <Route path="/staging-safe" element={<StagingSafe />} />
         <Route path="/security" element={<SecurityScanPage />} />
         <Route path="/settings" element={<Settings />} />
       </Route>
