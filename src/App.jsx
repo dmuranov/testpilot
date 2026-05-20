@@ -12,6 +12,8 @@ import LearnApp from '@/pages/LearnApp';
 import ScenarioTest from '@/pages/ScenarioTest';
 import SecurityScanPage from '@/pages/SecurityScan';
 import Settings from '@/pages/Settings';
+import TestRunDetail from '@/pages/TestRunDetail';
+import TestHistory from '@/pages/TestHistory';
 
 const AuthenticatedApp = () => {
   const { isLoadingAuth, isLoadingPublicSettings, authError, navigateToLogin } = useAuth();
@@ -44,6 +46,8 @@ const AuthenticatedApp = () => {
         <Route path="/apps" element={<AppsPage />} />
         <Route path="/apps/learn" element={<LearnApp />} />
         <Route path="/test" element={<ScenarioTest />} />
+        <Route path="/test/:id" element={<TestRunDetail />} />
+        <Route path="/history" element={<TestHistory />} />
         <Route path="/security" element={<SecurityScanPage />} />
         <Route path="/settings" element={<Settings />} />
       </Route>

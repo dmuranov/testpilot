@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Zap, Lock, GitBranch, Settings, LogOut, Briefcase } from 'lucide-react';
+import { LayoutDashboard, Zap, Lock, Settings, LogOut, Briefcase, History } from 'lucide-react';
 import { base44 } from '@/api/base44Client';
 
 const Logo = () => (
@@ -22,8 +22,8 @@ export default function Sidebar() {
     { icon: LayoutDashboard, label: 'Dashboard', path: '/' },
     { icon: Briefcase, label: 'Apps', path: '/apps' },
     { icon: Zap, label: 'Test', path: '/test' },
+    { icon: History, label: 'History', path: '/history' },
     { icon: Lock, label: 'Security', path: '/security' },
-    { icon: GitBranch, label: 'Staging Safe', path: '/staging-safe' },
     { icon: Settings, label: 'Settings', path: '/settings' },
   ];
 
