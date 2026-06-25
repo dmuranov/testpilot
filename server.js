@@ -7956,7 +7956,12 @@ app.post('/api/billing/webhook', express.raw({ type: 'application/json' }), asyn
   const sig = req.headers['stripe-signature'];
   let event;
   try {
-    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET || '');
+    // Use req.rawBody (captured by the global express.json `verify` hook), NOT
+    // req.body: the global JSON parser runs before this route's express.raw(),
+    // so req.body is an already-parsed object and constructEvent requires the
+    // raw bytes. Passing req.body failed every event with "payload must be a
+    // string or Buffer" — i.e. NO Stripe webhook could ever verify.
+    event = stripe.webhooks.constructEvent(req.rawBody, sig, process.env.STRIPE_WEBHOOK_SECRET || '');
   } catch (err) {
     console.error('[BILLING] webhook signature failed:', err.message);
     return res.status(400).send('Webhook signature failed');
