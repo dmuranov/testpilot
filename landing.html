@@ -788,22 +788,6 @@
 
     /* Ticker */
     .ticker { font-size: 11px; }
-
-    /* Popup — fullscreen friendly */
-    #tp-popup {
-      padding: 12px !important;
-      align-items: flex-end !important;
-    }
-    #tp-popup > div {
-      max-width: 100% !important;
-      width: 100% !important;
-      padding: 28px 20px !important;
-      border-radius: 4px 4px 0 0 !important;
-      margin: 0 !important;
-    }
-    #tp-popup h2 {
-      font-size: 22px !important;
-    }
   }
 </style>
 <script type="text/javascript">(function(c,l,a,r,i,t,y){c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y)})(window,document,"clarity","script","w97af8wesr");</script>
@@ -1212,46 +1196,5 @@
     document.getElementById('tester-msg').style.display = 'block';
   }
 
-  // Popup
-  function closePopup() {
-    document.getElementById('tp-popup').style.display = 'none';
-    sessionStorage.setItem('popup-closed', '1');
-  }
-
-  async function submitPopup(e) {
-    e.preventDefault();
-    const email = document.getElementById('popup-email').value;
-    fetch('/api/waitlist', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, type: 'popup' })
-    }).catch(() => {});
-    document.getElementById('popup-form').style.display = 'none';
-    document.getElementById('popup-success').style.display = 'block';
-    setTimeout(closePopup, 2500);
-  }
-
-  // Show popup after 4 seconds if not closed before
-  if (!sessionStorage.getItem('popup-closed')) {
-    setTimeout(() => {
-      document.getElementById('tp-popup').style.display = 'flex';
-    }, 4000);
-  }
 </script>
 
-<!-- POPUP -->
-<div id="tp-popup" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.85);z-index:9999;align-items:center;justify-content:center;padding:16px;box-sizing:border-box">
-  <div style="background:#111;border:1px solid rgba(200,240,64,0.3);max-width:480px;width:100%;position:relative;padding:32px 24px;border-radius:2px;box-sizing:border-box">
-    <button onclick="closePopup()" style="position:absolute;top:10px;right:10px;background:rgba(255,255,255,0.1);border:none;color:#fff;font-size:20px;cursor:pointer;line-height:1;padding:6px 12px;border-radius:2px;touch-action:manipulation;min-width:40px;min-height:40px">×</button>
-    <p style="font-family:'DM Mono',monospace;font-size:11px;color:#c8f040;letter-spacing:2px;text-transform:uppercase;margin-bottom:16px">// early access</p>
-    <h2 style="font-family:'Syne',sans-serif;font-size:clamp(20px,5vw,28px);font-weight:800;letter-spacing:-1px;margin-bottom:12px;color:#f4f2ee">AI that tests your app like a real user.</h2>
-    <p style="font-family:'DM Mono',monospace;font-size:13px;color:#888;line-height:1.7;margin-bottom:8px">TestPilot crawls your no-code app, learns every screen and form, then runs autonomous tests — clicks, fills, verifies — and reports bugs with screenshots.</p>
-    <p style="font-family:'DM Mono',monospace;font-size:12px;color:#c8f040;margin-bottom:24px">BYOK — use your own Claude API key. You control costs.</p>
-    <form id="popup-form" onsubmit="submitPopup(event)" style="display:flex;flex-direction:column;gap:8px">
-      <input type="email" id="popup-email" placeholder="your@email.com" required style="width:100%;background:#080808;border:1px solid rgba(200,240,64,0.25);color:#fff;font-family:'DM Mono',monospace;font-size:14px;padding:14px;outline:none;border-radius:2px;box-sizing:border-box" />
-      <button type="submit" style="width:100%;background:#c8f040;color:#080808;font-family:'Syne',sans-serif;font-weight:700;font-size:14px;padding:14px;border:none;cursor:pointer;border-radius:2px;box-sizing:border-box">Get Access →</button>
-    </form>
-    <p id="popup-success" style="display:none;font-family:'DM Mono',monospace;font-size:13px;color:#c8f040;text-align:center;padding:12px 0">✓ You're on the list — we'll be in touch.</p>
-    <p style="font-family:'DM Mono',monospace;font-size:11px;color:#555;margin-top:12px;text-align:center">No spam · No credit card · 5 free tester spots available</p>
-  </div>
-</div>
