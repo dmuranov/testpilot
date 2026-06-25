@@ -1,0 +1,25 @@
+{
+  "name": "testpilot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.82.0",
+    "@supabase/supabase-js": "^2.103.2",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.0",
+    "express": "^5.2.1",
+    "nodemailer": "^8.0.4",
+    "playwright": "^1.59.1",
+    "psl": "^1.15.0",
+    "stripe": "^22.0.0",
+    "uuid": "^13.0.0"
+  },
+  "type": "module"
+}

@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Privacy Policy — TestPilot</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #080808; color: #f4f2ee; font-family: 'Syne', sans-serif; padding: 60px 24px; }
+  .container { max-width: 760px; margin: 0 auto; }
+  .logo { font-size: 22px; font-weight: 800; margin-bottom: 48px; }
+  .logo span { color: #c8f040; }
+  h1 { font-size: 32px; font-weight: 800; letter-spacing: -1px; margin-bottom: 8px; }
+  .version { font-family: 'DM Mono', monospace; font-size: 12px; color: #555; margin-bottom: 48px; }
+  h2 { font-size: 16px; font-weight: 700; color: #c8f040; margin: 40px 0 12px; font-family: 'DM Mono', monospace; text-transform: uppercase; letter-spacing: 1px; }
+  p { font-size: 14px; line-height: 1.8; color: #aaa; margin-bottom: 14px; }
+  ul { padding-left: 20px; margin-bottom: 14px; }
+  li { font-size: 14px; line-height: 1.8; color: #aaa; margin-bottom: 6px; }
+  strong { color: #f4f2ee; }
+  table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+  th { background: #111; color: #c8f040; font-family: 'DM Mono', monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; padding: 10px 14px; text-align: left; border: 1px solid #1a1a1a; }
+  td { padding: 10px 14px; font-size: 13px; color: #aaa; border: 1px solid #1a1a1a; vertical-align: top; line-height: 1.6; }
+  .back { display: inline-block; margin-top: 48px; font-family: 'DM Mono', monospace; font-size: 12px; color: #555; text-decoration: none; }
+  .back:hover { color: #c8f040; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="logo">Test<span>Pilot</span></div>
+  <h1>Privacy Policy</h1>
+  <p class="version">// Version 1.0 — Effective April 2026</p>
+
+  <p>This Privacy Policy explains how Sana Ventures Studio SL ("Company", "we", "us", or "our") collects, uses, and protects your personal data when you use TestPilot ("Service"). We are committed to complying with the EU General Data Protection Regulation (GDPR) and Spanish data protection law (LOPDGDD).</p>
+
+  <h2>1. Data Controller</h2>
+  <p><strong>Sana Ventures Studio SL</strong><br>Madrid, Spain<br>Contact: hello@testpilotapp.dev</p>
+
+  <h2>2. Data We Collect</h2>
+  <table>
+    <tr><th>Data</th><th>Why we collect it</th><th>Legal basis</th><th>Retention</th></tr>
+    <tr><td><strong>Email address</strong></td><td>Account creation, authentication via magic link, service communications</td><td>Contract performance</td><td>Until account deletion</td></tr>
+    <tr><td><strong>Plan / subscription status</strong></td><td>Feature access control, billing management</td><td>Contract performance</td><td>Until account deletion</td></tr>
+    <tr><td><strong>Test run history</strong></td><td>Test results, bug reports, screenshots you generate</td><td>Contract performance</td><td>Up to 500 most recent runs</td></tr>
+    <tr><td><strong>App URLs and credentials</strong></td><td>Required to perform tests you request. Credentials are used only during active test sessions and are not permanently stored.</td><td>Contract performance</td><td>Session only</td></tr>
+    <tr><td><strong>Claude API key</strong></td><td>Required to execute AI-powered tests. Stored only in your browser's local storage — never on our servers.</td><td>Contract performance</td><td>Browser local storage only</td></tr>
+    <tr><td><strong>Terms acceptance</strong></td><td>Legal compliance record</td><td>Legal obligation</td><td>Until account deletion</td></tr>
+    <tr><td><strong>Last login timestamp</strong></td><td>Security and account management</td><td>Legitimate interest</td><td>Until account deletion</td></tr>
+    <tr><td><strong>Traffic logs</strong></td><td>Analytics — page visits, referral source (no personal identifiers)</td><td>Legitimate interest</td><td>90 days rolling</td></tr>
+  </table>
+
+  <h2>3. Data We Do NOT Collect</h2>
+  <ul>
+    <li>We do not collect payment card details (handled by Stripe directly)</li>
+    <li>We do not store your Claude API key on our servers</li>
+    <li>We do not permanently store login credentials you provide for testing</li>
+    <li>We do not sell your data to third parties</li>
+    <li>We do not use your data for advertising purposes</li>
+  </ul>
+
+  <h2>4. Third-Party Services</h2>
+  <table>
+    <tr><th>Service</th><th>Purpose</th><th>Data shared</th></tr>
+    <tr><td><strong>Supabase</strong></td><td>Database hosting (EU region)</td><td>Email, plan, test history</td></tr>
+    <tr><td><strong>Stripe</strong></td><td>Payment processing</td><td>Email, payment details (we never see card numbers)</td></tr>
+    <tr><td><strong>Resend</strong></td><td>Transactional email</td><td>Your email address, email content</td></tr>
+    <tr><td><strong>Anthropic</strong></td><td>AI processing via your own API key</td><td>Test scenarios, screenshots (sent via your key)</td></tr>
+    <tr><td><strong>Microsoft Clarity</strong></td><td>Session recording and heatmaps</td><td>Anonymized browsing behavior</td></tr>
+    <tr><td><strong>Microsoft Azure</strong></td><td>Server hosting (EU — Ireland region)</td><td>All service data</td></tr>
+  </table>
+
+  <h2>5. Your Rights Under GDPR</h2>
+  <p>As an EU resident, you have the following rights regarding your personal data:</p>
+  <ul>
+    <li><strong>Right of access</strong> — Request a copy of all data we hold about you</li>
+    <li><strong>Right to rectification</strong> — Request correction of inaccurate data</li>
+    <li><strong>Right to erasure</strong> — Request deletion of your account and all associated data</li>
+    <li><strong>Right to restriction</strong> — Request we limit how we process your data</li>
+    <li><strong>Right to portability</strong> — Receive your data in a machine-readable format</li>
+    <li><strong>Right to object</strong> — Object to processing based on legitimate interest</li>
+    <li><strong>Right to withdraw consent</strong> — Where processing is based on consent</li>
+  </ul>
+  <p>To exercise any of these rights, contact us at <strong>hello@testpilotapp.dev</strong>. We will respond within 30 days.</p>
+  <p>You also have the right to lodge a complaint with the Spanish data protection authority: <strong>Agencia Española de Protección de Datos (AEPD)</strong> at www.aepd.es.</p>
+
+  <h2>6. Data Security</h2>
+  <p>We implement appropriate technical and organizational measures to protect your data, including:</p>
+  <ul>
+    <li>HTTPS encryption for all data in transit</li>
+    <li>Row-Level Security on all database tables</li>
+    <li>Session-based authentication with short-lived magic links</li>
+    <li>API key isolation — your Claude key never leaves your browser</li>
+  </ul>
+
+  <h2>7. Data Retention</h2>
+  <p>We retain your personal data for as long as your account is active. If you request account deletion, we will delete your data within 30 days, except where we are required to retain it by law.</p>
+
+  <h2>8. Cookies</h2>
+  <p>TestPilot uses the following:</p>
+  <ul>
+    <li><strong>tpsession</strong> — Authentication cookie, HttpOnly, expires in 30 days. Required for the Service to function.</li>
+    <li><strong>Microsoft Clarity</strong> — Session recording cookies for analytics. You may opt out via your browser settings.</li>
+  </ul>
+
+  <h2>9. Children</h2>
+  <p>TestPilot is not directed at children under 16. We do not knowingly collect data from children. If you believe a child has provided us with personal data, contact us immediately.</p>
+
+  <h2>10. Changes to This Policy</h2>
+  <p>We may update this Privacy Policy periodically. We will notify you of significant changes by requiring re-acceptance within the Service. The version number and effective date will be updated accordingly.</p>
+
+  <h2>11. Contact</h2>
+  <p>For privacy-related inquiries: <strong>hello@testpilotapp.dev</strong><br>Sana Ventures Studio SL — Madrid, Spain</p>
+
+  <a href="/" class="back">← Back to TestPilot</a>
+</div>
+</body>
+</html>

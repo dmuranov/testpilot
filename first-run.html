@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TestPilot — First run</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#080808;color:#f4f2ee;font-family:-apple-system,BlinkMacSystemFont,sans-serif;min-height:100vh;display:flex;flex-direction:column}
+  .wrap{max-width:720px;margin:0 auto;padding:32px 20px;width:100%;flex:1}
+  .topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:32px}
+  .brand{font-size:20px;font-weight:800}
+  .brand span{color:#c8f040}
+  .signin{font-size:13px;color:#8a8a8a;text-decoration:none}
+  .signin:hover{color:#c8f040}
+
+  .card{background:#0f0f0f;border:1px solid rgba(200,240,64,0.12);border-radius:6px;padding:36px 32px}
+  h1{font-size:28px;font-weight:800;margin-bottom:8px}
+  h1 span{color:#c8f040}
+  .sub{font-size:13px;color:#8a8a8a;margin-bottom:28px;font-family:'SF Mono','Monaco',monospace}
+  label{display:block;font-size:11px;color:#8a8a8a;font-family:monospace;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:6px;margin-top:18px}
+  label:first-of-type{margin-top:0}
+  input,textarea{width:100%;background:#080808;border:1px solid rgba(200,240,64,0.25);color:#fff;padding:13px 16px;font-size:14px;font-family:inherit;outline:none;border-radius:3px;-webkit-appearance:none;resize:vertical}
+  input:focus,textarea:focus{border-color:#c8f040}
+  button{width:100%;background:#c8f040;color:#080808;font-weight:800;font-size:14px;padding:14px;border:none;cursor:pointer;border-radius:3px;font-family:inherit;margin-top:24px;touch-action:manipulation}
+  button:hover{opacity:0.9}
+  button:disabled{opacity:0.4;cursor:not-allowed}
+  .hint{font-size:11px;color:#666;margin-top:16px;text-align:center;font-family:monospace}
+  .err{background:#2a0000;border:1px solid #ef4444;color:#ff8888;padding:11px 14px;font-size:13px;border-radius:3px;margin-top:16px;font-family:monospace}
+  .stream{background:#080808;border:1px solid #222;border-radius:3px;padding:16px;font-family:'SF Mono','Monaco',monospace;font-size:12px;color:#a8a8a8;max-height:340px;overflow-y:auto;line-height:1.7}
+  .stream .line{padding:2px 0}
+  .stream .ok{color:#c8f040}
+  .stream .info{color:#9090ff}
+  .stream .err{color:#ff8888;background:transparent;border:none;padding:0;margin:0}
+
+  /* Paywall */
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,0.8);display:none;align-items:center;justify-content:center;z-index:50;padding:20px}
+  .modal.open{display:flex}
+  .modal-card{background:#0f0f0f;border:1px solid rgba(200,240,64,0.2);border-radius:6px;padding:32px;max-width:780px;width:100%;max-height:90vh;overflow-y:auto}
+  .modal-h{font-size:22px;font-weight:800;margin-bottom:6px}
+  .modal-sub{font-size:13px;color:#8a8a8a;margin-bottom:24px;font-family:monospace}
+  .plans{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:20px}
+  .plan{background:#080808;border:1px solid #2a2a2a;border-radius:5px;padding:18px 16px;cursor:pointer;transition:all 0.15s;text-align:left}
+  .plan:hover{border-color:#c8f040;transform:translateY(-1px)}
+  .plan.featured{border-color:rgba(200,240,64,0.5)}
+  .plan-name{font-size:11px;font-family:monospace;color:#c8f040;letter-spacing:1px;margin-bottom:6px}
+  .plan-price{font-size:24px;font-weight:800;margin-bottom:4px}
+  .plan-price small{font-size:11px;color:#8a8a8a;font-weight:400}
+  .plan-line{font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace}
+  .later{background:transparent;color:#8a8a8a;border:1px solid #333;font-weight:400;font-size:13px;padding:10px;margin-top:0}
+  .later:hover{color:#fff;border-color:#666;opacity:1}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <div class="topbar">
+    <div class="brand">Test<span>Pilot</span></div>
+    <a href="/app" class="signin">Sign in →</a>
+  </div>
+
+  <!-- STEP 1: Email + URL modal (inline as first card) -->
+  <div class="card" id="step-start">
+    <h1>Run your first <span>test</span></h1>
+    <div class="sub">// free: 1 app, 1 test. no card required.</div>
+    <label for="f-email">Your email</label>
+    <input id="f-email" type="email" placeholder="you@company.com" autocomplete="email" inputmode="email" />
+    <label for="f-url">App URL</label>
+    <input id="f-url" type="url" placeholder="https://your-app.com" autocomplete="url" inputmode="url" />
+
+    <div style="margin-top:18px;padding:14px;background:#080808;border:1px solid #222;border-radius:3px">
+      <div style="font-size:11px;color:#8a8a8a;font-family:monospace;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:10px">App login (optional — leave blank if public)</div>
+      <label for="f-start-app-email" style="margin-top:0">App login email</label>
+      <input id="f-start-app-email" type="email" placeholder="testuser@your-app.com" autocomplete="off" />
+      <label for="f-start-app-pw">App login password</label>
+      <input id="f-start-app-pw" type="password" placeholder="••••••••" autocomplete="off" />
+      <div style="font-size:11px;color:#666;margin-top:8px;font-family:monospace">// give us creds for a test account so we can crawl past the login wall</div>
+    </div>
+
+    <div id="step-start-err" style="display:none" class="err"></div>
+    <button id="step-start-btn" onclick="startFunnel()">Continue →</button>
+    <div class="hint">we'll start crawling your app to learn what's there</div>
+  </div>
+
+  <!-- STEP 2: Learn streaming -->
+  <div class="card" id="step-learn" style="display:none">
+    <h1>Learning your <span>app</span></h1>
+    <div class="sub" id="step-learn-sub">// crawling pages and forms…</div>
+    <div class="stream" id="step-learn-stream"></div>
+  </div>
+
+  <!-- STEP 3: Scenario description -->
+  <div class="card" id="step-scenario" style="display:none">
+    <h1>Describe your <span>test</span></h1>
+    <div class="sub">// in plain english. example: "log in, create a new project called Test, verify it appears in the list"</div>
+    <label for="f-scenario">Scenario</label>
+    <textarea id="f-scenario" rows="5" placeholder="Log in, then…" maxlength="600"></textarea>
+    <label for="f-app-email">App login email <span style="color:#666;text-transform:none;font-weight:400">(if your app needs login — leave blank if public)</span></label>
+    <input id="f-app-email" type="email" placeholder="optional" autocomplete="off" />
+    <label for="f-app-pw">App login password</label>
+    <input id="f-app-pw" type="password" placeholder="optional" autocomplete="off" />
+    <div id="step-scenario-err" style="display:none" class="err"></div>
+    <button id="step-scenario-btn" onclick="runFunnelTest()">Run test →</button>
+  </div>
+
+  <!-- STEP 4: Test streaming -->
+  <div class="card" id="step-test" style="display:none">
+    <h1>Running your <span>test</span></h1>
+    <div class="sub">// the agent is acting on your app step-by-step</div>
+    <div class="stream" id="step-test-stream"></div>
+  </div>
+
+  <!-- STEP 5: Report -->
+  <div class="card" id="step-report" style="display:none">
+    <h1>Test <span id="report-status">complete</span></h1>
+    <div class="sub" id="report-sub">// review the steps below</div>
+    <div class="stream" id="step-report-stream" style="max-height:none"></div>
+    <div class="hint" style="margin-top:24px"><a href="/app" style="color:#c8f040">Open the dashboard →</a></div>
+  </div>
+</div>
+
+<!-- Paywall popup (shown over report) -->
+<div class="modal" id="paywall">
+  <div class="modal-card">
+    <div class="modal-h">That was your free run.</div>
+    <div class="modal-sub">// to run more tests or learn another app, choose a plan</div>
+    <div class="plans">
+      <div class="plan" onclick="checkout('onerun')">
+        <div class="plan-name">ONE TIME RUN</div>
+        <div class="plan-price">€5</div>
+        <div class="plan-line">1 app · unlimited scenario tests</div>
+      </div>
+      <div class="plan featured" onclick="checkout('starter')">
+        <div class="plan-name">STARTER</div>
+        <div class="plan-price">€29<small>/mo</small></div>
+        <div class="plan-line">3 apps · all scenario + interactive</div>
+      </div>
+      <div class="plan" onclick="checkout('pro')">
+        <div class="plan-name">PRO</div>
+        <div class="plan-price">€149<small>/mo</small></div>
+        <div class="plan-line">10 apps · + multi-role</div>
+      </div>
+      <div class="plan" onclick="checkout('agency')">
+        <div class="plan-name">AGENCY</div>
+        <div class="plan-price">€249<small>/mo</small></div>
+        <div class="plan-line">unlimited · + cross-app + security</div>
+      </div>
+    </div>
+    <button class="later" onclick="closePaywall()">Maybe later — show me the report</button>
+  </div>
+</div>
+
+<script>
+const state = { appId: null, testId: null, userEmail: null, appEmail: '', appPw: '' };
+
+function show(id) {
+  document.querySelectorAll('.card').forEach(c => c.style.display = 'none');
+  document.getElementById(id).style.display = 'block';
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function appendStream(streamId, line, kind) {
+  const el = document.getElementById(streamId);
+  const d = document.createElement('div');
+  d.className = 'line ' + (kind || '');
+  d.textContent = line;
+  el.appendChild(d);
+  el.scrollTop = el.scrollHeight;
+}
+
+function showErr(boxId, msg) {
+  const el = document.getElementById(boxId);
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+function clearErr(boxId) {
+  document.getElementById(boxId).style.display = 'none';
+}
+
+async function startFunnel() {
+  clearErr('step-start-err');
+  const email = document.getElementById('f-email').value.trim().toLowerCase();
+  const url = document.getElementById('f-url').value.trim();
+  const appEmail = document.getElementById('f-start-app-email').value.trim();
+  const appPw = document.getElementById('f-start-app-pw').value;
+  if (!email || !email.includes('@')) return showErr('step-start-err', 'Enter a valid email');
+  if (!url) return showErr('step-start-err', 'Enter the URL of the app you want to test');
+
+  const btn = document.getElementById('step-start-btn');
+  btn.disabled = true; btn.textContent = 'Starting…';
+  state.userEmail = email;
+  state.appEmail = appEmail;
+  state.appPw = appPw;
+
+  try {
+    const res = await fetch('/api/funnel/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userEmail: email, url }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      btn.disabled = false; btn.textContent = 'Continue →';
+      if (data.code === 'FREE_RUN_USED' || data.code === 'APP_SLOT_LIMIT') {
+        showErr('step-start-err', data.error + ' Sign in to choose a plan.');
+        return;
+      }
+      return showErr('step-start-err', data.error || 'Could not start');
+    }
+    // Begin Learn stream — pass app credentials so the crawl can log in.
+    show('step-learn');
+    document.getElementById('step-learn-sub').textContent = `// crawling ${data.app.url}…`;
+    runLearnStream({ url: data.app.url, userEmail: email, appEmail, appPw });
+
+    // Pre-fill the scenario step's app login fields so the user doesn't
+    // have to retype. They can still edit them before running the test.
+    const sEmail = document.getElementById('f-app-email');
+    const sPw = document.getElementById('f-app-pw');
+    if (sEmail && appEmail) sEmail.value = appEmail;
+    if (sPw && appPw) sPw.value = appPw;
+  } catch (e) {
+    btn.disabled = false; btn.textContent = 'Continue →';
+    showErr('step-start-err', 'Network error — try again');
+  }
+}
+
+async function runLearnStream({ url, userEmail, appEmail, appPw }) {
+  appendStream('step-learn-stream', '⏳ Starting deep crawl...', 'info');
+  try {
+    const res = await fetch('/api/learn', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url,
+        userEmail,
+        // App login creds for the crawl (empty strings = public app).
+        email: appEmail || '',
+        password: appPw || '',
+        freeLearn: true,
+      }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      appendStream('step-learn-stream', '❌ ' + (data.error || 'Crawl failed to start'), 'err');
+      return;
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const ev = JSON.parse(line.substring(6));
+          if (ev.appId) state.appId = ev.appId;
+          const kind = ev.phase === 'error' ? 'err' : ev.phase === 'done' ? 'ok' : '';
+          if (ev.message) appendStream('step-learn-stream', ev.message, kind);
+          if (ev.phase === 'done') {
+            // Move to scenario step
+            setTimeout(() => show('step-scenario'), 500);
+            return;
+          }
+          if (ev.phase === 'error') return;
+        } catch {}
+      }
+    }
+  } catch (e) {
+    appendStream('step-learn-stream', '❌ ' + e.message, 'err');
+  }
+}
+
+async function runFunnelTest() {
+  clearErr('step-scenario-err');
+  const scenario = document.getElementById('f-scenario').value.trim();
+  const appEmail = document.getElementById('f-app-email').value.trim();
+  const appPw = document.getElementById('f-app-pw').value;
+  if (!scenario) return showErr('step-scenario-err', 'Describe what you want to test');
+  if (scenario.split(/\s+/).filter(Boolean).length > 100) return showErr('step-scenario-err', 'Free run limited to 100 words. Trim it.');
+  if (!state.appId) return showErr('step-scenario-err', 'App not learned yet — please retry');
+
+  const btn = document.getElementById('step-scenario-btn');
+  btn.disabled = true; btn.textContent = 'Starting…';
+
+  try {
+    const res = await fetch('/api/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        appId: state.appId,
+        scenario,
+        email: appEmail,
+        password: appPw,
+        freeRun: true,
+        userEmail: state.userEmail,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.testId) {
+      btn.disabled = false; btn.textContent = 'Run test →';
+      return showErr('step-scenario-err', data.error || 'Could not start test');
+    }
+    state.testId = data.testId;
+    show('step-test');
+    streamTest(data.testId);
+  } catch (e) {
+    btn.disabled = false; btn.textContent = 'Run test →';
+    showErr('step-scenario-err', 'Network error — try again');
+  }
+}
+
+function streamTest(testId) {
+  appendStream('step-test-stream', '⏳ Test starting…', 'info');
+  const es = new EventSource('/api/test/' + testId + '/stream');
+  es.onmessage = (e) => {
+    try {
+      const ev = JSON.parse(e.data);
+      // Heartbeats keep the SSE alive during slow steps; don't stack them as
+      // repeated lines here.
+      if (ev.type === 'heartbeat') return;
+      const kind = ev.type === 'pass' ? 'ok' : ev.type === 'error' ? 'err' : ev.type === 'info' ? 'info' : '';
+      if (ev.message) appendStream('step-test-stream', ev.message, kind);
+      if (ev.type === 'summary' || ev.type === 'done' || ev.type === 'complete') {
+        es.close();
+        // Wait a beat for last events to render, then show paywall + report.
+        setTimeout(() => finishTest(testId), 600);
+      }
+    } catch {}
+  };
+  es.onerror = () => {
+    es.close();
+    // Even on stream error, try to fetch the final result.
+    setTimeout(() => finishTest(testId), 1000);
+  };
+}
+
+async function finishTest(testId) {
+  // Pull the final test record so we can render the report behind the paywall.
+  try {
+    const r = await fetch('/api/test/' + testId);
+    const data = await r.json();
+    renderReport(data);
+  } catch {
+    renderReport({ status: 'unknown', steps: [], bugs: [] });
+  }
+  show('step-report');
+  // Open paywall on top — user dismisses with "Maybe later" to see report.
+  document.getElementById('paywall').classList.add('open');
+}
+
+function renderReport(result) {
+  const root = document.getElementById('step-report-stream');
+  root.innerHTML = '';
+  const status = result?.status || 'incomplete';
+  document.getElementById('report-status').textContent =
+    status === 'completed' ? 'passed' :
+    status === 'completed_with_bugs' ? 'finished with issues' :
+    status === 'aborted_budget' ? 'aborted (budget)' :
+    status === 'blocked' ? 'blocked' : 'incomplete';
+  document.getElementById('report-sub').textContent =
+    `// ${(result.steps || []).length} steps · ${(result.bugs || []).length} bugs`;
+  for (const s of (result.steps || [])) {
+    appendStream('step-report-stream', `• step ${s.step} ${s.action}: ${s.outcome || ''}`, s.status === 'pass' ? 'ok' : 'err');
+  }
+  for (const b of (result.bugs || [])) {
+    appendStream('step-report-stream', `⚠ ${b.description || b}`, 'err');
+  }
+}
+
+function closePaywall() {
+  document.getElementById('paywall').classList.remove('open');
+}
+
+async function checkout(plan) {
+  // Hand off to the existing checkout endpoint. /api/checkout creates a
+  // Stripe session and returns a redirect URL.
+  try {
+    const res = await fetch('/api/billing/checkout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ plan }),
+    });
+    const data = await res.json();
+    if (data.url) {
+      window.location.href = data.url;
+    } else {
+      alert(data.error || 'Could not start checkout');
+    }
+  } catch {
+    alert('Network error — try again');
+  }
+}
+</script>
+</body>
+</html>

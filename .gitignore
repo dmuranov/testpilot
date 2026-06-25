@@ -1,0 +1,38 @@
+# ── Dependencies ─────────────────────────────
+node_modules/
+
+# ── Secrets — NEVER COMMIT ───────────────────
+.env
+.env.*
+
+# ── Backups / rollback points ────────────────
+*.bak
+*.bak*
+*.orig
+*.orig*
+*.save
+*~
+
+# ── Per-tenant runtime data & scan results ───
+platform-maps/
+recipes/
+screenshots/
+traffic-log.json
+sessions.json
+waitlist.json
+
+# ── Dev / ops scratch ────────────────────────
+_dev_utils/
+
+# ── Logs / misc ──────────────────────────────
+*.log
+*.out
+
+# ── Dev tests, fixtures & old artifacts (not part of the runtime baseline) ──
+test/
+tests/
+_bak/
+*.backup*
+*.migrated
+*.pdf
+*.xlsx

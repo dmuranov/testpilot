@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Interactive chat — TestPilot</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: #080808; color: #f0f0f0;
+    font-family: 'DM Mono', monospace;
+    font-size: 13px;
+    display: flex; flex-direction: column;
+  }
+  header {
+    padding: 8px 14px;
+    border-bottom: 1px solid #1f1f1f;
+    display: flex; align-items: center; justify-content: space-between;
+    flex-shrink: 0;
+  }
+  .title { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 13px; }
+  .title .id { color: #777; font-family: 'DM Mono', monospace; font-weight: 400; font-size: 10px; margin-left: 8px; }
+  .badge {
+    font-size: 10px; padding: 3px 8px; border-radius: 2px; font-weight: 700; border: 1px solid;
+  }
+  .badge.ready { color: #c8f040; border-color: rgba(200,240,64,0.4); background: rgba(200,240,64,0.08); }
+  .badge.busy { color: #eab308; border-color: rgba(234,179,8,0.4); background: rgba(234,179,8,0.08); }
+  .badge.error { color: #ef4444; border-color: rgba(239,68,68,0.4); background: rgba(239,68,68,0.08); }
+
+  .main { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 0; min-height: 0; }
+  .pane { display: flex; flex-direction: column; min-height: 0; }
+  .pane + .pane { border-left: 1px solid #1f1f1f; }
+
+  .messages { flex: 1; overflow-y: auto; padding: 12px 14px; }
+  .msg-row { padding: 8px 0; border-bottom: 1px dashed #141414; }
+  .msg-row:last-child { border-bottom: none; }
+  .msg-role {
+    font-size: 9px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.05em; margin-bottom: 4px; font-family: 'Syne', sans-serif;
+  }
+  .msg-row.user .msg-role { color: #c8f040; }
+  .msg-row.assistant .msg-role { color: #888; }
+  .msg-row.system .msg-role { color: #eab308; }
+  .msg-text { line-height: 1.5; color: #ddd; word-break: break-word; white-space: pre-wrap; }
+  .msg-row.system .msg-text { color: #888; font-style: italic; }
+
+  .screenshot-pane { padding: 10px 14px; background: #050505; overflow: auto; }
+  .screenshot-pane img {
+    width: 100%; height: auto; border: 1px solid #1f1f1f; border-radius: 2px;
+    display: block;
+  }
+  .screenshot-empty {
+    color: #555; font-style: italic; text-align: center; padding: 40px 0;
+  }
+
+  .input-row {
+    border-top: 1px solid #1f1f1f; padding: 10px 14px;
+    display: flex; gap: 8px; flex-shrink: 0;
+    background: #0a0a0a;
+  }
+  .input-row textarea {
+    flex: 1; background: #111; border: 1px solid #2a2a2a;
+    border-radius: 2px; color: #f0f0f0; padding: 8px 10px;
+    font-family: 'DM Mono', monospace; font-size: 13px;
+    resize: none; outline: none; min-height: 36px; max-height: 100px;
+  }
+  .input-row textarea:focus { border-color: #c8f040; }
+  .input-row button {
+    background: #c8f040; color: #080808; border: none;
+    padding: 0 16px; font-family: 'Syne', sans-serif; font-weight: 700;
+    font-size: 12px; border-radius: 2px; cursor: pointer; flex-shrink: 0;
+  }
+  .input-row button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .input-row button:not(:disabled):hover { background: #b8e030; }
+
+  .toolbar {
+    padding: 6px 14px; border-bottom: 1px solid #1f1f1f;
+    font-size: 10px; color: #888; display: flex; justify-content: space-between; align-items: center;
+    flex-shrink: 0;
+  }
+  .toolbar a { color: #c8f040; cursor: pointer; text-decoration: none; }
+  .toolbar a:hover { text-decoration: underline; }
+
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 2px; }
+
+  @media (max-width: 700px) {
+    .main { grid-template-columns: 1fr; }
+    .pane + .pane { border-left: none; border-top: 1px solid #1f1f1f; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="title">💬 Interactive chat <span class="id" id="session-id"></span></div>
+  <div class="badge ready" id="status">● Ready</div>
+</header>
+<div class="main">
+  <div class="pane">
+    <div class="messages" id="messages">
+      <div class="msg-row system">
+        <div class="msg-role">System</div>
+        <div class="msg-text">Session started. Type a command (e.g. "Click the login button", "What's on screen?", "Fill the email field with test@example.com").</div>
+      </div>
+    </div>
+    <form class="input-row" id="form">
+      <textarea id="input" placeholder="Type a command…" autofocus></textarea>
+      <button type="submit" id="send">Send</button>
+    </form>
+  </div>
+  <div class="pane">
+    <div class="toolbar">
+      <span>Browser screenshot</span>
+      <a id="refresh">↻ Refresh</a>
+    </div>
+    <div class="screenshot-pane" id="screenshot-pane">
+      <div class="screenshot-empty" id="screenshot-empty">Loading…</div>
+    </div>
+  </div>
+</div>
+<script>
+(function () {
+  // sessionId comes from the query string: /chat?session=<sessionId>
+  const params = new URLSearchParams(window.location.search);
+  const sessionId = params.get('session');
+  const status = document.getElementById('status');
+  const idEl = document.getElementById('session-id');
+  if (!sessionId) {
+    status.textContent = '❌ Missing session';
+    status.className = 'badge error';
+    return;
+  }
+  idEl.textContent = sessionId.substring(0, 12) + '…';
+
+  const messages = document.getElementById('messages');
+  const form = document.getElementById('form');
+  const input = document.getElementById('input');
+  const sendBtn = document.getElementById('send');
+  const refresh = document.getElementById('refresh');
+  const screenshotPane = document.getElementById('screenshot-pane');
+  const screenshotEmpty = document.getElementById('screenshot-empty');
+
+  function setStatus(text, cls) {
+    status.textContent = text;
+    status.className = 'badge ' + cls;
+  }
+
+  function escape(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function appendMessage(role, text) {
+    const row = document.createElement('div');
+    row.className = 'msg-row ' + role;
+    row.innerHTML =
+      '<div class="msg-role">' + role + '</div>' +
+      '<div class="msg-text">' + escape(text) + '</div>';
+    messages.appendChild(row);
+    messages.scrollTop = messages.scrollHeight;
+  }
+
+  function embedFetch(path, init = {}) {
+    init.headers = Object.assign({}, init.headers || {}, { 'X-TP-Embed': '1' });
+    return fetch(path, init);
+  }
+
+  async function loadScreenshot() {
+    try {
+      const res = await embedFetch('/api/chat/' + encodeURIComponent(sessionId) + '/screenshot');
+      if (!res.ok) {
+        screenshotEmpty.textContent = 'Screenshot unavailable (' + res.status + ')';
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      // Replace previous img if present
+      screenshotPane.innerHTML = '';
+      const img = document.createElement('img');
+      img.src = url;
+      img.onload = () => { /* keep URL until next refresh */ };
+      screenshotPane.appendChild(img);
+    } catch (err) {
+      screenshotEmpty.textContent = 'Screenshot error: ' + err.message;
+    }
+  }
+
+  async function sendMessage(text) {
+    appendMessage('user', text);
+    sendBtn.disabled = true;
+    input.disabled = true;
+    setStatus('● Thinking…', 'busy');
+    try {
+      const res = await embedFetch('/api/chat/' + encodeURIComponent(sessionId) + '/message', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text }),
+      });
+      if (!res.ok) {
+        const errBody = await res.text();
+        appendMessage('system', 'Error ' + res.status + ': ' + errBody);
+        setStatus('⚠ Error', 'error');
+        return;
+      }
+      const data = await res.json();
+      const reply = data.reply || data.message || '(no reply)';
+      appendMessage('assistant', reply);
+      // Refresh screenshot — the action likely changed the page
+      await loadScreenshot();
+      setStatus('● Ready', 'ready');
+    } catch (err) {
+      appendMessage('system', 'Network error: ' + err.message);
+      setStatus('⚠ Error', 'error');
+    } finally {
+      sendBtn.disabled = false;
+      input.disabled = false;
+      input.value = '';
+      input.focus();
+    }
+  }
+
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text || sendBtn.disabled) return;
+    sendMessage(text);
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      form.requestSubmit();
+    }
+  });
+  refresh.addEventListener('click', loadScreenshot);
+
+  // Initial load
+  loadScreenshot();
+})();
+</script>
+</body>
+</html>
