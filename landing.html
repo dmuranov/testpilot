@@ -1072,53 +1072,7 @@
   </div>
 </section>
 
-<!-- EARLY TESTER INVITE -->
-<section class="section" id="testers" style="padding-top:0;padding-bottom:80px">
-  <div style="background:var(--dim);border:1px solid rgba(200,240,64,0.15);padding:64px;max-width:800px;margin:0 auto;position:relative;z-index:1">
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:48px;align-items:center">
-      <div>
-        <p class="section-tag" style="margin-bottom:16px">// early testers</p>
-        <h2 style="font-size:clamp(24px,3vw,40px);letter-spacing:-2px;margin-bottom:16px">Build with us.<br>6 months free.</h2>
-        <p style="font-family:'DM Mono',monospace;font-size:13px;color:var(--muted);line-height:1.8;margin-bottom:24px">We're looking for <strong style="color:var(--white)">5 builders</strong> to test TestPilot for free for 6 months. In exchange we want one thing: <strong style="color:var(--accent)">brutal honest feedback.</strong></p>
-        <p style="font-family:'DM Mono',monospace;font-size:12px;color:var(--muted);line-height:1.8">If it breaks, tell us. If it works, tell your community. You keep your Claude API key — no hidden costs ever.</p>
-      </div>
-      <div style="display:flex;flex-direction:column;gap:16px">
-        <div style="background:rgba(200,240,64,0.05);border:1px solid rgba(200,240,64,0.1);padding:16px">
-          <div style="font-size:12px;font-family:'DM Mono',monospace;color:var(--accent);margin-bottom:6px">// what you get</div>
-          <ul style="list-style:none;display:flex;flex-direction:column;gap:8px">
-            <li style="font-size:13px;font-family:'DM Mono',monospace;color:var(--white);display:flex;gap:8px"><span style="color:var(--accent)">→</span>Full Agency access, 6 months free</li>
-            <li style="font-size:13px;font-family:'DM Mono',monospace;color:var(--white);display:flex;gap:8px"><span style="color:var(--accent)">→</span>Direct line to the founder</li>
-            <li style="font-size:13px;font-family:'DM Mono',monospace;color:var(--white);display:flex;gap:8px"><span style="color:var(--accent)">→</span>Shape the product roadmap</li>
-            <li style="font-size:13px;font-family:'DM Mono',monospace;color:var(--white);display:flex;gap:8px"><span style="color:var(--accent)">→</span>Your BYOK key — you control AI costs</li>
-          </ul>
-        </div>
-        <form id="tester-form" onsubmit="submitTester(event)" style="display:flex;gap:8px">
-          <input type="email" id="tester-email" placeholder="your@email.com" required style="flex:1;background:#080808;border:1px solid rgba(200,240,64,0.3);color:#fff;font-family:'DM Mono',monospace;font-size:13px;padding:12px 14px;border-radius:2px;outline:none" />
-          <button type="submit" style="background:var(--accent);color:#080808;font-family:'Syne',sans-serif;font-weight:700;font-size:13px;padding:12px 18px;border:none;border-radius:2px;cursor:pointer;white-space:nowrap">Apply →</button>
-        </form>
-        <p id="tester-msg" style="font-family:'DM Mono',monospace;font-size:12px;color:var(--accent);display:none;margin-top:8px">✓ Got it — we'll be in touch soon.</p>
-        <p style="font-size:11px;font-family:'DM Mono',monospace;color:var(--muted);text-align:center;margin-top:8px">5 spots only · Bubble, Base44, Softr, Webflow builders preferred</p>
-      </div>
-    </div>
-  </div>
-</section>
 
-<!-- EMAIL COLLECTION -->
-<section class="section" style="padding-top:0;padding-bottom:80px" id="waitlist">
-  <div style="background:var(--dim);padding:64px;max-width:700px;margin:0 auto;text-align:center;position:relative;z-index:1">
-    <p class="section-tag" style="text-align:center;margin-bottom:16px">// early access</p>
-    <h2 style="font-size:clamp(28px,4vw,48px);letter-spacing:-2px;margin-bottom:16px">Get notified at launch.</h2>
-    <p style="font-family:'DM Mono',monospace;font-size:13px;color:var(--muted);margin-bottom:32px;line-height:1.7">Join the waitlist and get <strong style="color:var(--white)">3 free test runs</strong> when we launch. No spam, just the launch email.</p>
-    <form id="waitlist-form" onsubmit="submitWaitlist(event)" style="display:flex;gap:8px;max-width:480px;margin:0 auto">
-      <input type="email" id="waitlist-email" placeholder="your@email.com" required
-        style="flex:1;background:var(--black);border:1px solid rgba(200,240,64,0.3);color:var(--white);font-family:'DM Mono',monospace;font-size:13px;padding:14px 16px;border-radius:2px;outline:none" />
-      <button type="submit" style="background:var(--accent);color:#080808;font-family:'Syne',sans-serif;font-weight:700;font-size:14px;padding:14px 24px;border:none;border-radius:2px;cursor:pointer;white-space:nowrap">
-        Join Waitlist
-      </button>
-    </form>
-    <p id="waitlist-msg" style="font-family:'DM Mono',monospace;font-size:12px;margin-top:16px;color:var(--accent);display:none">✓ You're on the list. We'll be in touch.</p>
-  </div>
-</section>
 
 <!-- CTA -->
 <section class="cta-section">
@@ -1183,18 +1137,6 @@
     });
   }, { threshold: 0.1 });
   reveals.forEach(r => obs.observe(r));
-  // Tester form
-  async function submitTester(e) {
-    e.preventDefault();
-    const email = document.getElementById('tester-email').value;
-    fetch('/api/waitlist', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, type: 'tester' })
-    }).catch(() => {});
-    document.getElementById('tester-form').style.display = 'none';
-    document.getElementById('tester-msg').style.display = 'block';
-  }
 
 </script>
 
