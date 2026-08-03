@@ -2339,10 +2339,20 @@ async function selectFromDropdown(page, triggerText, optionText) {
       () => page.locator(`div[class*="item"]:has-text("${optionText}")`).first(),
       () => page.locator(`span:has-text("${optionText}")`).first(),
     ];
+    // Never treat a navigation element as a dropdown option. Radix Select
+    // renders options in a portal; when the popover fails to open, the broad
+    // li/div/span strategies above can match a NAV item that happens to share
+    // the requested option's name — e.g. Fixera's "Contratas" sidebar tab —
+    // and the tool would report a SUCCESSFUL select that only navigated. That
+    // is a trust violation (a pass that didn't do the thing). Skip anything
+    // inside a navigation landmark.
+    const NAV_LANDMARK = 'nav, [role="navigation"], header, aside, [role="menubar"], [role="tablist"]';
     for (const strat of optionStrats) {
       try {
         const opt = strat();
         if (await opt.isVisible({ timeout: 2000 })) {
+          const inNav = await opt.evaluate((el, navSel) => !!el.closest(navSel), NAV_LANDMARK).catch(() => false);
+          if (inNav) continue;
           const txt = ((await opt.textContent().catch(() => '')) || '').trim();
           await opt.click();
           await page.waitForTimeout(500);
@@ -2352,9 +2362,10 @@ async function selectFromDropdown(page, triggerText, optionText) {
     }
     try {
       const clickedText = await page.evaluate((val) => {
+        const NAV = 'nav, [role="navigation"], header, aside, [role="menubar"], [role="tablist"]';
         const els = document.querySelectorAll('[role="option"], [cmdk-item], [data-radix-collection-item], li, div, span');
         for (const el of els) {
-          if (el.offsetParent !== null && el.textContent.trim().includes(val) && el.textContent.trim().length < val.length + 40) {
+          if (el.offsetParent !== null && !el.closest(NAV) && el.textContent.trim().includes(val) && el.textContent.trim().length < val.length + 40) {
             const t = el.textContent.trim(); el.click(); return t;
           }
         }
@@ -2364,7 +2375,8 @@ async function selectFromDropdown(page, triggerText, optionText) {
     } catch {}
     try {
       const res = await page.evaluate(({ sel, want }) => {
-        const opts = [...document.querySelectorAll(sel)].filter(e => e.offsetParent !== null);
+        const NAV = 'nav, [role="navigation"], header, aside, [role="menubar"], [role="tablist"]';
+        const opts = [...document.querySelectorAll(sel)].filter(e => e.offsetParent !== null && !e.closest(NAV));
         const texts = opts.map(e => (e.textContent || '').trim()).filter(Boolean);
         const w = (want || '').toLowerCase().trim();
         if (w) {
