@@ -1502,80 +1502,6 @@ async function ssLoadReports() {
   }
   .chat-upload-btn:hover { background: var(--bg-hover); color: var(--text); }
 
-  /* ── MULTI-APP ── */
-  .multi-apps-config { display: flex; flex-direction: column; gap: 14px; }
-
-  .multi-app-block {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-lg);
-    padding: 16px;
-  }
-
-  .multi-role-row {
-    display: flex;
-    gap: 8px;
-    align-items: flex-end;
-    margin-top: 8px;
-  }
-
-  .multi-role-row .form-group { flex: 1; margin-bottom: 0; }
-
-  .multi-sessions-bar {
-    display: flex;
-    gap: 6px;
-    padding: 10px 0;
-    flex-wrap: wrap;
-  }
-
-  .multi-role-chip {
-    padding: 6px 12px;
-    border-radius: 99px;
-    font-size: 12px;
-    font-weight: 600;
-    cursor: pointer;
-    border: 2px solid var(--border);
-    background: var(--bg-card);
-    color: var(--text-dim);
-    transition: all 0.15s;
-    font-family: inherit;
-  }
-
-  .multi-role-chip:hover { border-color: var(--accent); }
-  .multi-role-chip.active { border-color: var(--accent); background: var(--accent-glow); color: var(--accent); }
-  .multi-role-chip.connected { border-color: var(--green); }
-  .multi-role-chip.active.connected { border-color: var(--accent); }
-
-  .multi-screenshot-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-    gap: 10px;
-    margin-top: 12px;
-  }
-
-  .multi-screen-card {
-    background: var(--bg-card);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    overflow: hidden;
-    cursor: pointer;
-    transition: border-color 0.15s;
-  }
-
-  .multi-screen-card:hover { border-color: var(--accent); }
-  .multi-screen-card.active { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow); }
-
-  .multi-screen-card img { width: 100%; height: 160px; object-fit: cover; object-position: top; display: block; }
-
-  .multi-screen-label {
-    padding: 8px 10px;
-    font-size: 12px;
-    font-weight: 600;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-  }
-
   /* ── SECURITY ── */
   .sec-matrix {
     display: flex;
@@ -1996,9 +1922,9 @@ function hasFeature(feature) {
     onerun:  ['scenario'],
     starter: ['scenario', 'interactive', 'stagingsafe'],
     pro:     ['scenario', 'interactive', 'multirole', 'stagingsafe'],
-    agency:  ['scenario', 'interactive', 'multirole', 'crossapp', 'security', 'stagingsafe'],
-    admin:   ['scenario', 'interactive', 'multirole', 'crossapp', 'security', 'stagingsafe'],
-    tester:  ['scenario', 'interactive', 'multirole', 'crossapp', 'security', 'stagingsafe']
+    agency:  ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe'],
+    admin:   ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe'],
+    tester:  ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe']
   };
   return (features[plan] || features.free).includes(feature);
 }
@@ -2047,7 +1973,7 @@ function showFunnelPaywall(reason) {
           <div onclick="funnelCheckout('agency')" style="background:#080808;border:1px solid #2a2a2a;border-radius:5px;padding:18px 16px;cursor:pointer">
             <div style="font-size:11px;font-family:monospace;color:#c8f040;letter-spacing:1px;margin-bottom:6px">AGENCY</div>
             <div style="font-size:24px;font-weight:800">€249<span style="font-size:11px;color:#8a8a8a;font-weight:400">/mo</span></div>
-            <div style="font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace">unlimited · + cross-app + security</div>
+            <div style="font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace">unlimited · + security</div>
           </div>
         </div>
         <button onclick="closeFunnelPaywall()" style="background:transparent;color:#8a8a8a;border:1px solid #333;font-weight:400;font-size:13px;padding:10px;border-radius:3px;width:100%;cursor:pointer;font-family:inherit">Maybe later</button>
@@ -2227,15 +2153,6 @@ let state = {
   chatSession: null,
   chatMessages: [],
   chatLoading: false,
-  // Multi-app state
-  multiConfig: { apps: [{ url: '', roles: [{ name: '', email: '', password: '' }] }] },
-  multiSessions: {},
-  multiMode: 'setup',
-  multiMessages: [],
-  multiActiveRole: null,
-  multiStream: [],
-  multiLoading: false,
-  multiScenario: '',
   // Multi-role state (same app, sequential roles)
   multiRoleConfig: { appId: '', roles: [
     { name: 'Role 1', email: '', password: '', scenario: '' },
@@ -2318,10 +2235,6 @@ function render() {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
           Multi-Role <span style="font-size:9px;font-weight:700;background:${hasFeature('multirole') ? 'rgba(251,191,36,0.15)' : 'rgba(239,68,68,0.1)'};color:${hasFeature('multirole') ? '#f59e0b' : '#ef4444'};border:1px solid ${hasFeature('multirole') ? 'rgba(251,191,36,0.3)' : 'rgba(239,68,68,0.3)'};border-radius:2px;padding:1px 5px;margin-left:4px">${hasFeature('multirole') ? 'BETA' : '🔒 Pro'}</span>
         </button>
-        <button class="nav-btn ${state.view === 'multi' ? 'active' : ''}" onclick="gatedNavigate('multi', 'crossapp')" data-tooltip="Test multiple different apps with multiple roles simultaneously. Open live browser sessions for each role and orchestrate cross-app workflows.">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="8" height="8" rx="1"/><rect x="14" y="3" width="8" height="8" rx="1"/><path d="M6 11v4a1 1 0 001 1h10a1 1 0 001-1v-4"/><line x1="12" y1="11" x2="12" y2="16"/></svg>
-          Cross-App <span style="font-size:9px;font-weight:700;background:${hasFeature('crossapp') ? 'rgba(251,191,36,0.15)' : 'rgba(239,68,68,0.1)'};color:${hasFeature('crossapp') ? '#f59e0b' : '#ef4444'};border:1px solid ${hasFeature('crossapp') ? 'rgba(251,191,36,0.3)' : 'rgba(239,68,68,0.3)'};border-radius:2px;padding:1px 5px;margin-left:4px">${hasFeature('crossapp') ? 'BETA' : '🔒 Agency'}</span>
-        </button>
         <button class="nav-btn ${state.view === 'security' ? 'active' : ''}" onclick="gatedNavigate('security', 'security')" data-tooltip="Multi-tenant security testing. Logs in as two different users and checks that User A's data is invisible to User B. Tests IDOR, URL manipulation, session leakage and API access.">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
           Security ${!hasFeature('security') ? '<span style="font-size:9px;font-weight:700;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.3);border-radius:2px;padding:1px 5px;margin-left:4px">🔒 Agency</span>' : ''}
@@ -2400,7 +2313,6 @@ function renderView() {
     case 'test-detail': return renderTestDetail();
     case 'history': return renderHistory();
     case 'chat': return renderChat();
-    case 'multi': return renderMulti();
     case 'multirole': return renderMultiRole();
     case 'security': return renderSecurity();
     case 'staging-safe': return renderStagingSafe();
@@ -2482,6 +2394,19 @@ function renderLearn() {
         <label>App Description (optional)</label>
         <textarea class="form-textarea" id="learn-desc" placeholder="Brief description: e.g. 'Property management tool for contractors in Spanish'"></textarea>
       </div>
+      <details style="margin-bottom:12px">
+        <summary style="cursor:pointer;font-size:12px;color:var(--text-dim);user-select:none">
+          Advanced — bring your own session <span style="color:var(--text-muted)">(for SSO / OAuth / MFA / CAPTCHA apps)</span>
+        </summary>
+        <div style="margin-top:8px">
+          <textarea class="form-textarea" id="learn-session-state"
+            placeholder='Paste a Playwright storageState JSON or a cookies array. When provided, TestPilot skips login entirely and crawls with your session — works for SSO/MFA/CAPTCHA-walled apps. Capture with: npx playwright codegen --save-storage=state.json https://your-app.com'
+            style="min-height:80px;font-family:'DM Mono',monospace;font-size:11px"></textarea>
+          <div style="font-size:11px;font-family:'DM Mono',monospace;color:var(--text-muted);margin-top:4px">
+            // bearer-equivalent — never stored on disk · leaves email/password unused
+          </div>
+        </div>
+      </details>
       <button class="btn btn-primary" onclick="startLearn()" id="learn-btn" ${state.loading ? 'disabled' : ''}>
         ${state.loading ? '<span class="loader"></span> Learning...' : '🧠 Start Learning'}
       </button>
@@ -3222,209 +3147,6 @@ function cancelMultiRole() {
   render();
 }
 
-function renderMulti() {
-  if (state.multiMode === 'setup') return renderMultiSetup();
-  return renderMultiActive();
-}
-
-function renderMultiSetup() {
-  const cfg = state.multiConfig;
-
-  return `
-    <div class="page-header">
-      <h2>Multi-App Testing</h2>
-    </div>
-
-    <div class="card" style="max-width:700px">
-      <div class="card-title" style="margin-bottom:16px">Configure Apps & Roles</div>
-      <div class="multi-apps-config">
-        ${cfg.apps.map((app, ai) => `
-          <div class="multi-app-block">
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-              <span style="font-size:13px;font-weight:600;color:var(--accent)">App ${ai + 1}</span>
-              ${ai > 0 ? `<button class="btn btn-danger btn-sm" onclick="multiRemoveApp(${ai})">Remove</button>` : ''}
-            </div>
-            <div class="form-group">
-              <label>App URL</label>
-              <select class="form-input" onchange="multiSetAppUrl(${ai}, this.value)">
-                <option value="">— Select a learned app —</option>
-                ${state.apps.map(a => `<option value="${a.appId}" ${app.appId === a.appId ? 'selected' : ''}>${a.summary?.appName || a.url}</option>`).join('')}
-                <option value="__custom" ${app.appId === '__custom' ? 'selected' : ''}>Custom URL...</option>
-              </select>
-            </div>
-            ${app.appId === '__custom' ? `
-            <div class="form-group">
-              <label>Custom URL</label>
-              <input class="form-input" value="${escapeHtml(app.url || '')}" onchange="multiSetCustomUrl(${ai}, this.value)" placeholder="https://..." />
-            </div>` : ''}
-            <div style="font-size:12px;font-weight:600;color:var(--text-dim);margin:10px 0 4px">Roles</div>
-            ${app.roles.map((role, ri) => `
-              <div class="multi-role-row">
-                <div class="form-group">
-                  <label>Role Name</label>
-                  <input class="form-input" value="${escapeHtml(role.name)}" placeholder="e.g. Dispatcher" onchange="multiSetRole(${ai},${ri},'name',this.value)" />
-                </div>
-                <div class="form-group">
-                  <label>Email</label>
-                  <input class="form-input" value="${escapeHtml(role.email)}" placeholder="user@app.com" onchange="multiSetRole(${ai},${ri},'email',this.value)" />
-                </div>
-                <div class="form-group">
-                  <label>Password</label>
-                  <input class="form-input" type="password" value="${escapeHtml(role.password)}" placeholder="••••" onchange="multiSetRole(${ai},${ri},'password',this.value)" />
-                </div>
-                ${app.roles.length > 1 ? `<button class="btn btn-danger btn-sm" onclick="multiRemoveRole(${ai},${ri})" style="margin-bottom:0">✕</button>` : ''}
-              </div>
-            `).join('')}
-            <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="multiAddRole(${ai})">+ Add Role</button>
-          </div>
-        `).join('')}
-      </div>
-      <button class="btn btn-ghost" style="margin-top:12px" onclick="multiAddApp()">+ Add Another App</button>
-    </div>
-
-    <div class="card" style="max-width:700px;margin-top:16px">
-      <div class="card-title" style="margin-bottom:12px">Launch Mode</div>
-      <div style="display:flex;gap:10px">
-        <button class="btn btn-primary" onclick="multiLaunch('conversational')" ${state.multiLoading ? 'disabled' : ''}>
-          ${state.multiLoading ? '<span class="loader"></span>' : '💬'} Conversational
-        </button>
-        <button class="btn btn-ghost" onclick="multiLaunch('autonomous')" ${state.multiLoading ? 'disabled' : ''}>
-          ▶ Autonomous
-        </button>
-      </div>
-      ${state.multiLoading ? '<div style="margin-top:8px;font-size:12px;color:var(--text-dim)">Launching browser sessions and logging in...</div>' : ''}
-    </div>
-
-    ${state.multiMode === 'setup' && state.multiStream.length > 0 ? `
-    <div class="card" style="max-width:700px;margin-top:12px">
-      <div class="test-stream">
-        ${state.multiStream.map(renderStepLine).join('')}
-      </div>
-    </div>` : ''}`;
-}
-
-function renderMultiActive() {
-  const roleKeys = Object.keys(state.multiSessions);
-  const activeSession = state.multiActiveRole ? state.multiSessions[state.multiActiveRole] : null;
-
-  if (state.multiMode === 'autonomous') {
-    return `
-      <div class="page-header">
-        <div><h2>Multi-App Test — Autonomous</h2></div>
-        <div style="display:flex;gap:8px">
-          ${state.multiLoading ? `<button class="btn btn-danger" onclick="cancelMultiRunAuto()">✕ Stop Scenario</button>` : ''}
-          <button class="btn btn-danger" onclick="multiEnd()">End All Sessions</button>
-        </div>
-      </div>
-
-      <div class="card" style="max-width:700px">
-        <div class="form-group">
-          <label>Multi-Role Scenario</label>
-          <textarea class="form-textarea" id="multi-scenario" placeholder="Write steps with [Role @ App] prefixes:
-[Dispatcher @ Municipality] Find job card #123 and send to contratistas
-[Contractor @ Fixera Pro] See the new job card and bid on it
-[Dispatcher @ Municipality] Accept the bid from the contractor
-[Contractor @ Fixera Pro] Mark the job as started" style="min-height:180px">${escapeHtml(state.multiScenario || '')}</textarea>
-        </div>
-        <button class="btn btn-primary" onclick="multiRunAuto()" ${state.multiLoading ? 'disabled' : ''}>
-          ${state.multiLoading ? '<span class="loader"></span> Running...' : '▶ Run Scenario'}
-        </button>
-      </div>
-
-      <div class="multi-sessions-bar">
-        ${roleKeys.map(k => `
-          <span class="multi-role-chip ${state.multiActiveRole === k ? 'active' : ''} connected">${escapeHtml(k)}</span>
-        `).join('')}
-      </div>
-
-      ${state.multiStream.length > 0 ? `
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">Execution Log</div>
-          <button class="btn btn-ghost btn-sm" onclick="copyMultiDebug()">📋 Copy Debug</button>
-        </div>
-        <div class="test-stream" style="max-height:400px">
-          ${state.multiStream.map(renderStepLine).join('')}
-        </div>
-      </div>` : ''}
-
-      <div class="multi-screenshot-grid">
-        ${roleKeys.map(k => {
-          const s = state.multiSessions[k];
-          const shotUrl = s.screenshot ? `${API}${s.screenshot}` : '';
-          return `<div class="multi-screen-card ${state.multiActiveRole === k ? 'active' : ''}">
-            ${s.screenshot ? `<img src="${escapeHtml(shotUrl)}" onclick="showModal(${jsAttr(shotUrl)})" />` : '<div style="height:160px;display:flex;align-items:center;justify-content:center;color:var(--text-muted)">No screenshot</div>'}
-            <div class="multi-screen-label">
-              <span>${escapeHtml(k)}</span>
-              <span class="badge badge-green" style="font-size:10px">connected</span>
-            </div>
-          </div>`;
-        }).join('')}
-      </div>`;
-  }
-
-  // Conversational mode
-  const activeShotUrl = activeSession?.screenshot ? `${API}${activeSession.screenshot}` : '';
-  const placeholder = state.multiActiveRole ? `Tell ${state.multiActiveRole} what to do...` : 'Select a role first';
-  return `
-    <div class="page-header">
-      <div><h2>Multi-App Test — Conversational</h2></div>
-      <button class="btn btn-danger" onclick="multiEnd()">End All Sessions</button>
-    </div>
-
-    <div class="multi-sessions-bar">
-      ${roleKeys.map(k => {
-        return `<button class="multi-role-chip ${state.multiActiveRole === k ? 'active' : ''} connected" onclick="multiSwitchRole(${jsAttr(k)})">
-          ${escapeHtml(k)}
-        </button>`;
-      }).join('')}
-    </div>
-
-    <div class="chat-container">
-      <div class="chat-panel">
-        <div style="padding:10px 14px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
-          <div style="font-size:13px;font-weight:600">${state.multiActiveRole ? `Acting as: <span style="color:var(--accent)">${escapeHtml(state.multiActiveRole)}</span>` : 'Select a role above'}</div>
-        </div>
-        <div class="chat-messages" id="multi-messages">
-          ${state.multiMessages.map(m => {
-            const roleTag = m.roleKey ? `<span style="font-size:10px;color:var(--accent);font-family:'JetBrains Mono',monospace">[${escapeHtml(m.roleKey)}]</span> ` : '';
-            if (m.role === 'user') {
-              return `<div class="chat-msg chat-msg-user">
-                <div class="chat-bubble">${roleTag}${escapeHtml(m.content)}</div>
-              </div>`;
-            } else {
-              const msgShotUrl = m.screenshot ? `${API}${m.screenshot}` : '';
-              return `<div class="chat-msg chat-msg-assistant">
-                <div class="chat-bubble">${roleTag}${escapeHtml(m.content)}</div>
-                ${m.actions?.length ? `<div class="chat-actions">
-                  ${m.actions.map(a => `<div class="chat-action-line ${a.success === false ? 'chat-action-fail' : 'chat-action-pass'}">${escapeHtml(a.action)} → ${escapeHtml(a.outcome)}</div>`).join('')}
-                </div>` : ''}
-                ${m.screenshot ? `<img src="${escapeHtml(msgShotUrl)}" style="max-width:200px;border-radius:6px;margin-top:6px;cursor:pointer" onclick="showModal(${jsAttr(msgShotUrl)})" />` : ''}
-              </div>`;
-            }
-          }).join('')}
-          ${state.multiLoading ? '<div class="chat-msg chat-msg-assistant"><div class="chat-bubble"><span class="loader"></span> Thinking...</div></div>' : ''}
-        </div>
-        <div class="chat-input-area">
-          <textarea class="chat-input" id="multi-input" placeholder="${escapeHtml(placeholder)}" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();multiSendChat()}" ${!state.multiActiveRole ? 'disabled' : ''}></textarea>
-          <button class="btn btn-primary" onclick="multiSendChat()" ${state.multiLoading || !state.multiActiveRole ? 'disabled' : ''}>Send</button>
-        </div>
-      </div>
-      <div class="chat-screenshot-panel">
-        <div class="chat-screenshot-header">
-          <span>${escapeHtml(state.multiActiveRole || 'No role selected')}</span>
-          <button class="btn btn-ghost btn-sm" onclick="multiRefreshScreenshot()">🔄</button>
-        </div>
-        ${activeSession?.screenshot ? `<img class="chat-screenshot-img" src="${escapeHtml(activeShotUrl)}" onclick="showModal(${jsAttr(activeShotUrl)})" />` : '<div style="padding:40px;text-align:center;color:var(--text-muted)">Select a role to see its view</div>'}
-        <div class="chat-screenshot-url">${escapeHtml(activeSession?.url || '')}</div>
-      </div>
-    </div>`;
-}
-
-// ═══════════════════════════════════════════════════════════════
-// SECURITY VIEW
-// ═══════════════════════════════════════════════════════════════
-
 function renderSecurity() {
   if (state.secPhase === 'setup') return renderSecSetup();
   if (state.secPhase === 'matrix') return renderSecMatrix();
@@ -4009,9 +3731,10 @@ async function startLearn() {
   const email = noLogin ? '' : document.getElementById('learn-email')?.value?.trim();
   const password = noLogin ? '' : document.getElementById('learn-password')?.value;
   const desc = document.getElementById('learn-desc')?.value?.trim();
+  const learnSessionRaw = document.getElementById('learn-session-state')?.value?.trim();
 
   if (!url) { alert('App URL is required'); return; }
-  if (!noLogin && (!email || !password)) { alert('Login email and password are required, or check "No login required"'); return; }
+  if (!noLogin && !learnSessionRaw && (!email || !password)) { alert('Login email and password are required — or check "No login required", or paste a session under Advanced'); return; }
 
   const isFreeUser = currentUser?.plan === 'free';
   const freeRunUsed = currentUser?.free_run_used === true;
@@ -4027,7 +3750,7 @@ async function startLearn() {
     const res = await fetch(`${API}/api/learn`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, email, password, description: desc, apiKey: getApiKey(), freeLearn: canLearnFree, userEmail: currentUser?.email })
+      body: JSON.stringify({ url, email, password, description: desc, apiKey: getApiKey(), freeLearn: canLearnFree, userEmail: currentUser?.email, ...(learnSessionRaw ? { sessionState: learnSessionRaw } : {}) })
     });
 
     // Funnel rework: 402 from /api/learn means slot limit hit. Pop the
@@ -4484,392 +4207,6 @@ function handleImageUpload(event) {
 
 // ═══════════════════════════════════════════════════════════════
 // MULTI-APP ACTIONS
-// ═══════════════════════════════════════════════════════════════
-
-function multiAddApp() {
-  state.multiConfig.apps.push({ url: '', roles: [{ name: '', email: '', password: '' }] });
-  render();
-}
-
-function multiRemoveApp(ai) {
-  state.multiConfig.apps.splice(ai, 1);
-  render();
-}
-
-function multiSetAppUrl(ai, appId) {
-  state.multiConfig.apps[ai].appId = appId;
-  if (appId !== '__custom') {
-    const app = state.apps.find(a => a.appId === appId);
-    state.multiConfig.apps[ai].url = app?.url || '';
-  }
-  render();
-}
-
-function multiSetCustomUrl(ai, url) {
-  state.multiConfig.apps[ai].url = url;
-}
-
-function multiAddRole(ai) {
-  state.multiConfig.apps[ai].roles.push({ name: '', email: '', password: '' });
-  render();
-}
-
-function multiRemoveRole(ai, ri) {
-  state.multiConfig.apps[ai].roles.splice(ri, 1);
-  render();
-}
-
-function multiSetRole(ai, ri, field, value) {
-  state.multiConfig.apps[ai].roles[ri][field] = value;
-}
-
-async function multiLaunch(mode) {
-  // Defensive guard against double-click. Buttons are disabled via the
-  // multiLoading flag in CSS, but mass-clicks before render can race past it.
-  if (state.multiLoading) return;
-  // Validate
-  if (!hasApiKey()) { alert('Add your Claude API key in the sidebar first'); return; }
-  for (const app of state.multiConfig.apps) {
-    if (!app.appId && !app.url) { alert('Select an app for each block'); return; }
-    for (const role of app.roles) {
-      if (!role.name || !role.email || !role.password) { alert(`Fill in all role fields (${role.name || 'unnamed role'})`); return; }
-    }
-  }
-
-  state.multiLoading = true;
-  state.multiStream = [{ type: 'info', message: 'Launching browser sessions...' }];
-  state.multiSessions = {};
-  state.multiMessages = [];
-  render();
-
-  // Launch a chat session for each role
-  for (const app of state.multiConfig.apps) {
-    const appId = app.appId !== '__custom' ? app.appId : null;
-    const appName = appId ? (state.apps.find(a => a.appId === appId)?.summary?.appName || appId) : app.url;
-
-    for (const role of app.roles) {
-      const roleKey = `${role.name} @ ${appName}`;
-      state.multiStream.push({ type: 'info', message: `Connecting ${roleKey}...` });
-      render();
-
-      try {
-        if (!appId) {
-          state.multiStream.push({ type: 'error', message: `${roleKey}: Custom URLs need to be learned first` });
-          continue;
-        }
-
-        // 90s fetch timeout — server caps visionLogin at 75s, so 90s gives
-        // it time to return its own error before we abort. Without this,
-        // a stuck login pinned the button on "Starting…" indefinitely.
-        const ctl = new AbortController();
-        const tid = setTimeout(() => ctl.abort(), 90000);
-        let res;
-        try {
-          res = await fetch(`${API}/api/chat/start`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ appId, email: role.email, password: role.password, apiKey: getApiKey() }),
-            signal: ctl.signal,
-          });
-        } finally {
-          clearTimeout(tid);
-        }
-
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({}));
-          state.multiStream.push({ type: 'fail', message: `${roleKey}: ${err.error || 'Failed to connect'}` });
-          continue;
-        }
-
-        const data = await res.json();
-        state.multiSessions[roleKey] = {
-          sessionId: data.sessionId,
-          screenshot: data.screenshot,
-          url: data.url,
-          appId,
-          role: role.name
-        };
-        state.multiStream.push({ type: 'pass', message: `${roleKey}: Connected ✓`, screenshot: data.screenshot });
-
-      } catch (e) {
-        const friendly = e.name === 'AbortError'
-          ? 'Timed out after 90s — login probably stuck (captcha, slow page, or unresponsive server)'
-          : e.message;
-        state.multiStream.push({ type: 'fail', message: `${roleKey}: ${friendly}` });
-      }
-      render();
-    }
-  }
-
-  const connectedCount = Object.keys(state.multiSessions).length;
-  if (connectedCount === 0) {
-    state.multiStream.push({ type: 'error', message: 'No sessions connected. Check credentials.' });
-    state.multiLoading = false;
-    render();
-    return;
-  }
-
-  state.multiStream.push({ type: 'pass', message: `All done — ${connectedCount} sessions active` });
-  state.multiActiveRole = Object.keys(state.multiSessions)[0];
-  state.multiMode = mode;
-  state.multiLoading = false;
-
-  state.multiMessages.push({
-    role: 'assistant',
-    content: `${connectedCount} sessions connected. ${mode === 'conversational' ? 'Click a role chip above to switch, then type commands.' : 'Write your multi-step scenario and hit Run.'}`,
-    roleKey: 'System'
-  });
-
-  render();
-}
-
-function multiSwitchRole(roleKey) {
-  state.multiActiveRole = roleKey;
-  render();
-}
-
-async function multiSendChat() {
-  const input = document.getElementById('multi-input');
-  const message = input?.value?.trim();
-  if (!message || !state.multiActiveRole) return;
-
-  const session = state.multiSessions[state.multiActiveRole];
-  if (!session) return;
-
-  input.value = '';
-
-  state.multiMessages.push({ role: 'user', content: message, roleKey: state.multiActiveRole });
-  state.multiLoading = true;
-  render();
-
-  setTimeout(() => {
-    const el = document.getElementById('multi-messages');
-    if (el) el.scrollTop = el.scrollHeight;
-  }, 50);
-
-  try {
-    const res = await fetch(`${API}/api/chat/${session.sessionId}/message`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, apiKey: getApiKey() })
-    });
-
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      state.multiMessages.push({ role: 'assistant', content: `Error: ${err.error || res.statusText}`, roleKey: state.multiActiveRole });
-      state.multiLoading = false;
-      render();
-      return;
-    }
-
-    const data = await res.json();
-    state.multiMessages.push({
-      role: 'assistant',
-      content: data.reply,
-      actions: data.actions,
-      screenshot: data.screenshot,
-      roleKey: state.multiActiveRole
-    });
-
-    session.screenshot = data.screenshot;
-    session.url = data.url;
-
-  } catch (e) {
-    state.multiMessages.push({ role: 'assistant', content: `Connection error: ${e.message}`, roleKey: state.multiActiveRole });
-  }
-
-  state.multiLoading = false;
-  render();
-
-  setTimeout(() => {
-    const el = document.getElementById('multi-messages');
-    if (el) el.scrollTop = el.scrollHeight;
-  }, 100);
-}
-
-async function multiRefreshScreenshot() {
-  if (!state.multiActiveRole) return;
-  const session = state.multiSessions[state.multiActiveRole];
-  if (!session) return;
-
-  try {
-    const res = await fetch(`${API}/api/chat/${session.sessionId}/screenshot`);
-    if (res.ok) {
-      const data = await res.json();
-      session.screenshot = data.screenshot;
-      session.url = data.url;
-      render();
-    }
-  } catch (e) { /* silent */ }
-}
-
-async function multiRunAuto() {
-  // Same double-click defense as multiLaunch.
-  if (state.multiLoading) return;
-
-  const scenarioText = document.getElementById('multi-scenario')?.value?.trim();
-  if (!scenarioText) { alert('Write a scenario'); return; }
-
-  // Cancellation plumbing: runId guards iteration boundaries, AbortController
-  // kills the in-flight fetch immediately. Same pattern as runMultiRole.
-  state._multiAutoRunId = (state._multiAutoRunId || 0) + 1;
-  const myRunId = state._multiAutoRunId;
-  const abortCtl = new AbortController();
-  state._multiAutoAbort = abortCtl;
-
-  state.multiScenario = scenarioText;
-  state.multiLoading = true;
-  state.multiStream = [{ type: 'info', message: 'Parsing scenario...' }];
-  render();
-
-  // Parse steps: [Role @ App] instruction
-  const stepRegex = /\[([^\]]+)\]\s*(.+)/g;
-  const steps = [];
-  let match;
-  while ((match = stepRegex.exec(scenarioText)) !== null) {
-    const roleKey = match[1].trim();
-    const instruction = match[2].trim();
-    steps.push({ roleKey, instruction });
-  }
-
-  if (steps.length === 0) {
-    state.multiStream.push({ type: 'error', message: 'No steps found. Use format: [Role @ App] instruction' });
-    state.multiLoading = false;
-    state._multiAutoAbort = null;
-    render();
-    return;
-  }
-
-  state.multiStream.push({ type: 'info', message: `Found ${steps.length} steps across ${[...new Set(steps.map(s => s.roleKey))].length} roles` });
-  render();
-
-  for (let i = 0; i < steps.length; i++) {
-    // Cancellation check at every iteration boundary.
-    if (state._multiAutoRunId !== myRunId || abortCtl.signal.aborted) break;
-
-    const step = steps[i];
-    const session = state.multiSessions[step.roleKey];
-
-    if (!session) {
-      state.multiStream.push({ type: 'fail', message: `Step ${i + 1}: Role "${step.roleKey}" not found in active sessions` });
-      render();
-      continue;
-    }
-
-    state.multiActiveRole = step.roleKey;
-    state.multiStream.push({ type: 'info', message: `Step ${i + 1} [${step.roleKey}]: ${step.instruction}` });
-    render();
-
-    try {
-      const res = await fetch(`${API}/api/chat/${session.sessionId}/message`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: step.instruction, apiKey: getApiKey() }),
-        signal: abortCtl.signal,
-      });
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        state.multiStream.push({ type: 'fail', message: `Step ${i + 1} [${step.roleKey}]: ${err.error || 'Failed'}` });
-        render();
-        continue;
-      }
-
-      const data = await res.json();
-      session.screenshot = data.screenshot;
-      session.url = data.url;
-
-      const actionSummary = (data.actions || []).map(a => `${a.action}→${a.outcome?.substring(0, 60)}`).join(', ');
-      // Server now returns explicit success:bool on every action — use that
-      // instead of string-matching for 'FAILED' (server emits 'Failed' so
-      // includes('FAILED') always returned false → false-negative).
-      const hasFail = (data.actions || []).some(a => a.success === false);
-
-      state.multiStream.push({
-        type: hasFail ? 'fail' : 'pass',
-        message: `Step ${i + 1} [${step.roleKey}]: ${data.reply?.substring(0, 150)}${actionSummary ? ' | Actions: ' + actionSummary : ''}`,
-        screenshot: data.screenshot
-      });
-
-    } catch (e) {
-      // AbortError = user clicked Stop, not a step failure. Skip the noise.
-      if (e.name !== 'AbortError') {
-        state.multiStream.push({ type: 'error', message: `Step ${i + 1} [${step.roleKey}]: ${e.message}` });
-      }
-    }
-
-    render();
-  }
-
-  if (state._multiAutoRunId === myRunId) {
-    const cancelled = abortCtl.signal.aborted;
-    state.multiStream.push({
-      type: cancelled ? 'info' : 'done',
-      message: cancelled ? `Scenario cancelled` : `Scenario complete — ${steps.length} steps executed`,
-    });
-    state.multiLoading = false;
-    state._multiAutoAbort = null;
-  }
-  render();
-}
-
-function cancelMultiRunAuto() {
-  // Bump runId so the loop's iteration check fails out, and abort the fetch
-  // so the in-flight /message call returns immediately rather than waiting
-  // for the agent to finish its step.
-  state._multiAutoRunId = (state._multiAutoRunId || 0) + 1;
-  if (state._multiAutoAbort) {
-    try { state._multiAutoAbort.abort(); } catch {}
-    state._multiAutoAbort = null;
-  }
-  state.multiLoading = false;
-  render();
-}
-
-async function multiEnd() {
-  if (!confirm('End all sessions?')) return;
-
-  // If an autonomous scenario is mid-run, kill it before tearing down
-  // sessions — otherwise the scenario keeps trying to /message dead sessions.
-  if (state._multiAutoAbort) {
-    state._multiAutoRunId = (state._multiAutoRunId || 0) + 1;
-    try { state._multiAutoAbort.abort(); } catch {}
-    state._multiAutoAbort = null;
-  }
-
-  // Fan out /end calls in parallel — was serial before, which took ~N×RTT
-  // for N sessions. allSettled so one orphaned session doesn't block the rest.
-  await Promise.allSettled(
-    Object.values(state.multiSessions).map(s =>
-      fetch(`${API}/api/chat/${s.sessionId}/end`, { method: 'POST' }).catch(() => {})
-    )
-  );
-
-  state.multiSessions = {};
-  state.multiMessages = [];
-  state.multiStream = [];
-  state.multiActiveRole = null;
-  state.multiMode = 'setup';
-  state.multiLoading = false;
-  render();
-}
-
-function copyMultiDebug() {
-  let debug = '=== TESTPILOT MULTI-APP DEBUG ===\n';
-  debug += `Time: ${new Date().toISOString()}\n`;
-  debug += `Sessions: ${Object.keys(state.multiSessions).join(', ')}\n\n`;
-  for (const s of state.multiStream) {
-    const icon = { pass: '[PASS]', fail: '[FAIL]', bug: '[BUG]', info: '[INFO]', done: '[DONE]', error: '[ERROR]' }[s.type] || '[???]';
-    debug += `${icon} ${s.message}\n`;
-  }
-  navigator.clipboard.writeText(debug).then(() => {
-    const btn = document.querySelector('[onclick="copyMultiDebug()"]');
-    if (btn) { btn.textContent = '✅ Copied!'; setTimeout(() => { btn.textContent = '📋 Copy Debug'; }, 2000); }
-  });
-}
-
-// ═══════════════════════════════════════════════════════════════
-// SECURITY ACTIONS
 // ═══════════════════════════════════════════════════════════════
 
 async function secGenerate() {
@@ -6022,6 +5359,11 @@ function copyTestDebug() {
   const failed = test.steps.filter(s => s.status === 'fail').length;
   const bugs = test.bugs?.length || 0;
   const retries = test.steps.filter(s => s.status === 'retry').length;
+  // Did the AGENT actually finish the scenario (reach `done`)? A run can rack up
+  // dozens of "passed" step-actions and still never complete the task — it hit
+  // the token budget or wandered. "Steps passed" is per-action, NOT completion,
+  // so without this the report reads green on an unfinished run.
+  const finished = ['completed', 'completed_with_bugs', 'completed_with_unverified'].includes(test.status);
 
   let debug = `╔══════════════════════════════════════════════════════╗\n`;
   debug += `║         TESTPILOT SCENARIO TEST REPORT               ║\n`;
@@ -6029,15 +5371,22 @@ function copyTestDebug() {
   debug += `App:        ${app.summary?.appName || app.url || test.appId || 'unknown'}\n`;
   debug += `URL:        ${app.url || 'unknown'}\n`;
   debug += `Status:     ${test.status?.toUpperCase()}\n`;
+  debug += `Scenario completed: ${finished ? 'YES' : 'NO — the agent did NOT finish the scenario'}\n`;
   debug += `Started:    ${test.startedAt ? new Date(test.startedAt).toLocaleString() : '—'}\n`;
   debug += `Completed:  ${test.completedAt ? new Date(test.completedAt).toLocaleString() : '—'}\n`;
   debug += `\nScenario:\n  ${test.scenario}\n`;
   debug += `\n── SUMMARY ──────────────────────────────────────────────\n`;
-  debug += `  Steps passed:   ${passed}\n`;
+  debug += `  Scenario completed: ${finished ? 'YES' : 'NO'}\n`;
+  debug += `  Steps OK (actions): ${passed}${finished ? '' : '   ← counts individual actions, NOT scenario completion'}\n`;
   debug += `  Steps failed:   ${failed}\n`;
   debug += `  Agent retries:  ${retries}\n`;
   debug += `  App bugs found: ${bugs}\n`;
   debug += `  Total steps:    ${test.steps.length}\n`;
+  if (!finished) {
+    debug += `\n  ⚠ INCOMPLETE — the run ended before finishing all scenario steps (ran out\n`;
+    debug += `    of token budget or stopped early). Passing individual actions does NOT\n`;
+    debug += `    mean the scenario succeeded. See the step log for where it stopped.\n`;
+  }
 
   if (test.analysis) {
     debug += `\n── ANALYSIS ─────────────────────────────────────────────\n`;

@@ -51,6 +51,11 @@ export function isBlockedHostname(host) {
 // Full async check: scheme + hostname blocklist + DNS-resolved IP ranges.
 // Returns { ok: true } or { ok: false, error }.
 export async function assertPublicUrl(rawUrl) {
+  // DEV/GAUNTLET ESCAPE HATCH: when ALLOW_LOCAL_TARGETS=1, skip the guard so the
+  // local gauntlet harness can point the scanner at a dockerized fixture on
+  // localhost. NEVER set this in prod — it re-opens the SSRF surface this module
+  // exists to close. Inert unless the flag is explicitly '1'.
+  if (process.env.ALLOW_LOCAL_TARGETS === '1') return { ok: true };
   let u;
   const raw = String(rawUrl || '').trim();
   const hasScheme = /^[a-z][a-z0-9+.-]*:/i.test(raw); // any scheme (http:, ftp:, javascript:, file:…)

@@ -155,14 +155,14 @@ const PLAN_LIMITS = {
   onerun:  { apps: 1, features: ['scenario'] },
   starter: { apps: 3, features: ['scenario', 'interactive'] },
   pro:     { apps: 10, features: ['scenario', 'interactive', 'multirole'] },
-  agency:  { apps: 999, features: ['scenario', 'interactive', 'multirole', 'crossapp', 'security'] },
+  agency:  { apps: 999, features: ['scenario', 'interactive', 'multirole', 'security'] },
   // Operator/superuser accounts. WITHOUT these entries, `PLAN_LIMITS['admin']`
   // is undefined → features fall back to [] → admin/tester get treated as a
-  // free plan and are silently blocked from crossapp, multirole, security, and
+  // free plan and are silently blocked from multirole, security, and
   // hit the 1-app cap on /api/learn. They should have everything. Additive —
   // does not change any paying plan's limits.
-  admin:   { apps: 9999, features: ['scenario', 'interactive', 'multirole', 'crossapp', 'security'] },
-  tester:  { apps: 9999, features: ['scenario', 'interactive', 'multirole', 'crossapp', 'security'] }
+  admin:   { apps: 9999, features: ['scenario', 'interactive', 'multirole', 'security'] },
+  tester:  { apps: 9999, features: ['scenario', 'interactive', 'multirole', 'security'] }
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -363,7 +363,7 @@ function getClient(apiKey) {
   if (clientCache.has(apiKey)) return clientCache.get(apiKey);
   const raw = new Anthropic({ apiKey });
   // For the shared support key we instrument every messages.create response
-  // so all free-tier spend (learn, test, multirole, crossapp, vision crawls,
+  // so all free-tier spend (learn, test, multirole, vision crawls,
   // analysis calls — every call site that uses getClient) flows through the
   // same daily-budget tally. Saves having to add a one-liner to each of the
   // 7+ call sites and saves missing new ones added later.
@@ -1377,8 +1377,29 @@ async function loadPlatformMaps() {
 async function takeScreenshot(page, prefix, fullPage = false) {
   const filename = `${prefix}-${Date.now()}.png`;
   const filepath = path.join(SCREENSHOT_DIR, filename);
-  await page.screenshot({ path: filepath, fullPage });
-  return `/screenshots/${filename}`;
+  // Never throw: a screenshot is telemetry, not a test step. If the page or
+  // browser died mid-run (tab closed by the app, context crash), a throw here
+  // used to kill the whole test with "Target page ... has been closed".
+  try {
+    if (page.isClosed()) return null;
+    await page.screenshot({ path: filepath, fullPage });
+    if (fullPage) {
+      // Anthropic rejects images with any dimension > 8000px, and long pages
+      // (blogs, docs, infinite feeds) blow past that on fullPage shots. Retake
+      // clipped to the cap so the file we save is always attachable.
+      const head = await fs.readFile(filepath);
+      const dim = pngDimensionsFromBase64(head.subarray(0, 32).toString('base64'));
+      if (dim && (dim.width > 7900 || dim.height > 7900)) {
+        await page.screenshot({
+          path: filepath,
+          clip: { x: 0, y: 0, width: Math.min(dim.width, 7900), height: Math.min(dim.height, 7900) },
+        });
+      }
+    }
+    return `/screenshots/${filename}`;
+  } catch {
+    return null;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1491,6 +1512,103 @@ async function fillOtpField(page, det, code) {
   }
 }
 
+// ── FILE-UPLOAD HELPERS (G2) ────────────────────────────────────────────────
+// Choose the best bundled placeholder for an upload, from the input's `accept`,
+// its name/id/aria-label, and visible page text. Returns candidate filenames,
+// most-specific first, image as the final fallback. (Mirrors the filechooser
+// handler's selection so the proactive setInputFiles path stays consistent.)
+function choosePlaceholderFile(accept = '', name = '', pageText = '') {
+  accept = String(accept).toLowerCase();
+  const sig = `${accept} ${name} ${pageText}`.toLowerCase();
+  const acceptsImage = /image|jpe?g|png|gif|webp|heic/.test(accept);
+  let pickedFile = 'placeholder.png';
+  if (/\.xlsx|\.xls|spreadsheet|excel/.test(accept) || /\bexcel\b|\bspreadsheet\b|\bxlsx?\b|\bcsv\b|hoja de calculo/.test(sig)) {
+    pickedFile = 'placeholder.xlsx';
+  } else if (/\.pdf|application\/pdf/.test(accept) || (!acceptsImage && /\bpdf\b|\bdocumento\b|\bdocument\b/.test(sig))) {
+    pickedFile = /invoice|factura|recibo|receipt|facture|\bbill\b/.test(sig) ? 'placeholder-invoice.pdf' : 'placeholder.pdf';
+  }
+  return pickedFile === 'placeholder.png' ? ['placeholder.png'] : [pickedFile, 'placeholder.png'];
+}
+
+// Deterministically satisfy a native <input type="file"> by setting a bundled
+// placeholder directly (bypasses the OS file chooser — works on hidden inputs
+// too, which is how most styled "upload" buttons are built). Returns the
+// supplied filename, or null if no placeholder was available on disk.
+async function supplyPlaceholderToFileInput(page, fileInputLocator) {
+  let input = null;
+  try { const n = await fileInputLocator.count(); if (n > 0) input = fileInputLocator.nth(n - 1); } catch { input = null; }
+  if (!input) return null;
+  let accept = '', name = '', pageText = '';
+  try { accept = (await input.getAttribute('accept')) || ''; } catch {}
+  try { name = ((await input.getAttribute('name')) || (await input.getAttribute('id')) || (await input.getAttribute('aria-label')) || ''); } catch {}
+  try { pageText = ((await page.locator('body').innerText({ timeout: 800 })) || '').slice(0, 4000); } catch {}
+  for (const filename of choosePlaceholderFile(accept, name, pageText)) {
+    const p = path.resolve('./' + filename);
+    try { await fs.access(p); await input.setInputFiles(p, { timeout: 5000 }); return filename; } catch {}
+  }
+  return null;
+}
+
+// ── LOGIN DISCOVERY (G1) ────────────────────────────────────────────────────
+// Selector for a directly-fillable login form (email/password inputs).
+const LOGIN_FORM_SELECTOR = 'input[type="email"], input[type="password"], #email, #password, input[name="email"]';
+
+// Is a "Sign in / Log in" affordance visible? Proof the app is logged OUT — used
+// to decide whether a missing form is "genuinely public/already-authed" (OK to
+// proceed) vs "logged out but we couldn't drive the login" (must fail loud).
+async function hasSignInAffordance(page) {
+  const sel = [
+    'a:has-text("Sign in")', 'a:has-text("Sign In")', 'a:has-text("Log in")', 'a:has-text("Login")',
+    'a:has-text("Iniciar sesión")', 'a:has-text("Acceder")', 'a:has-text("Entrar")',
+    'button:has-text("Sign in")', 'button:has-text("Log in")', 'button:has-text("Login")',
+    'button:has-text("Iniciar sesión")', 'button:has-text("Acceder")', 'button:has-text("Entrar")',
+    'a[href="/auth"]', 'a[href="/login"]', 'a[href="/signin"]', 'a[href="/sign-in"]',
+  ].join(', ');
+  return await page.locator(sel).first().isVisible({ timeout: 1500 }).catch(() => false);
+}
+
+// Many modern apps (Lovable/Base44/most SPAs) serve a PUBLIC landing at the entry
+// URL with a "Sign in" button, and keep the real form on a separate route
+// (/auth, /login, ...). Given credentials, actively try to REVEAL the form so the
+// crawl authenticates instead of silently mapping the logged-out marketing page.
+// Returns true if a fillable login form is now visible on the page.
+async function revealLoginForm(page, ctx = {}) {
+  const isFormVisible = () => page.locator(LOGIN_FORM_SELECTOR).first().isVisible({ timeout: 1500 }).catch(() => false);
+
+  // 1) Click an in-page "Sign in / Log in" link or button, then re-check.
+  const signInSel = [
+    'a:has-text("Sign in")', 'a:has-text("Sign In")', 'a:has-text("Log in")', 'a:has-text("Login")',
+    'a:has-text("Iniciar sesión")', 'a:has-text("Acceder")', 'a:has-text("Entrar")',
+    'button:has-text("Sign in")', 'button:has-text("Log in")', 'button:has-text("Login")',
+    'button:has-text("Iniciar sesión")', 'button:has-text("Acceder")', 'button:has-text("Entrar")',
+    'a[href="/auth"]', 'a[href="/login"]', 'a[href="/signin"]', 'a[href="/sign-in"]', 'a[href="/account/login"]',
+  ];
+  for (const sel of signInSel) {
+    try {
+      const el = page.locator(sel).first();
+      if (await el.isVisible({ timeout: 800 })) {
+        const label = ((await el.textContent().catch(() => '')) || '').trim().slice(0, 30) || sel;
+        await el.click({ timeout: 3000 }).catch(() => {});
+        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+        await page.waitForTimeout(600);
+        if (await isFormVisible()) { ctx.emit?.({ phase: 'login', type: 'info', message: `Revealed login form via "${label}"` }); return true; }
+      }
+    } catch { continue; }
+  }
+
+  // 2) Probe common auth routes on the SAME origin.
+  let origin = '';
+  try { origin = new URL(page.url()).origin; } catch { return false; }
+  for (const authPath of ['/auth', '/login', '/signin', '/sign-in', '/account/login', '/users/sign_in']) {
+    try {
+      await page.goto(origin + authPath, { waitUntil: 'domcontentloaded', timeout: 20000 });
+      await page.waitForTimeout(800);
+      if (await isFormVisible()) { ctx.emit?.({ phase: 'login', type: 'info', message: `Found login form at ${authPath}` }); return true; }
+    } catch { continue; }
+  }
+  return false;
+}
+
 async function visionLogin(page, credentials, apiKey, ctx = {}) {
   const screenshot = await takeScreenshot(page, 'login');
   const currentUrl = page.url();
@@ -1502,9 +1620,25 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
     return { success: true, screenshot, message: 'No login required — public app' };
   }
 
-  // Check if already logged in (no login form visible)
-  const hasLoginForm = await page.locator('input[type="email"], input[type="password"], #email, #password, input[name="email"]').first().isVisible({ timeout: 3000 }).catch(() => false);
+  // Check if a login form is directly visible on the entry page.
+  let hasLoginForm = await page.locator(LOGIN_FORM_SELECTOR).first().isVisible({ timeout: 3000 }).catch(() => false);
+
+  // G1 — LOGIN DISCOVERY: no form on the entry page, but credentials were given.
+  // Before concluding "no login needed", try to surface the form (click a
+  // sign-in affordance, else probe /auth, /login, ...). This turns a silent
+  // logged-out crawl of the public landing into a real authenticated one.
   if (!hasLoginForm) {
+    if (await revealLoginForm(page, ctx)) hasLoginForm = true;
+  }
+
+  if (!hasLoginForm) {
+    // Still no form. Distinguish "genuinely public / already logged in" (proceed)
+    // from "logged out but undriveable" (magic-link / OAuth popup / SSO) — fail
+    // LOUD in the latter so we NEVER return a happy public-only map when the app
+    // actually needed a login the crawler couldn't perform.
+    if (await hasSignInAffordance(page)) {
+      return { success: false, screenshot, error: 'Credentials were provided but TestPilot could not find a login form — no email/password field on the entry page, and none at common routes (/auth, /login, /signin). The app still shows a "Sign in" control, so it is NOT logged in. If it uses a magic-link or OAuth/SSO popup login (which TestPilot cannot drive headlessly), capture a session in your browser and use "bring your own session".' };
+    }
     return { success: true, screenshot, message: 'Already logged in or no login form detected' };
   }
 
@@ -1682,8 +1816,37 @@ function __domSnapshot() {
     out.buttons.push({ label, disabled, inNav, locator: `button:has-text("${label.substring(0, 50)}")` });
   }
 
+  // Bubble.io: interactive elements are .clickable-element divs (Buttons,
+  // Links, Groups and repeating-group rows wired to workflows) — invisible to
+  // the button/[role=button] selectors above, which is why Bubble pages used
+  // to capture 0 buttons. Capture short-text clickables with a Bubble-aware
+  // locator so the map and the test-time agent can act on them.
+  if (document.querySelector('.bubble-element')) {
+    const seenBubbleLabels = new Set(out.buttons.map((b) => b.label));
+    for (const node of document.querySelectorAll('.clickable-element')) {
+      if (!vis(node)) continue;
+      if (node.matches('button, [role="button"], input[type="submit"], a[href]')) continue; // already captured above
+      const clone = node.cloneNode(true);
+      clone.querySelectorAll(ICON_SEL).forEach((n) => n.remove());
+      const label = (clone.textContent || '').replace(/\s+/g, ' ').trim();
+      // >=60 chars = a wrapping Group whose text concatenates all children.
+      if (!label || label.length >= 60) continue;
+      if (seenBubbleLabels.has(label)) continue;
+      seenBubbleLabels.add(label);
+      out.buttons.push({ label, disabled: false, inNav: false, locator: `.clickable-element:has-text("${label.substring(0, 50)}")` });
+      if (seenBubbleLabels.size > 60) break;
+    }
+  }
+
   for (const node of document.querySelectorAll('input:not([type="hidden"]), textarea')) {
     if (!vis(node)) continue;
+    // Skip the internal search box of an OPEN combobox/cmdk popover (e.g.
+    // Fixera's "Buscar cliente…"). It looks like a plain text field, but typing
+    // into it does NOT select anything — you must then click an option. Exposing
+    // it as a fillable input makes the agent fill it and move on WITHOUT
+    // selecting, then flail. The control is already captured as a dropdown
+    // (below), so route it through select_dropdown instead.
+    if (node.hasAttribute('cmdk-input') || (node.getAttribute('role') === 'combobox' && node.closest('[cmdk-root], [role="dialog"], [data-radix-popper-content-wrapper], [role="listbox"]'))) continue;
     const type = node.getAttribute('type') || 'text';
     const placeholder = node.getAttribute('placeholder') || '';
     const name = node.getAttribute('name') || '';
@@ -1692,11 +1855,38 @@ function __domSnapshot() {
     const required = node.hasAttribute('required');
     let label = '';
     if (id) { try { const le = document.querySelector(`label[for="${CSS.escape(id)}"]`); label = ((le && le.textContent) || '').trim(); } catch (e) {} }
+    if (!label) {
+      const lb = node.getAttribute('aria-labelledby');
+      if (lb) { const le = document.getElementById(lb); if (le) label = (le.textContent || '').trim(); }
+    }
+    // ADJACENT-LABEL fallback — component libraries (shadcn/Radix/Lovable, and
+    // Fixera's own line-item rows) commonly render a caption as a sibling
+    // <label> with NO for/id/aria link at all: `<div><label>Departure date</label>
+    // <input/></div>`. The fill_form executor already re-derives this live via
+    // an ancestor walk (its "ADJACENT-LABEL fallback" strategy) when the CAPTURED
+    // label is empty — but that only works if the agent already guessed the
+    // right caption to ask for. Mirror the SAME walk here at capture time so the
+    // map itself carries the real field name up front.
+    if (!label) {
+      let anc = node.parentElement, hops = 0;
+      while (anc && hops < 3 && !label) {
+        const lab = anc.querySelector('label');
+        if (lab) { const t = (lab.textContent || '').trim(); if (t && t.length < 60) label = t; }
+        anc = anc.parentElement; hops++;
+      }
+    }
+    if (!label) {
+      const prev = node.previousElementSibling;
+      if (prev && prev.tagName !== 'INPUT' && prev.tagName !== 'TEXTAREA') {
+        const t = (prev.textContent || '').trim();
+        if (t && t.length < 60) label = t;
+      }
+    }
     let locator = '';
     if (id && !id.includes(':') && !id.includes('radix')) locator = `#${id}`;
     else if (placeholder) locator = `input[placeholder="${placeholder}"]`;
     else if (name) locator = `input[name="${name}"]`;
-    else if (label) locator = 'input >> nth=0';
+    else if (label) locator = `label:has-text("${label.replace(/"/g, '\\"')}") ~ input, label:has-text("${label.replace(/"/g, '\\"')}") ~ textarea`;
     out.inputs.push({ type, placeholder, name, id: (id && !id.includes(':')) ? id : '', label, value, required, locator });
   }
 
@@ -1890,7 +2080,31 @@ async function probeInteraction(page, action, target, opts = {}) {
 
 // Select from dropdown — comprehensive strategy
 async function selectFromDropdown(page, triggerText, optionText) {
+  // These searchable-combobox controls (radix Popover + cmdk) render their
+  // trigger, search input, and options ASYNC and hydrate late — so fixed waits
+  // race them. Define the selectors up front and POLL for the popover instead
+  // of guessing with a timeout.
+  const searchSels = [
+    'input[placeholder*="Buscar" i]', 'input[placeholder*="Search" i]',
+    'input[placeholder*="Chercher" i]', 'input[placeholder*="Suchen" i]',
+    'input[placeholder*="Zoeken" i]', 'input[placeholder*="Cerca" i]',
+    'input[placeholder*="Pesquisar" i]', 'input[placeholder*="Szukaj" i]',
+    'input[type="search"]',
+    'input[role="combobox"]', '[cmdk-input]'
+  ];
+  const optionSel = '[role="option"], [cmdk-item], [data-radix-collection-item], [role="menuitem"]';
+
+  // The popover is "open" once options OR a search box are actually on screen.
+  const popoverOpen = async () => {
+    if (await page.locator(optionSel).first().isVisible({ timeout: 250 }).catch(() => false)) return true;
+    for (const sel of searchSels) {
+      if (await page.locator(sel).first().isVisible({ timeout: 120 }).catch(() => false)) return true;
+    }
+    return false;
+  };
+
   // Step 1: Find and click the trigger — try multiple strategies
+  const openTrigger = async () => {
   let triggerClicked = false;
 
   // Strategy A: Playwright locators
@@ -1953,18 +2167,25 @@ async function selectFromDropdown(page, triggerText, optionText) {
     }
   }
 
-  if (!triggerClicked) return { success: false, reason: 'Trigger not found' };
-  await page.waitForTimeout(1000);
+  return triggerClicked;
+  };
 
-  const searchSels = [
-    'input[placeholder*="Buscar" i]', 'input[placeholder*="Search" i]',
-    'input[placeholder*="Chercher" i]', 'input[placeholder*="Suchen" i]',
-    'input[placeholder*="Zoeken" i]', 'input[placeholder*="Cerca" i]',
-    'input[placeholder*="Pesquisar" i]', 'input[placeholder*="Szukaj" i]',
-    'input[type="search"]',
-    'input[role="combobox"]', '[cmdk-input]'
-  ];
-  const optionSel = '[role="option"], [cmdk-item], [data-radix-collection-item], [role="menuitem"]';
+  // Open the popover, VERIFYING it actually appeared, and retry if not. These
+  // radix+cmdk controls hydrate late, so the first click often lands before the
+  // handler is wired — a single click is ~coin-flip on a fresh page (measured
+  // against the live app). Retrying the open until options/search show is what
+  // makes the select RELIABLE instead of intermittently returning "Trigger not
+  // found"/"Option not found" and sending the agent off to flail (re-creating
+  // data, looping) when the real dropdown was fine all along.
+  let opened = await popoverOpen();
+  for (let tryN = 0; tryN < 3 && !opened; tryN++) {
+    if (tryN > 0) await page.waitForTimeout(600);
+    // Don't re-click an already-open popover — that toggles it shut.
+    if (await popoverOpen()) { opened = true; break; }
+    if (!(await openTrigger())) continue;
+    for (let i = 0; i < 15; i++) { if (await popoverOpen()) { opened = true; break; } await page.waitForTimeout(200); }
+  }
+  if (!opened) return { success: false, reason: 'Trigger not found' };
 
   // "Any / first"-style requests. Tests frequently say "select ANY client" /
   // "pick the FIRST option" — there's no literal option named that, so the
@@ -1990,88 +2211,148 @@ async function selectFromDropdown(page, triggerText, optionText) {
   }
 
   // Step 2: Search if search input appears (specific option requested).
+  // Remember WHICH search input we typed into, so the clear-and-browse net
+  // below can empty it and browse the full list as a last resort.
+  let searchInput = null;
   if (!wantsAny) {
     for (const sel of searchSels) {
       try {
         const si = page.locator(sel).first();
         if (await si.isVisible({ timeout: 1500 })) {
           await si.fill(optionText);
-          await page.waitForTimeout(1000);
+          // Wait for the filtered options to actually render (cmdk filters
+          // async) rather than a fixed guess, then proceed to match/click.
+          for (let i = 0; i < 12; i++) { if (await page.locator(optionSel).first().isVisible({ timeout: 200 }).catch(() => false)) break; await page.waitForTimeout(200); }
+          searchInput = si;
           break;
         }
       } catch { continue; }
     }
   }
 
-  // Step 3: Find and click the option
-  const optionStrats = [
-    () => page.getByRole('option', { name: new RegExp(optionText, 'i') }).first(),
-    () => page.locator(`[role="option"]:has-text("${optionText}")`).first(),
-    () => page.locator(`[cmdk-item]:has-text("${optionText}")`).first(),
-    () => page.locator(`[data-radix-collection-item]:has-text("${optionText}")`).first(),
-    () => page.locator(`li:has-text("${optionText}")`).first(),
-    () => page.locator(`div[class*="option"]:has-text("${optionText}")`).first(),
-    () => page.locator(`div[class*="item"]:has-text("${optionText}")`).first(),
-    () => page.locator(`span:has-text("${optionText}")`).first(),
-  ];
-
-  for (const strat of optionStrats) {
+  // Steps 3–5 rolled into one pass: Playwright option locators, then a DOM
+  // substring click, then a token-overlap scan of the OPEN list. Returns the
+  // clicked text, or the options currently on screen when nothing matched (so
+  // the caller can retry unfiltered or fail with an accurate available-list).
+  // A real option that matches (substring or token overlap) is clicked and its
+  // ACTUAL text reported — the tool must never claim a selection it didn't make.
+  const findAndClickOption = async () => {
+    const optionStrats = [
+      () => page.getByRole('option', { name: new RegExp(optionText, 'i') }).first(),
+      () => page.locator(`[role="option"]:has-text("${optionText}")`).first(),
+      () => page.locator(`[cmdk-item]:has-text("${optionText}")`).first(),
+      () => page.locator(`[data-radix-collection-item]:has-text("${optionText}")`).first(),
+      () => page.locator(`li:has-text("${optionText}")`).first(),
+      () => page.locator(`div[class*="option"]:has-text("${optionText}")`).first(),
+      () => page.locator(`div[class*="item"]:has-text("${optionText}")`).first(),
+      () => page.locator(`span:has-text("${optionText}")`).first(),
+    ];
+    for (const strat of optionStrats) {
+      try {
+        const opt = strat();
+        if (await opt.isVisible({ timeout: 2000 })) {
+          const txt = ((await opt.textContent().catch(() => '')) || '').trim();
+          await opt.click();
+          await page.waitForTimeout(500);
+          return { clicked: txt || true };
+        }
+      } catch { continue; }
+    }
     try {
-      const opt = strat();
-      if (await opt.isVisible({ timeout: 2000 })) {
-        const txt = ((await opt.textContent().catch(() => '')) || '').trim();
-        await opt.click();
+      const clickedText = await page.evaluate((val) => {
+        const els = document.querySelectorAll('[role="option"], [cmdk-item], [data-radix-collection-item], li, div, span');
+        for (const el of els) {
+          if (el.offsetParent !== null && el.textContent.trim().includes(val) && el.textContent.trim().length < val.length + 40) {
+            const t = el.textContent.trim(); el.click(); return t;
+          }
+        }
+        return null;
+      }, optionText);
+      if (clickedText) { await page.waitForTimeout(500); return { clicked: clickedText }; }
+    } catch {}
+    try {
+      const res = await page.evaluate(({ sel, want }) => {
+        const opts = [...document.querySelectorAll(sel)].filter(e => e.offsetParent !== null);
+        const texts = opts.map(e => (e.textContent || '').trim()).filter(Boolean);
+        const w = (want || '').toLowerCase().trim();
+        if (w) {
+          let hit = opts.find(e => { const t = (e.textContent || '').toLowerCase().trim(); return t && (t.includes(w) || w.includes(t)); });
+          if (!hit) {
+            const wt = new Set(w.replace(/[^a-z0-9áéíóúñü ]/gi, ' ').split(/\s+/).filter(x => x.length > 2));
+            let best = null, bs = 0;
+            for (const e of opts) { const tt = (e.textContent || '').toLowerCase().replace(/[^a-z0-9áéíóúñü ]/gi, ' ').split(/\s+/); const s = tt.filter(x => wt.has(x)).length; if (s > bs) { bs = s; best = e; } }
+            if (bs > 0) hit = best;
+          }
+          if (hit) { const t = (hit.textContent || '').trim(); hit.click(); return { clicked: t }; }
+        }
+        return { clicked: null, available: texts.slice(0, 25) };
+      }, { sel: optionSel, want: optionText });
+      if (res.clicked) { await page.waitForTimeout(500); return { clicked: res.clicked }; }
+      return { clicked: null, available: res.available || [] };
+    } catch {}
+    return { clicked: null, available: [] };
+  };
+
+  // cmdk/radix keyboard select — the RACE-FREE path. When we typed into a
+  // combobox search, the top match is highlighted; committing it with
+  // ArrowDown+Enter goes through cmdk's own state, immune to the option list
+  // re-rendering under us (which is what makes click-based selection
+  // intermittently miss — the exact "Option not found" seen on Fixera's client
+  // picker). Guarded: read the highlighted option's ACTUAL text first and only
+  // commit if it matches the request, so we never claim/commit a wrong select.
+  if (searchInput) {
+    try {
+      await searchInput.focus().catch(() => {});
+      const getHl = () => page.evaluate(() => {
+        const el = document.querySelector('[role="option"][aria-selected="true"], [cmdk-item][aria-selected="true"], [role="option"][data-selected="true"], [cmdk-item][data-selected="true"]');
+        return el ? (el.textContent || '').trim() : null;
+      });
+      // cmdk auto-highlights the top match on filter, but focus/timing can leave
+      // nothing active — nudge with ArrowDown up to a few times until an option
+      // is highlighted.
+      let hl = await getHl();
+      for (let k = 0; k < 3 && !hl; k++) { await searchInput.press('ArrowDown'); await page.waitForTimeout(150); hl = await getHl(); }
+      const w = (optionText || '').toLowerCase().trim();
+      if (hl && w && (hl.toLowerCase().includes(w) || w.includes(hl.toLowerCase()))) {
+        await searchInput.press('Enter');
         await page.waitForTimeout(500);
-        return { success: true, selected: txt };
+        const stillOpen = await page.locator(optionSel).first().isVisible({ timeout: 400 }).catch(() => false);
+        if (!stillOpen) return { success: true, selected: hl, method: 'cmdk-keyboard' };
       }
-    } catch { continue; }
+    } catch {}
   }
 
-  // Step 4: DOM fallback — return the ACTUAL option text that matched.
-  try {
-    const clickedText = await page.evaluate((val) => {
-      const els = document.querySelectorAll('[role="option"], [cmdk-item], [data-radix-collection-item], li, div, span');
-      for (const el of els) {
-        if (el.offsetParent !== null && el.textContent.trim().includes(val) && el.textContent.trim().length < val.length + 40) {
-          const t = el.textContent.trim(); el.click(); return t;
-        }
-      }
-      return null;
-    }, optionText);
-    if (clickedText) { await page.waitForTimeout(500); return { success: true, selected: clickedText }; }
-  } catch {}
+  // Try to match+click, retrying through cmdk/radix re-render races: the list
+  // re-renders on filter and can detach the element between locate and click,
+  // surfacing as a spurious "Option not found" even though the option is right
+  // there (the exact miss seen on Fixera's client picker). A few quick retries
+  // with a short settle turn that flaky miss into a reliable select.
+  let attempt = { clicked: null, available: [] };
+  for (let i = 0; i < 3; i++) {
+    attempt = await findAndClickOption();
+    if (attempt.clicked) return { success: true, selected: typeof attempt.clicked === 'string' ? attempt.clicked : undefined };
+    await page.waitForTimeout(400);
+  }
 
-  // Step 5: locator strategies missed. Re-scan the OPEN list directly. If a
-  // real option genuinely matches the request (substring or token overlap),
-  // click it and report its ACTUAL text — this recovers legit searchable-
-  // combobox cases the locators miss. If NOTHING matches, FAIL and surface the
-  // available options. The old code blind-pressed Enter and returned success,
-  // which fabricated "Selected X" reports for options that don't exist (e.g.
-  // asking for a team not in the list). A test must never claim a selection it
-  // did not actually make.
-  try {
-    const res = await page.evaluate(({ sel, want }) => {
-      const opts = [...document.querySelectorAll(sel)].filter(e => e.offsetParent !== null);
-      const texts = opts.map(e => (e.textContent || '').trim()).filter(Boolean);
-      const w = (want || '').toLowerCase().trim();
-      if (w) {
-        let hit = opts.find(e => { const t = (e.textContent || '').toLowerCase().trim(); return t && (t.includes(w) || w.includes(t)); });
-        if (!hit) {
-          const wt = new Set(w.replace(/[^a-z0-9áéíóúñü ]/gi, ' ').split(/\s+/).filter(x => x.length > 2));
-          let best = null, bs = 0;
-          for (const e of opts) { const tt = (e.textContent || '').toLowerCase().replace(/[^a-z0-9áéíóúñü ]/gi, ' ').split(/\s+/); const s = tt.filter(x => wt.has(x)).length; if (s > bs) { bs = s; best = e; } }
-          if (bs > 0) hit = best;
-        }
-        if (hit) { const t = (hit.textContent || '').trim(); hit.click(); return { clicked: t }; }
-      }
-      return { clicked: null, available: texts.slice(0, 25) };
-    }, { sel: optionSel, want: optionText });
-    if (res.clicked) { await page.waitForTimeout(500); return { success: true, selected: res.clicked }; }
-    if (res.available && res.available.length) {
-      return { success: false, reason: `Option "${optionText}" is not in this dropdown. Available options: ${res.available.join(', ')}` };
-    }
-  } catch {}
+  // Clear-and-browse net. If we typed a query and STILL matched nothing (a
+  // stale filter, a debounce we outran, or an option whose visible text differs
+  // from the query), CLEAR the box and re-scan the now-unfiltered list — the
+  // same browse path a human uses. Cheap insurance on top of the poll+retry
+  // open above; it only fires after a real miss, so it never overrides a good
+  // filtered match.
+  if (searchInput) {
+    try {
+      await searchInput.fill('');
+      await page.waitForTimeout(800);
+    } catch {}
+    const browse = await findAndClickOption();
+    if (browse.clicked) return { success: true, selected: typeof browse.clicked === 'string' ? browse.clicked : undefined };
+    attempt = browse;
+  }
 
+  if (attempt.available && attempt.available.length) {
+    return { success: false, reason: `Option "${optionText}" is not in this dropdown. Available options: ${attempt.available.join(', ')}` };
+  }
   return { success: false, reason: `Option "${optionText}" not found` };
 }
 
@@ -2194,41 +2475,90 @@ async function clickButton(page, label, { skipEscape = false, frame = null } = {
   // pointerdown → mousedown → pointerup → mouseup → click.
   try {
     const targetBox = await page.evaluate((lbl) => {
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-      const candidates = [];
-      while (walker.nextNode()) {
-        const el = walker.currentNode;
-        if (el.offsetParent === null) continue;
-        const text = el.textContent?.trim() || '';
-        // Accessible name fallback: icon-only controls (paginator arrows, FABs,
-        // close/dismiss "X" buttons) carry their name in aria-label/title and
-        // have little or no visible textContent. capturePageKnowledge already
-        // captures those names, so the resolver must match them too — otherwise
-        // every aria-named button is structurally unclickable.
-        const aria = (el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
-        const matchesText = !!text && text.includes(lbl);
-        const matchesAria = !!aria && aria.includes(lbl);
-        if (!matchesText && !matchesAria) continue;
+      // Landmark/container roles carry a human-readable aria-label (a dialog
+      // titled "Crear tablero", a region titled "Search results") that is
+      // NOT a button label — it names the whole container. Without this
+      // exclusion, an aria-label substring match (e.g. "Crear tablero"
+      // contains "Crear") lets the entire dialog outscore the actual button
+      // inside it — matchesAria bypasses the huge-container size filter — so
+      // the click lands on the container's center, nowhere near the real
+      // control, and reports "success" while doing nothing.
+      const landmarkRoles = new Set(['dialog', 'alertdialog', 'region', 'tabpanel', 'group', 'listbox', 'menu', 'navigation', 'main', 'banner', 'contentinfo', 'form']);
 
-        const tag = el.tagName;
-        const isInteractive = tag === 'BUTTON' || tag === 'A' || tag === 'INPUT' || el.getAttribute('role') === 'button' || el.onclick;
-        const hasHref = el.getAttribute('href');
-        const textLen = text.length;
+      const diacritics = new RegExp('[̀-ͯ]', 'g');
+      const normTok = s => (s || '').normalize('NFD').replace(diacritics, '').toLowerCase();
+      const tokenize = s => normTok(s).split(/[^a-z0-9]+/).filter(t => t.length > 1);
+      const lblTokens = tokenize(lbl);
 
-        // Skip huge containers (root, main, body-level divs) — but only when the
-        // hit came from visible text. An aria/title match on an icon button is
-        // precise by construction, so it must not be filtered out here.
-        if (matchesText && !matchesAria && textLen > lbl.length * 5 && !isInteractive) continue;
+      // Two-pass search: exact substring match first (unchanged, precise
+      // behavior for the common case). If that finds nothing, fall back to a
+      // fuzzy token-subset match — every significant word of the searched
+      // label must appear somewhere in the candidate's aria/title/text/value,
+      // in any order, allowing extra words in between. This recovers icon-only
+      // controls where the agent's inferred label drops or reorders a word
+      // relative to the real accessible name — e.g. it guesses "Añadir lista"
+      // for a control whose actual aria-label is "Añadir una lista": not a
+      // substring match, but every token of the guess is present.
+      const findCandidates = (fuzzy) => {
+        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+        const candidates = [];
+        while (walker.nextNode()) {
+          const el = walker.currentNode;
+          if (el.offsetParent === null) continue;
+          const tag = el.tagName;
+          const role = el.getAttribute('role');
+          if (landmarkRoles.has(role) && tag !== 'BUTTON' && tag !== 'A' && tag !== 'INPUT') continue;
+          const text = el.textContent?.trim() || '';
+          // <input type="submit|button|reset"> carries its label in `value`,
+          // not textContent (inputs have no child text nodes) — without this,
+          // Wekan-style `<input type="submit" value="Crear">` submit buttons
+          // are structurally invisible to the text search below.
+          const valueText = (tag === 'INPUT' && ['submit', 'button', 'reset'].includes(el.type)) ? (el.value || '').trim() : '';
+          // Accessible name fallback: icon-only controls (paginator arrows, FABs,
+          // close/dismiss "X" buttons) carry their name in aria-label/title and
+          // have little or no visible textContent. capturePageKnowledge already
+          // captures those names, so the resolver must match them too — otherwise
+          // every aria-named button is structurally unclickable.
+          const aria = (el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
+          let matchesValue, matchesText, matchesAria;
+          if (!fuzzy) {
+            matchesValue = !!valueText && valueText.includes(lbl);
+            matchesText = !matchesValue && !!text && text.includes(lbl);
+            matchesAria = !!aria && aria.includes(lbl);
+          } else {
+            if (lblTokens.length === 0) break;
+            const fits = s => { const t = tokenize(s); return lblTokens.every(tok => t.includes(tok)); };
+            matchesValue = !!valueText && fits(valueText);
+            matchesText = !matchesValue && !!text && text.length < 60 && fits(text);
+            matchesAria = !!aria && fits(aria);
+          }
+          if (!matchesText && !matchesAria && !matchesValue) continue;
 
-        let score = 1000 - textLen;
-        if (matchesAria) score += 400;   // accessible-name hit — strong signal for icon controls
-        if (isInteractive) score += 500;
-        if (hasHref) score += 300;
-        if (tag === 'BUTTON') score += 200;
-        if (tag === 'A') score += 200;
+          const isInteractive = tag === 'BUTTON' || tag === 'A' || tag === 'INPUT' || role === 'button' || el.onclick;
+          const hasHref = el.getAttribute('href');
+          const textLen = matchesValue ? valueText.length : text.length;
 
-        candidates.push({ el, score, tag, textLen });
-      }
+          // Skip huge containers (root, main, body-level divs) — but only when the
+          // hit came from visible text. An aria/title/value match on a button is
+          // precise by construction, so it must not be filtered out here.
+          if (matchesText && !matchesAria && !matchesValue && textLen > lbl.length * 5 && !isInteractive) continue;
+
+          let score = 1000 - textLen;
+          if (matchesValue) score += 450;  // exact-control-label hit — outranks a container's aria-label
+          if (matchesAria) score += 400;   // accessible-name hit — strong signal for icon controls
+          if (isInteractive) score += 500;
+          if (hasHref) score += 300;
+          if (tag === 'BUTTON') score += 200;
+          if (tag === 'A') score += 200;
+          if (fuzzy) score -= 100; // fuzzy hits rank below any exact-pass equivalent
+
+          candidates.push({ el, score, tag, textLen });
+        }
+        return candidates;
+      };
+
+      let candidates = findCandidates(false);
+      if (candidates.length === 0) candidates = findCandidates(true);
       if (candidates.length === 0) return null;
 
       candidates.sort((a, b) => b.score - a.score);
@@ -2415,7 +2745,7 @@ async function resolveAndFill(page, fieldName, value, { nth } = {}) {
 }
 
 async function crawlApp(appId, url, credentials, description, apiKey, onProgress, ownerEmail = '') {
-  const browser = await chromium.launch({ headless: true });
+  const browser = await launchBrowser();
   // "Bring your own session": hydrate the context with a pasted Playwright
   // storageState if provided, so SSO/MFA/CAPTCHA-walled apps can be crawled.
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, ...(credentials?.sessionState ? { storageState: credentials.sessionState } : {}) });
@@ -3200,6 +3530,37 @@ App description: ${appKnowledge.description || '(none)'}`;
       appKnowledge.navigation[text] = { path: `#tab-${value}` };
     }
 
+    // (3b) Bubble.io apps. Bubble generates NO semantic landmarks — no <nav>,
+    // no [role=navigation], no <aside>; navigation is .clickable-element divs
+    // wired to "Go to page" workflows, plus the occasional Link <a>. Steps
+    // (1)-(3) find ~nothing, which is why Bubble maps used to come out at
+    // 1-2 pages. Register every distinct short-text clickable as a nav
+    // candidate; the crawl loop clicks them and keys pages off the arrived
+    // URL (Bubble page navs DO change the path).
+    const isBubbleApp = (await page.locator('.bubble-element').count().catch(() => 0)) > 0;
+    if (isBubbleApp) {
+      const bubbleEls = await page.locator('.clickable-element:visible').all();
+      const seenBubble = new Set();
+      for (const el of bubbleEls.slice(0, 40)) {
+        const text = (await el.textContent().catch(() => ''))?.trim();
+        // >30 chars = a wrapping Group whose textContent concatenates all
+        // children — not a nav target.
+        if (!text || text.length < 2 || text.length > 30) continue;
+        if (/logout|sign.?out|log.?in|sign.?up|salir|cerrar/i.test(text)) continue;
+        const norm = text.toLowerCase();
+        if (seenBubble.has(norm)) continue;
+        seenBubble.add(norm);
+        const key = `bubble:${norm}`;
+        if (navSections.has(key)) continue;
+        navSections.set(key, { text, kind: 'bubbleClick' });
+        appKnowledge.navigation[text] = { path: `#bubble-${norm.replace(/\s+/g, '-')}` };
+        if (seenBubble.size >= 15) break;
+      }
+      if (seenBubble.size) {
+        onProgress?.({ phase: 'crawl', message: `  🫧 Bubble app detected — registered ${seenBubble.size} clickable nav candidates` });
+      }
+    }
+
     // (4) Vision fallback. If selectors found <3 nav targets, the app probably
     // uses non-semantic markup (custom div+onclick, vanilla jQuery dashboards,
     // etc.). Send the home screenshot to Claude and ask it to name the
@@ -3211,6 +3572,8 @@ App description: ${appKnowledge.description || '(none)'}`;
         onProgress?.({ phase: 'crawl', message: `  👁️  Selectors found ${navSections.size} nav targets — asking Claude to find more from screenshot` });
         const homeShotForVision = homeScreenshot.startsWith('/') ? `.${homeScreenshot}` : homeScreenshot;
         const imgBuf = await fs.readFile(homeShotForVision);
+        const navImg = pngImageBlock(imgBuf);
+        if (!navImg) throw new Error('home screenshot unavailable or oversized for vision');
         const visionResp = await withRetry(() => getClient(apiKey).messages.create({
           // Vision-only structured ask — Haiku is plenty.
           model: 'claude-haiku-4-5',
@@ -3218,7 +3581,7 @@ App description: ${appKnowledge.description || '(none)'}`;
           messages: [{
             role: 'user',
             content: [
-              { type: 'image', source: { type: 'base64', media_type: 'image/png', data: imgBuf.toString('base64') } },
+              navImg,
               { type: 'text', text: 'List the top-level navigation menu items visible in this app screenshot. Sidebar links, top-bar tabs, primary navigation only. Skip user-account / settings / logout buttons. Return ONLY a JSON array of short labels: ["Dashboard","Orders","Customers"]. No prose.' }
             ]
           }]
@@ -3295,10 +3658,39 @@ App description: ${appKnowledge.description || '(none)'}`;
             await page.waitForTimeout(1500);
             arrivedPath = routeKey(page.url());
           }
+        } else if (info.kind === 'bubbleClick') {
+          // Bubble div-nav: click the innermost .clickable-element containing
+          // the text (.last() = deepest in document order — the actual button,
+          // not a page-wide wrapping Group that also carries the class).
+          const findBubbleTarget = () => page.locator('.clickable-element:visible').filter({ hasText: info.text }).last();
+          let bubbleTarget = findBubbleTarget();
+          if (!(await bubbleTarget.isVisible({ timeout: 1500 }).catch(() => false))) {
+            // Nav candidates were collected on the home page — a previous click
+            // may have navigated away from it. Go home and re-resolve once.
+            await page.goto(url, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
+            await page.waitForTimeout(1200);
+            bubbleTarget = findBubbleTarget();
+          }
+          if (!(await bubbleTarget.isVisible({ timeout: 1500 }).catch(() => false))) {
+            onProgress?.({ phase: 'crawl', message: `  ⚠️ "${text}": Bubble element not visible, skipping` });
+            continue;
+          }
+          await bubbleTarget.click({ timeout: 5000 }).catch(() => {});
+          await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+          await page.waitForTimeout(1500);
+          const realPath = routeKey(page.url());
+          arrivedPath = realPath !== homePath
+            ? realPath
+            : `${realPath}#bubble-${text.toLowerCase().replace(/\s+/g, '-')}`;
         } else if (info.kind === 'visionClick') {
-          // Vision fallback target — find by visible text and click.
-          const target = page.getByText(info.visionText, { exact: true }).first();
+          // Vision fallback target — find by visible text and click. Exact
+          // match first; relax to substring for apps that nest text in extra
+          // elements with whitespace (Bubble <font> wrappers, icon spans).
+          let target = page.getByText(info.visionText, { exact: true }).first();
           if (!(await target.isVisible({ timeout: 1500 }).catch(() => false))) {
+            target = page.getByText(info.visionText, { exact: false }).first();
+          }
+          if (!(await target.isVisible({ timeout: 1000 }).catch(() => false))) {
             onProgress?.({ phase: 'crawl', message: `  ⚠️ "${text}": vision target no longer visible, skipping` });
             continue;
           }
@@ -3431,8 +3823,14 @@ App description: ${appKnowledge.description || '(none)'}`;
 
         const pageKnow = appKnowledge.pages[sectionPath] || await capturePageKnowledge(page);
 
-        // Click every button on this page
+        // Explore at most 8 buttons per page. Uncapped, a Bubble repeating
+        // group (or any long list captured as buttons) turns Phase 2 into
+        // dozens of click+screenshot+vision cycles per page — enough Chromium
+        // load to OOM the VM (which it did, Aug 2 2026). 8 rows of a list
+        // teach the crawler as much as 80.
+        let exploredOnPage = 0;
         for (const btn of (pageKnow.buttons || [])) {
+          if (exploredOnPage >= 8) break;
           if (isCrawlExpired() || crawledPaths.size >= MAX_PAGES) break;
           if (btn.disabled) continue;
           // Skip nav-landmark buttons — they're sidebar/topbar links that
@@ -3452,6 +3850,7 @@ App description: ${appKnowledge.description || '(none)'}`;
           if (triedActions.has(actionKey) || failedActions.has(actionKey)) continue;
 
           onProgress?.({ phase: 'crawl', message: `  🖱️ "${btn.label}"${btn.frame ? ` (in ${btn.frame})` : ''}` });
+          exploredOnPage++;
           const obs = await observeClick(btn.label, sectionPath, btn.frame);
 
           if (obs?.type === 'navigated' && !crawledPaths.has(obs.path) && !obs.path.includes('login')) {
@@ -3723,10 +4122,14 @@ App description: ${appKnowledge.description || '(none)'}`;
       }).join('\n\n');
 
     const aiAnalysis = await withRetry(() => getClient(apiKey).messages.create({
-      // Knowledge-base build is a one-shot heavy reasoning task — Sonnet 4.6
+      // Knowledge-base build is a one-shot heavy reasoning task — Sonnet 5
       // (current generation) is the right balance of cost and quality.
-      model: 'claude-sonnet-4-6',
-      max_tokens: 3000,
+      // thinking disabled: Sonnet 5 defaults to adaptive thinking, which
+      // prepends a thinking block and breaks content[0].text parsing.
+      // max_tokens +30% headroom for the Sonnet 5 tokenizer.
+      model: 'claude-sonnet-5',
+      thinking: { type: 'disabled' },
+      max_tokens: 4000,
       messages: [{
         role: 'user',
         content: `You are analyzing a web application to build a complete operational knowledge base for autonomous testing.
@@ -3921,9 +4324,10 @@ async function askClaudeVision(page, appKnowledge, action, target, apiKey) {
     content.push({ type: 'text', text: 'CURRENT SCREEN (what I see right now):' });
     content.push({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: currentBuf.toString('base64') } });
 
-    if (crawlBuf) {
+    const refImg = pngImageBlock(crawlBuf);
+    if (refImg) {
       content.push({ type: 'text', text: 'REFERENCE (what this page looked like during learning crawl):' });
-      content.push({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: crawlBuf.toString('base64') } });
+      content.push(refImg);
     }
 
     content.push({ type: 'text', text: `I need to ${action}: "${target}"
@@ -3947,9 +4351,11 @@ NEVER return found:false if you can see ANY actionable next step. Only return fo
 
     const response = await withRetry(() => getClient(apiKey).messages.create({
       // Vision-ask is the per-step agent decision in the V2 recipe-fallback
-      // path. Vision quality matters here, so stay on Sonnet 4.6.
-      model: 'claude-sonnet-4-6',
-      max_tokens: 300,
+      // path. Vision quality matters here — Sonnet 5 adds high-res vision.
+      // thinking disabled to keep content[0] = the text block.
+      model: 'claude-sonnet-5',
+      thinking: { type: 'disabled' },
+      max_tokens: 400,
       messages: [{ role: 'user', content }]
     }), { label: 'vision-ask' });
 
@@ -4021,6 +4427,26 @@ function restoreCreds(action, creds) {
   return mapCredValues(action, v => (v === EMAIL_TOKEN ? (creds?.email || '') : v === PASSWORD_TOKEN ? (creds?.password || '') : v));
 }
 
+// Guarded Chromium launch. Playwright's browser processes live OUTSIDE the
+// node process, so pm2's max_memory_restart (which watches node's own RSS)
+// cannot protect the VM from Chromium memory pressure — on Aug 2 2026 an
+// uncapped crawl OOM'd the whole VM, taking mocount down with it. Refuse to
+// start a browser when the box is low on memory; callers surface the thrown
+// error as a retryable "server busy" rather than a dead host.
+async function launchBrowser(opts = { headless: true }) {
+  try {
+    const meminfo = await fs.readFile('/proc/meminfo', 'utf-8');
+    const kb = Number(/MemAvailable:\s+(\d+)/.exec(meminfo)?.[1] || 0);
+    if (kb > 0 && kb < 700 * 1024) {
+      throw new Error(`Server is busy (low memory: ${Math.round(kb / 1024)}MB free) — please retry in a few minutes.`);
+    }
+  } catch (e) {
+    if (/Server is busy/.test(e.message)) throw e;
+    // /proc/meminfo unreadable (non-Linux dev box) — skip the guard.
+  }
+  return chromium.launch(opts);
+}
+
 // PNG dimensions parsed from base64 — reads just the IHDR chunk (no deps).
 // Used to skip crawl screenshots that exceed Anthropic's 8000-pixel image limit
 // (long-content pages like blogs/docs hit this). Returns {width, height} or null.
@@ -4030,6 +4456,34 @@ function pngDimensionsFromBase64(b64) {
     if (buf.length < 24 || buf[0] !== 0x89 || buf[1] !== 0x50 || buf[2] !== 0x4E || buf[3] !== 0x47) return null;
     return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
   } catch { return null; }
+}
+
+// Distinguish "the user's account/key is misconfigured" from "the engine
+// broke". Both used to land as status:'error' with a raw API JSON blob in the
+// message, so paying users couldn't tell a TestPilot bug from their own
+// billing problem — and our error-rate metric counted their billing problems
+// against the engine. Returns {friendly} for account-side failures, else null.
+function classifyConfigError(msg) {
+  const m = String(msg || '');
+  if (/credit balance is too low/i.test(m)) {
+    return { friendly: 'Your Anthropic API key has run out of credits. Add credits at console.anthropic.com → Plans & Billing, then re-run the test.' };
+  }
+  if (/invalid x-api-key|authentication_error/i.test(m)) {
+    return { friendly: 'Your Anthropic API key was rejected. Check the key in Settings — it may have been revoked or pasted incorrectly.' };
+  }
+  return null;
+}
+
+// Build an Anthropic image content block from a PNG buffer, or null when the
+// image would be rejected by the API (any dimension > 8000px). Screenshots
+// saved before the fullPage cap existed can still be oversized on disk, so
+// every attach site must go through this instead of inlining the block.
+function pngImageBlock(buf) {
+  if (!buf || !buf.length) return null;
+  const b64 = buf.toString('base64');
+  const dim = pngDimensionsFromBase64(b64);
+  if (dim && (dim.width > 8000 || dim.height > 8000)) return null;
+  return { type: 'image', source: { type: 'base64', media_type: 'image/png', data: b64 } };
 }
 
 // Parse a user-supplied session credential into a Playwright `storageState`
@@ -4075,7 +4529,7 @@ function requesterEmail(req) {
 const pendingFileUploads = new Map(); // testId -> { resolve, requestId, multiple, timer }
 
 async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey) {
-  const browser = await chromium.launch({ headless: true });
+  const browser = await launchBrowser();
   // "Bring your own session": hydrate with a pasted storageState if provided,
   // skipping login entirely for SSO/MFA/CAPTCHA-walled apps.
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, ...(credentials?.sessionState ? { storageState: credentials.sessionState } : {}) });
@@ -4468,6 +4922,8 @@ RULES:
 12. VERIFY EACH CONDITION INDEPENDENTLY — when a check asks you to confirm MULTIPLE things ("verify the job is completed AND the invoice is paid"), confirm each one separately (scroll to it, or navigate to its view, and verify it on its own). Do NOT invent a "both must be visible on the same screen" requirement — that is almost never what the scenario means, and many apps legitimately show related states on different views. Only treat "must appear together / on the same screen" as a requirement if the scenario EXPLICITLY says so. If it does say so and the app genuinely cannot show them together, THAT is a real BROKEN finding (report it). Otherwise: verify the pieces independently, and if you genuinely cannot confirm one piece from any view, mark that specific check UNCERTAIN with the reason — do not let an over-strict same-screen expectation turn a real success into a failure, or a real failure into a vague "done".
 13. DISMISSING PANELS/MODALS — do NOT repeatedly try to close a card panel or modal. On many apps the "×" does nothing, Escape does nothing, and the panel closes ONLY when you click a navigation tab or open the next record. So: after you finish with a panel, DON'T emit a close/"×"/Escape action to move on — just click your NEXT target directly (the next nav tab, the next card, or the next button for your task). The new view replaces the panel. If you ever see "CLOSE BLOCKED" in feedback, stop closing entirely and click a nav tab or your next item. Never spend more than one action trying to close anything.
 14. DO EXACTLY THE ASKED SCOPE — THEN STOP. Do what the scenario asks and no more. If it specifies a COUNT or a specific set ("assign 3 cards", "resolve 2 and reject 1", "create one quote"), keep a running tally as you go and call \`done\` THE MOMENT you have completed that exact count. Acting on ADDITIONAL items beyond what was asked is over-reach — it is NOT thoroughness, it makes the result wrong and wastes budget. Rule 9 ("never give up early") means don't quit BEFORE finishing the asked-for steps; it does NOT mean keep doing extra work after they're done. As soon as the asked steps are complete, your next action MUST be \`done\` with a summary of exactly what you did (e.g. "Resolved DM02 and DM09, rejected DM13 — 2 resolved + 1 rejected as requested").
+15. STATUS / LIFECYCLE FILTER TABS — list views (jobs, invoices, quotes, orders…) often have status-filter tabs like "New/Available", "In progress", "Completed", "Paid", "Closed", "All" — sometimes with counts like "All (0)" / "Todos (0)". These represent a record's LIFECYCLE STATE, not whether it EXISTS. Acting on a record MOVES it between tabs: a new record sits under New/Available; after you START it, it moves to In progress; after you COMPLETE/CLOSE/PAY it, it moves to Completed/Closed/Paid. So: (a) to find a record you just created or need to act on, prefer an "All"/unfiltered view, sort-by-newest, or SEARCH BY NAME — don't hunt through state tabs one by one. (b) After you change a record's state, if it disappears from the current tab it is NOT gone — switch to the tab matching its NEW state. (c) A tab showing "(0)" means nothing is in THAT state right now — switch tabs or use All/search; NEVER conclude your record vanished, and never loop clicking empty state tabs. This is the SAME record moving through its lifecycle — understand the state words, don't treat each tab as a separate place a record could be lost.
+16. STAY LOGGED IN — NEVER click a logout / "Cerrar sesión" / "Salir" / "Sign out" / "Cerrar sesión y salir" / account-exit control. You must remain authenticated for the WHOLE run; logging out drops your session and forces a re-login that wastes budget and can lose your place. If you think the scenario is finished, call \`done\` — do NOT sign out to "finish". (The system will also refuse logout clicks.)
 
 CREDENTIALS: email="${credentials?.email || 'none'}", password="${credentials?.password || 'none'}".
 ${credentials?.email && credentials?.password ? `Use these exact credentials when the app asks you to log in. If login fails, report it as a finding — never invent credentials or sign up as a new user.` : `No credentials provided — the app is public. Do not attempt to log in, just test the public flows.`}
@@ -4514,6 +4970,19 @@ What is your first action?`,
     // clear blocked reason instead of burning 30+ Anthropic calls.
     const actionHistory = []; // strings like 'click:Finalizar trabajo'
     let consecutiveScrolls = 0; // resets on any non-scroll action; bare scroll guard
+    // FROZEN-SCREEN detector: sha256 of the most recent "after" screenshot for
+    // click/fill/fill_form/select_dropdown actions. Complements the (action,target)
+    // loop coach above — that one nudges "you tried the same thing N times", which
+    // is unhelpful when the action genuinely LOOKS correct to the model (a fully-
+    // rendered, enabled button) and only the TARGET TEXT varies (e.g. alternating
+    // between a modal's trigger and its submit button), diluting the signature
+    // match. A byte-identical screenshot across several distinct actions is a much
+    // stronger, factual claim: the input had ZERO visible effect, not just "you
+    // repeated yourself". Never reset on reflection — the whole point is surviving
+    // a failed Opus rescue attempt, not giving the model a fresh 3-attempt runway.
+    let lastScreenshotHash = null;
+    let consecutiveIdenticalScreens = 0;
+    let forceBlockedDoneReason = null; // set by the frozen-screen HARD stop below; consumed at the top of the next loop iteration (same override pattern as the SCOPE GUARD)
     let needsReflection = false; // set by stuckness detectors; consumed at end of turn
     const recentFailedClicks = new Map(); // normalized click target → {step,count}. Circuit-breaker: a not-found click (esp. a modal "×") must not spiral into dozens of identical failed retries.
     const reflectionCooldown = { lastTurn: -3 }; // throttle so the Opus rescue fires at most once per 3 turns
@@ -4627,15 +5096,17 @@ What is your first action?`,
         const tgt = action.target || action.trigger || action.url || action.field || '';
         emitStep(testId, { type: 'info', message: `⚡ Replaying recorded step: ${action.action}${tgt ? ` "${String(tgt).slice(0, 50)}"` : ''} (${replayQueue.length} recorded step${replayQueue.length === 1 ? '' : 's'} left)` });
       } else {
-        // Main agent loop runs on Sonnet 4.6 (cheap, fast). When the system
+        // Main agent loop runs on Sonnet 5 (cheap, fast). When the system
         // detects Sonnet is stuck (3+ same-action repeats, 4+ consecutive
         // scrolls, or repeated fill blocks), the reflection turn invokes
-        // Opus 4.7 as a "rescue" — Opus analyzes the situation with fresh
+        // Opus 4.8 as a "rescue" — Opus analyzes the situation with fresh
         // context and tells Sonnet what to do next. Sonnet then resumes
         // normal operation. Hybrid model — cheap routine + strong rescue.
         const response = await withRetry(() => getClient(apiKey).messages.create({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 300,
+          // thinking disabled: keep content[0] = text; agent parses it directly.
+          model: 'claude-sonnet-5',
+          thinking: { type: 'disabled' },
+          max_tokens: 400,
           messages: conversation
         }), { label: `step-${turn}` });
         // Tally usage. cache_read_input_tokens is ~10% the cost of regular input
@@ -4686,6 +5157,19 @@ What is your first action?`,
         action = { action: 'done', summary: `Completed the requested ${scopeLimit} item(s) (${[...committedItems].join(', ')}) and stopped as instructed — did not act on additional items.` };
       }
 
+      // FROZEN-SCREEN HARD STOP: the previous iteration's screenshot-hash check
+      // (below) found the screen byte-identical for too many actions in a row and
+      // set this reason. A text hint alone proved unreliable here — the model can
+      // keep re-choosing an action that LOOKS objectively correct even after being
+      // told (correctly) that it's having zero effect. So this forces the same
+      // outcome the scope guard above forces: convert the action into an honest
+      // `done`, guaranteeing the run ends BLOCKED (not completed, per the done-time
+      // agentReportedBlocked check) instead of burning the rest of the step budget.
+      if (forceBlockedDoneReason) {
+        action = { action: 'done', summary: forceBlockedDoneReason };
+        forceBlockedDoneReason = null;
+      }
+
       try {
         switch (action.action) {
           case 'navigate': {
@@ -4702,6 +5186,48 @@ What is your first action?`,
           }
 
           case 'click': {
+            // SELF-LOGOUT GUARD: the agent must stay authenticated to finish a
+            // scenario. Clicking a logout control ("Cerrar sesión", "Log out",
+            // or a bare "Salir") drops the session and forces a costly re-login
+            // mid-run (observed twice, ~5 steps each). Refuse it and tell the
+            // agent to continue. Generic/multilingual; the ambiguous bare-word
+            // variants (Salir/Sair/Esci/Exit/Abmelden — which can also mean
+            // "exit a dialog") only match when they ARE the whole label, so an
+            // in-app "Salir del asistente" still works, and modal dismissals
+            // (usually "Cancelar/Cancel") are unaffected.
+            const tgt = String(action.target || '').trim();
+            if (/(log\s?out|sign\s?out|log\s?off|sign\s?off|cerrar\s+sesi[oó]n|d[eé]connexion|d[eé]connecter|uitloggen|disconnetti|ausloggen)/i.test(tgt)
+                || /^(salir|sair|esci|exit|abmelden|logout|déconnexion)$/i.test(tgt)) {
+              outcome = `BLOCKED — refusing to click "${tgt}": it logs you OUT, and you must stay signed in to finish the scenario. Do NOT log out. Continue your task by clicking your next real target (a nav tab, a record, or an action button). If you believe every scenario step is done, call \`done\` instead.`;
+              status = 'retry'; needsReflection = true;
+              break;
+            }
+            // FILE-UPLOAD INTENT (G2): a native <input type="file"> renders as
+            // "Choose File / No file chosen" (or "Subir/Examinar/Browse") — text
+            // with NO matchable DOM label, so a text-based click never fires the
+            // file chooser and the agent loops (observed 52× on a mandatory ID
+            // gate). If the target reads as an upload AND a file input is present,
+            // drive it DETERMINISTICALLY via setInputFiles with a bundled
+            // placeholder, picking the type from the input's `accept`.
+            {
+              const tgtLc = String(action.target || '').toLowerCase();
+              const uploadIntent = /choose file|no file chosen|browse\b|\bupload\b|subir (archivo|foto|imagen|documento)|seleccionar archivo|elegir archivo|examinar|adjuntar|dateien? ausw|choisir un fichier|parcourir|\bfile\b|\barchivo\b|\bfoto\b|\bphoto\b|\bimagen\b|\bdocumento\b|\bdni\b|\bnie\b|\bid document\b/i.test(tgtLc);
+              if (uploadIntent) {
+                const fileInputs = page.locator('input[type="file"]');
+                const hasFileInput = await fileInputs.first().count().then(c => c > 0).catch(() => false);
+                if (hasFileInput) {
+                  const supplied = await supplyPlaceholderToFileInput(page, fileInputs);
+                  if (supplied) {
+                    outcome = `Uploaded ${supplied} to the file input (bundled placeholder). If the app validates dimensions/type/aspect, the next step will show any rejection — then treat it as a domain-specific-file BLOCK, don't re-click.`;
+                    status = 'pass';
+                  } else {
+                    outcome = `This step needs a real file upload and no bundled placeholder is available (or the app rejects generic files). A mandatory domain-specific file (e.g. a valid Spanish DNI/NIE ID) cannot be synthesized by TestPilot. Treat the scenario as BLOCKED at this gate: call \`done\` with a summary stating it was BLOCKED by a required file upload — do NOT keep clicking the file control.`;
+                    status = 'retry'; needsReflection = true;
+                  }
+                  break;
+                }
+              }
+            }
             // RE-HANDLE BLOCK (opt-in, cap set): block a COMMIT-intent click
             // (accept/reject/save/assign/resolve/complete) on an ALREADY-handled
             // entity. Opening/closing/navigating stays allowed so the agent can
@@ -4721,8 +5247,19 @@ What is your first action?`,
             // the dedup guard will see Row 2's fills as duplicates of Row 1
             // and refuse them, breaking legitimate multi-row data entry.
             // Universal: any "add"-style button click resets the trackers.
+            //
+            // EXCEPT when the click opens a composer for a brand-new
+            // top-level entity (list/board/card/swimlane/workspace) rather
+            // than adding a row within the CURRENT form. Those composers
+            // (Trello/Wekan-style "add another list/card") reuse the exact
+            // same field name — e.g. a placeholder-derived "Añadir una
+            // lista" — every time they reopen, so a bare "añadir" match
+            // wiped the dedup guard on every reopen and let the agent
+            // recreate the identical list 9x in one run before this fix,
+            // because DUPLICATE FILL BLOCKED never got a chance to fire.
             const clickTargetLc = (action.target || '').toLowerCase();
-            const isAddRowClick = /añadir|agregar|nueva l[ií]nea|nueva fila|crear l[ií]nea|add (line|row|item|new|another)|new (line|row|item)|\+ ?(item|line|row|añadir|new|línea)|insertar/i.test(clickTargetLc);
+            const opensNewTopLevelEntity = /\blist|lista|tablero|\bboard|tarjeta|\bcard|carril|swimlane|espacio de trabajo|workspace/i.test(clickTargetLc);
+            const isAddRowClick = !opensNewTopLevelEntity && /añadir|agregar|nueva l[ií]nea|nueva fila|crear l[ií]nea|add (line|row|item|new|another)|new (line|row|item)|\+ ?(item|line|row|añadir|new|línea)|insertar/i.test(clickTargetLc);
             if (isAddRowClick) {
               recentFills.clear();
             }
@@ -4765,6 +5302,26 @@ What is your first action?`,
                     if (big && z >= 20) n++;
                   } catch {}
                 });
+                // Docked side panels (sidebars, drawers) rarely cover 60% of
+                // the viewport and are often position:absolute, not :fixed —
+                // the checks above miss them entirely, so `before` reads 0
+                // and every close strategy below gets skipped without ever
+                // being tried. A visible, explicitly-labeled close affordance
+                // (aria-label/title "close"/"cerrar", or a bare ×/✕/✖ glyph)
+                // is itself strong evidence something is open and closeable,
+                // independent of the container's size or positioning scheme.
+                if (n === 0) {
+                  // Prefix match ("^="), not substring ("*="): a persistent
+                  // header toggle can carry a dual-purpose label like "Abrir
+                  // la barra lateral o Cerrar la barra lateral" ("Open the
+                  // sidebar or Close the sidebar") that CONTAINS "cerrar"
+                  // even while nothing is open, which would permanently
+                  // false-positive this detector on every board page.
+                  const closeSelectors = ['[aria-label^="cerrar" i]', '[aria-label^="close" i]', '[title^="cerrar" i]', '[title^="close" i]', '[data-dialog-close]', '[aria-label*="dismiss" i]'];
+                  const hasLabeled = closeSelectors.some(s => [...document.querySelectorAll(s)].some(e => e.offsetParent !== null));
+                  const hasGlyph = !hasLabeled && [...document.querySelectorAll('a,button,span,div')].some(e => e.offsetParent !== null && /^[×✕✖xX]$/.test((e.textContent || '').trim()));
+                  if (hasLabeled || hasGlyph) n = 1;
+                }
                 return n;
               }).catch(() => 0);
               const before = await countOverlays();
@@ -4778,9 +5335,13 @@ What is your first action?`,
               // the LAST (topmost/most-recent) match.
               if (before > 0) {
                 const clickedBtn = await page.evaluate(() => {
-                  const sels = ['button[aria-label*="cerrar" i]', 'button[aria-label*="close" i]', 'button[title*="cerrar" i]', 'button[title*="close" i]', '[data-dialog-close]', '[aria-label*="dismiss" i]'];
+                  // Close affordances aren't always <button> — Wekan's sidebar
+                  // close control, for instance, is an <a aria-label="Cerrar">.
+                  // Matching only "button[...]" left every non-button close
+                  // control permanently unclickable by this strategy.
+                  const sels = ['[aria-label^="cerrar" i]', '[aria-label^="close" i]', '[title^="cerrar" i]', '[title^="close" i]', '[data-dialog-close]', '[aria-label*="dismiss" i]'];
                   for (const s of sels) { const list = [...document.querySelectorAll(s)].filter(e => e.offsetParent !== null); const b = list[list.length - 1]; if (b) { b.click(); return true; } }
-                  const btns = [...document.querySelectorAll('button')].filter(e => e.offsetParent !== null);
+                  const btns = [...document.querySelectorAll('a,button,span,div,[role="button"]')].filter(e => e.offsetParent !== null);
                   const x = btns.find(b => /^[×✕✖xX]$/.test((b.textContent || '').trim()));
                   if (x) { x.click(); return true; }
                   return false;
@@ -5222,32 +5783,32 @@ Look at this turn's screenshot and the Buttons / Fields lists. Pick something el
             // critical for line-item rows where Row 1 + Row 2 share labels.
             const tryFill = async (fName, fValue) => {
               const strategies = [
-                async () => { const el = page.locator(`#${fName}`).first(); if (await el.isVisible({ timeout: 1200 }).catch(() => false)) { await el.fill(fValue); return true; } return false; },
+                async () => { const el = page.locator(`#${fName}`).first(); if (await el.isVisible({ timeout: 1200 }).catch(() => false)) { await el.fill(fValue); return el; } return null; },
                 async () => {
                   const all = page.getByPlaceholder(fName);
                   const count = await all.count().catch(() => 0);
-                  if (count === 0) return false;
-                  if (count === 1) { if (await all.first().isVisible({ timeout: 1200 }).catch(() => false)) { await all.first().fill(fValue); return true; } return false; }
+                  if (count === 0) return null;
+                  if (count === 1) { if (await all.first().isVisible({ timeout: 1200 }).catch(() => false)) { await all.first().fill(fValue); return all.first(); } return null; }
                   for (let i = 0; i < count; i++) {
                     const el = all.nth(i);
                     const v = await el.inputValue().catch(() => '');
-                    if (!v) { await el.fill(fValue); return true; }
+                    if (!v) { await el.fill(fValue); return el; }
                   }
-                  await all.last().fill(fValue); return true;
+                  await all.last().fill(fValue); return all.last();
                 },
                 async () => {
                   const all = page.getByLabel(fName);
                   const count = await all.count().catch(() => 0);
-                  if (count === 0) return false;
-                  if (count === 1) { if (await all.first().isVisible({ timeout: 1200 }).catch(() => false)) { await all.first().fill(fValue); return true; } return false; }
+                  if (count === 0) return null;
+                  if (count === 1) { if (await all.first().isVisible({ timeout: 1200 }).catch(() => false)) { await all.first().fill(fValue); return all.first(); } return null; }
                   for (let i = 0; i < count; i++) {
                     const el = all.nth(i);
                     const v = await el.inputValue().catch(() => '');
-                    if (!v) { await el.fill(fValue); return true; }
+                    if (!v) { await el.fill(fValue); return el; }
                   }
-                  await all.last().fill(fValue); return true;
+                  await all.last().fill(fValue); return all.last();
                 },
-                async () => { const el = page.locator(`[name="${fName}"]`).first(); if (await el.isVisible({ timeout: 1200 }).catch(() => false)) { await el.fill(fValue); return true; } return false; },
+                async () => { const el = page.locator(`[name="${fName}"]`).first(); if (await el.isVisible({ timeout: 1200 }).catch(() => false)) { await el.fill(fValue); return el; } return null; },
                 // ADJACENT-LABEL fallback. Some forms (Fixera quote/invoice line
                 // items: Cantidad, Precio unit., Unidad) render the field caption
                 // as plain text in a wrapper — NOT a <label for>, placeholder, id
@@ -5257,10 +5818,19 @@ Look at this turn's screenshot and the Buttons / Fields lists. Pick something el
                 // the first EMPTY match (multi-row aware: Row 1 before Row 2),
                 // tag it, then fill via Playwright so React onChange still fires.
                 async () => {
-                  const tagged = await page.evaluate((name) => {
+                  // Tags the match with two attributes: a transient
+                  // `data-tp-fill` used only to hand off to Playwright for the
+                  // immediate .fill(), and a permanent `data-tp-locked-N`
+                  // (unique per call, via window.__tpFillSeq) so the caller
+                  // can build a Locator that still resolves to this exact
+                  // element later — e.g. to re-verify its value right before
+                  // a commit click — without re-running the label-matching
+                  // search, which would pick a different empty row on a
+                  // multi-row form.
+                  const seq = await page.evaluate((name) => {
                     const norm = s => (s || '').replace(/[*:()€%]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
                     const target = norm(name);
-                    if (!target) return false;
+                    if (!target) return null;
                     document.querySelectorAll('[data-tp-fill]').forEach(e => e.removeAttribute('data-tp-fill'));
                     const labelOf = (inp) => {
                       const id = inp.getAttribute('id');
@@ -5274,57 +5844,115 @@ Look at this turn's screenshot and the Buttons / Fields lists. Pick something el
                     const matches = [...document.querySelectorAll('input:not([type=hidden]), textarea, select')]
                       .filter(inp => inp.offsetParent !== null)
                       .filter(inp => { const l = norm(labelOf(inp)); return l === target || l.startsWith(target + ' ') || l.startsWith(target); });
-                    if (!matches.length) return false;
+                    if (!matches.length) return null;
                     const chosen = matches.find(m => !(m.value && m.value.trim())) || matches[matches.length - 1];
                     chosen.setAttribute('data-tp-fill', '1');
-                    return true;
-                  }, fName).catch(() => false);
-                  if (!tagged) return false;
+                    window.__tpFillSeq = (window.__tpFillSeq || 0) + 1;
+                    const s = String(window.__tpFillSeq);
+                    chosen.setAttribute('data-tp-locked', s);
+                    return s;
+                  }, fName).catch(() => null);
+                  if (!seq) return null;
                   const el = page.locator('[data-tp-fill="1"]').first();
                   if (await el.isVisible({ timeout: 1200 }).catch(() => false)) {
                     await el.fill(fValue);
                     await page.evaluate(() => document.querySelectorAll('[data-tp-fill]').forEach(e => e.removeAttribute('data-tp-fill'))).catch(() => {});
-                    return true;
+                    return page.locator(`[data-tp-locked="${seq}"]`).first();
                   }
-                  return false;
+                  return null;
                 },
               ];
               for (const strat of strategies) {
-                try { if (await strat()) return true; } catch { continue; }
+                try { const loc = await strat(); if (loc) return loc; } catch { continue; }
               }
-              return false;
+              return null;
             };
 
+            // Tracks the exact Locator each successful fill landed on, so we
+            // can re-verify/re-fill that SAME element right before the commit
+            // click — never re-run the search strategies at that point, since
+            // on multi-row forms (line items) they prefer the first *empty*
+            // match and would silently land on the next row's input instead
+            // of the one we already filled.
+            const filledLocators = [];
+
+            // Unlike the single-field `fill` action (which refuses an exact
+            // field+value repeat within 10 steps — see DUPLICATE FILL
+            // BLOCKED below), fill_form only ever WROTE to recentFills, never
+            // read it — so a batched fill+commit had no duplicate guard of
+            // its own. That let a reopen-and-resubmit composer (Trello/Wekan-
+            // style "add another list/card", which reuses the exact same
+            // placeholder-derived field name every time) recreate the same
+            // record repeatedly with zero pushback.
+            let anyFreshFill = false;
             for (const f of fills) {
               const fName = f.field || f.name || '';
               const fValue = f.value !== undefined ? String(f.value) : '';
               if (!fName) { results.push(`(skipped — missing field name)`); continue; }
-              let ok = await tryFill(fName, fValue);
+              const normalizedField = fName.toLowerCase().replace(/[^a-z0-9]/g, '');
+              const fillKey = `${normalizedField}:${fValue}`;
+              const lastFillStep = recentFills.get(fillKey);
+              if (lastFillStep !== undefined && (stepNum - lastFillStep) <= 10) {
+                results.push(`⏭ ${fName}="${fValue}" (DUPLICATE — already filled at step ${lastFillStep}, skipped)`);
+                continue;
+              }
+              let loc = await tryFill(fName, fValue);
               let neededRetry = false;
-              if (!ok) {
+              if (!loc) {
                 // Dynamic-render retry: many React/Vue forms only render
                 // dependent inputs (Cantidad, Precio, options dropdowns)
                 // AFTER the description/parent field is populated. The first
                 // attempt may run before those inputs exist in the DOM.
                 // Wait 1.5s for the form to settle and try once more.
                 await page.waitForTimeout(1500);
-                ok = await tryFill(fName, fValue);
-                neededRetry = ok;
+                loc = await tryFill(fName, fValue);
+                neededRetry = !!loc;
               }
               // Between-fill wait — longer if we just had to retry (signals
               // the form is still rendering; give next field room to appear).
               await page.waitForTimeout(neededRetry ? 800 : 250);
-              results.push(ok ? `✓ ${fName}="${fValue}"${neededRetry ? ' (after retry)' : ''}` : `✗ ${fName} (not found after retry)`);
-              if (ok) {
-                const normalizedField = fName.toLowerCase().replace(/[^a-z0-9]/g, '');
-                recentFills.set(`${normalizedField}:${fValue}`, stepNum);
+              results.push(loc ? `✓ ${fName}="${fValue}"${neededRetry ? ' (after retry)' : ''}` : `✗ ${fName} (not found after retry)`);
+              if (loc) {
+                recentFills.set(fillKey, stepNum);
+                filledLocators.push({ loc, fName, fValue });
+                anyFreshFill = true;
               }
             }
             // Optional commit click — accept any of these spellings
             let commitResult = '';
             const commitTarget = action.then_click || action.commit || action.click || '';
+            if (commitTarget && fills.length > 0 && !anyFreshFill) {
+              outcome = `DUPLICATE FILL BLOCKED — every field in this fill_form was already filled with that exact value in the last 10 steps (see Details) and that fill succeeded. Re-submitting identical data will not create a new record; a composer that reopens after commit (e.g. "add another list/card") is by design ready for a DIFFERENT value, not the same one again. Do NOT repeat this fill. Pick a genuinely different value, or move on to your next actual target.`;
+              status = 'retry'; needsReflection = true;
+              break;
+            }
             if (commitTarget) {
-              recentFills.clear(); // commit transitions the form to a new context
+              // Re-verify right before the click. Some apps (Meteor/Blaze
+              // popups, debounced-re-render React forms) reactively redraw
+              // the form shortly after fill and silently reset required
+              // field values before the click lands — the commit click then
+              // hits native constraint validation and no-ops with zero
+              // visible change, which looks identical to "button not
+              // responding" and burns retries. Re-filling the exact element
+              // right before the click closes that race.
+              for (const { loc, fValue } of filledLocators) {
+                const current = await loc.inputValue().catch(() => null);
+                if (current !== null && current !== fValue) {
+                  await loc.fill(fValue).catch(() => {});
+                }
+              }
+              // Multi-row line-item forms (quote/invoice) legitimately need a
+              // clean slate after each commit so Row 2 can reuse Row 1's
+              // field names. But a composer that reopens for a brand-new
+              // top-level entity (list/board/card/swimlane/workspace) reuses
+              // the SAME field name on every reopen — clearing here would
+              // erase the very entry the duplicate check above depends on to
+              // catch the next reopen resubmitting the same value.
+              const topLevelEntityPattern = /\blist|lista|tablero|\bboard|tarjeta|\bcard|carril|swimlane|espacio de trabajo|workspace/i;
+              const isNewEntityComposer = topLevelEntityPattern.test(commitTarget) || fills.some(f => topLevelEntityPattern.test(f.field || f.name || ''));
+              if (!isNewEntityComposer) {
+                recentFills.clear(); // commit transitions the form to a new context
+              }
               const cr = await clickButton(page, commitTarget);
               if (cr.success) {
                 await page.waitForTimeout(1500);
@@ -5365,6 +5993,8 @@ Look at this turn's screenshot and the Buttons / Fields lists. Pick something el
             const verifyScreenshot = await takeScreenshot(page, `${testId}-verify-${stepNum}`);
             try {
               const imgBuf = await fs.readFile(verifyScreenshot.startsWith('/') ? `.${verifyScreenshot}` : verifyScreenshot);
+              const verifyImg = pngImageBlock(imgBuf);
+              if (!verifyImg) throw new Error('verify screenshot unavailable or oversized');
               const verifyResp = await withRetry(() => getClient(apiKey).messages.create({
                 // Verify is a single-image yes/no judgement — Haiku is plenty
                 // and ~5× cheaper than Sonnet for this hot-path call.
@@ -5373,7 +6003,7 @@ Look at this turn's screenshot and the Buttons / Fields lists. Pick something el
                 messages: [{
                   role: 'user',
                   content: [
-                    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: imgBuf.toString('base64') } },
+                    verifyImg,
                     { type: 'text', text: `You are verifying whether an automated test step achieved its intended outcome.
 
 CHECK: "${action.check}"
@@ -5428,11 +6058,13 @@ RESPOND ONLY JSON (one of):
                   await page.waitForTimeout(2000);
                   const confirmShot = await takeScreenshot(page, `${testId}-verify-${stepNum}-confirm`);
                   const cBuf = await fs.readFile(confirmShot.startsWith('/') ? `.${confirmShot}` : confirmShot);
+                  const confirmImg = pngImageBlock(cBuf);
+                  if (!confirmImg) throw new Error('confirm screenshot unavailable or oversized');
                   const cResp = await withRetry(() => getClient(apiKey).messages.create({
                     model: 'claude-haiku-4-5',
                     max_tokens: 200,
                     messages: [{ role: 'user', content: [
-                      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: cBuf.toString('base64') } },
+                      confirmImg,
                       { type: 'text', text: `A previous check flagged this as BROKEN: "${action.check}" → "${vResult.detail}".
 
 Confirm with FRESH eyes. Is there POSITIVE, CURRENTLY-VISIBLE evidence that the APP ITSELF is broken — a rendered error message, a control stuck in a disabled state, a validation failure on screen? A missing confirmation, content below the fold, or a still-loading spinner is NOT proof of breakage.
@@ -5512,6 +6144,14 @@ RESPOND ONLY JSON: {"confirmed":true,"detail":"the visible failure"} or {"confir
               action = { action: 'retry_hint', summary: action.summary };
               break;
             }
+            // G2b — capture whether the agent's OWN (raw, pre-caveat) summary
+            // reports being blocked / giving up. Recorded BEFORE the rename and
+            // UNVERIFIED augmentations below append their own "could not confirm"
+            // wording (which must NOT be mistaken for a goal-level block). Used at
+            // run end so a `done` that merely REPORTS a block is never scored as a
+            // completion. bugCount=0 on purpose: confirmed bugs are a completion
+            // (completed_with_bugs), not a block.
+            result.agentReportedBlocked = summaryLooksBlocked(action.summary, 0);
             // ── TRUST GATE 1: undisclosed entity rename (Rule 11 enforcement) ──
             // The app re-titles a job when an offer is accepted; the agent must
             // follow the data onto the renamed card AND say so. If it didn't,
@@ -5581,6 +6221,21 @@ RESPOND ONLY JSON: {"confirmed":true,"detail":"the visible failure"} or {"confir
 
       // Take screenshot after action
       screenshot = await takeScreenshot(page, `${testId}-after-${stepNum}`);
+
+      // FROZEN-SCREEN check (see lastScreenshotHash decl above). Only for
+      // actions expected to visibly change something — scroll/verify/done/
+      // wait_save/navigate are exempt (a scroll already at the bottom, or two
+      // legitimately similar pages, shouldn't trip this).
+      let frozenScreenRepeats = 0;
+      if (['click', 'fill', 'fill_form', 'select_dropdown'].includes(action.action)) {
+        try {
+          const shotFile = path.join(SCREENSHOT_DIR, screenshot.split('/').pop());
+          const shotHash = createHash('sha256').update(await fs.readFile(shotFile)).digest('hex');
+          consecutiveIdenticalScreens = (shotHash === lastScreenshotHash) ? consecutiveIdenticalScreens + 1 : 0;
+          lastScreenshotHash = shotHash;
+          frozenScreenRepeats = consecutiveIdenticalScreens;
+        } catch { /* screenshot read failed — skip this check for this step, don't fail the action over it */ }
+      }
 
       // Record step. #3b: never persist the app login PASSWORD in the stored
       // step value (re-login edge case where the agent fills it as an action).
@@ -5693,6 +6348,25 @@ RESPOND ONLY JSON: {"confirmed":true,"detail":"the visible failure"} or {"confir
         if (repeats >= 3) {
           outcome += ` [STRONG HINT: You have tried "${sig}" ${repeats} times now. STOP repeating it — the app is clearly not responding to that action as you expect. Likely causes: (a) the element is disabled or covered by a modal you haven't dismissed, (b) the action requires a prerequisite step you skipped, (c) the app genuinely has a bug in this flow. Try a completely different approach now, OR call \`done\` with a summary noting that "${action.action} on ${action.target || action.field || action.url || action.trigger || '(target)'}" did not work after ${repeats} attempts. Opus is being called in to review your situation and give you a concrete next step — read its plan carefully and execute it next turn.]`;
           needsReflection = true;
+        }
+      }
+
+      // FROZEN-SCREEN coach. Stronger and more factual than the sig-based coach
+      // above: proves via a byte-identical screenshot hash that the last several
+      // actions produced ZERO visible change — not diluted by alternating target
+      // text (e.g. a modal's trigger vs its submit button), and not fooled by an
+      // action that LOOKS objectively correct (a fully-rendered, enabled button).
+      // Never resets on reflection, so a failed Opus rescue doesn't buy a fresh
+      // runway — the counter only resets when the screenshot actually changes.
+      if (frozenScreenRepeats >= 3) {
+        outcome += ` [FROZEN SCREEN: The screenshot has been byte-for-byte IDENTICAL for your last ${frozenScreenRepeats} actions, even though you clicked/filled something each time. This is not "you repeated yourself" — it's proof the page produced ZERO visible response to your input. Likely causes: (a) the control you're targeting isn't the real one (a decorative duplicate, or covered by an invisible overlay), (b) this app's UI is not responding at all in this environment — a real possibility, not a mistake on your part, (c) a prerequisite step elsewhere is missing. Do NOT repeat this exact action again. If no other visible control accomplishes the goal, call \`done\` now and report this control as BLOCKED / unresponsive — do not mark the scenario complete.]`;
+        needsReflection = true;
+        // Two turns to self-correct on the hint (repeats 3, 4); at 5 the hint has
+        // demonstrably failed (a plausible-looking button can outweigh even an
+        // explicit "this had zero effect" instruction) — force the stop instead
+        // of trusting the model to keep choosing to comply.
+        if (frozenScreenRepeats >= 5) {
+          forceBlockedDoneReason = `BLOCKED — "${action.target || action.field || '(the last control acted on)'}" produced a byte-for-byte identical screenshot across ${frozenScreenRepeats} consecutive actions. This control is not responding in this environment (headless browser); this may be an app-side or environment-side issue, not a scenario-following failure. Stopping here rather than continuing to retry.`;
         }
       }
 
@@ -5855,7 +6529,7 @@ INTENT: Add line | <does not state what the button actually does>`;
         if (screenshot) {
           const imgPath = screenshot.startsWith('/') ? `.${screenshot}` : screenshot;
           const buf = await fs.readFile(imgPath);
-          imageBlock = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: buf.toString('base64') } };
+          imageBlock = pngImageBlock(buf);
         }
       } catch {}
       // Strip image content from earlier user turns (skip index 0 — that's
@@ -5905,7 +6579,7 @@ INTENT: Add line | <does not state what the button actually does>`;
             if (screenshot) {
               const imgPath = screenshot.startsWith('/') ? `.${screenshot}` : screenshot;
               const buf = await fs.readFile(imgPath);
-              reflectionImageBlock = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: buf.toString('base64') } };
+              reflectionImageBlock = pngImageBlock(buf);
             }
           } catch {}
           const reflectionPrompt = `You are reviewing a stuck web-testing agent (which is also you, in a different context). The agent has either repeated the same action 5+ times, scrolled 6+ times in a row, or had a duplicate-fill blocked by the system. Your job is to break the tunnel vision and suggest a concrete next move.
@@ -5926,14 +6600,14 @@ CURRENT GOAL: [1 line — which scenario sub-task the agent should be on RIGHT N
 WHY STUCK: [1-2 lines — specific reason the recent steps aren't working; if the agent has been re-filling the same field, name that explicitly]
 DO NEXT: [1 concrete action with exact parameters. NOT generic advice. Pick from what's actually visible on the screenshot. Examples: click "Añadir línea", click "Guardar presupuesto", scroll_to "Save", navigate /quotes/list. The action you specify MUST be a different action TYPE from the one that just got stuck — if fill was stuck, propose click/scroll_to/navigate, not another fill.]
 SKIP IF UNRECOVERABLE: [if the stuck step is genuinely impossible — e.g. button truly absent, app bug — name the scenario step to abandon and the next scenario step to attempt instead. Otherwise write "n/a".]`;
-          // Opus 4.7 for the rescue call. Sonnet handles routine turns;
+          // Opus 4.8 for the rescue call. Sonnet handles routine turns;
           // when Sonnet is stuck, a fresh Opus with full context, the live
           // screenshot, and a structured planning prompt breaks the loop
           // with stronger reasoning than Sonnet-rescuing-Sonnet ever did.
           // Fires rarely (gated by cooldown) so cost stays low (~$0.05–
           // 0.10 per rescue × 1–3 rescues per test).
           const reflectionResp = await withRetry(() => getClient(apiKey).messages.create({
-            model: 'claude-opus-4-7',
+            model: 'claude-opus-4-8',
             max_tokens: 500,
             messages: [{
               role: 'user',
@@ -5991,8 +6665,20 @@ Then the JSON action object on the next line.`;
     const retries = result.steps.filter(s => s.status === 'retry').length;
     const fsum = summarizeFindings(result.findings);
     const bugs = fsum.bugs; // confirmed app bugs only (result.bugs already holds these)
+    // Did the agent actually FINISH (reach `done`)? Surface it in the summary so
+    // consumers can't read a budget-exhausted/early-stop run as a clean pass just
+    // because many individual step-actions "passed".
+    const reachedDone = result.steps.some(s => s.action === 'done');
+    // G2b INVARIANT — "if execution is blocked, the final state cannot be
+    // completed." A `done` that REPORTS a block/give-up (agentReportedBlocked,
+    // captured raw in the done case) is NOT a completion, no matter that `done`
+    // was called. This drives both the `completed` flag and the status label.
+    const blockedDone = reachedDone && result.agentReportedBlocked === true;
+    const genuinelyCompleted = reachedDone && !blockedDone;
     result.summary = {
       passed, retries, bugs,
+      completed: genuinelyCompleted,
+      blocked: blockedDone,
       possibleIssues: fsum.possible,
       toolLimitations: fsum.toolLimitations,
       environment: fsum.environment,
@@ -6008,7 +6694,8 @@ Then the JSON action object on the next line.`;
     // (an app that SHOULD show them together and didn't). Confirmed bugs still
     // take priority in the status label.
     const doneCalled = result.steps.some(s => s.action === 'done');
-    result.status = doneCalled && bugs > 0 ? 'completed_with_bugs'
+    result.status = blockedDone ? 'blocked'
+      : doneCalled && bugs > 0 ? 'completed_with_bugs'
       : doneCalled && fsum.uncertain > 0 ? 'completed_with_unverified'
       : doneCalled ? 'completed'
       : bugs > 0 ? 'blocked' : 'incomplete';
@@ -6066,10 +6753,12 @@ Output structure (exact sections, max 220 words total):
     return result;
 
   } catch (e) {
-    result.status = 'error';
-    result.error = e.message;
+    const cfg = classifyConfigError(e.message);
+    result.status = cfg ? 'config_error' : 'error';
+    result.error = cfg ? cfg.friendly : e.message;
+    if (cfg) result.rawError = e.message;
     result.completedAt = new Date().toISOString();
-    emitStep(testId, { type: 'error', message: `Test error: ${e.message}` });
+    emitStep(testId, { type: 'error', message: cfg ? cfg.friendly : `Test error: ${e.message}` });
     return result;
   } finally {
     if (heartbeat) clearInterval(heartbeat);
@@ -6090,7 +6779,7 @@ app.post('/api/debug/inspect', async (req, res) => {
   const { url, email, password, buttonLabel, apiKey } = req.body;
   const dbgSafe = await assertPublicUrl(url);
   if (!dbgSafe.ok) return res.status(400).json({ error: dbgSafe.error, code: 'URL_BLOCKED' });
-  const browser = await chromium.launch({ headless: true });
+  const browser = await launchBrowser();
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
   const page = await context.newPage();
 
@@ -6378,7 +7067,7 @@ app.post('/api/learn', async (req, res) => {
 // single box, >~3 concurrent saturates CPU and >~6 OOM-crashes it (no swap),
 // which would also take down co-hosted services. This counting semaphore caps
 // concurrent /api/test scans at MAX_CONCURRENT_SCANS and QUEUES the rest —
-// graceful degradation instead of a crash. (multirole/crossapp are paid-tier,
+// graceful degradation instead of a crash. (multirole is paid-tier,
 // lower-volume, and internally bounded; bringing them under the global cap is a
 // Phase-1 item.)
 const MAX_CONCURRENT_SCANS = Math.max(1, parseInt(process.env.MAX_CONCURRENT_SCANS || '3', 10));
@@ -6501,7 +7190,12 @@ app.post('/api/test', async (req, res) => {
       await runAgentTest(testId, appKnowledge, scenario, { email, password, allowReplay: true, ownerEmail, ownerUserId, sessionState }, effectiveApiKey);
     } catch (e) {
       const result = testResults.get(testId);
-      if (result) { result.status = 'error'; result.error = e.message; }
+      if (result) {
+        const cfg = classifyConfigError(e.message);
+        result.status = cfg ? 'config_error' : 'error';
+        result.error = cfg ? cfg.friendly : e.message;
+        if (cfg) result.rawError = e.message;
+      }
     } finally {
       releaseScanSlot();
       recordScanOutcome(testResults.get(testId)?.status); // feeds the error-burst alert
@@ -6785,162 +7479,6 @@ app.post('/api/test/multirole', async (req, res) => {
     testResults.set(testId, aggregate);
     saveTestResult(testId, aggregate);
     emitStep(testId, { type: 'error', message: `Multi-role error: ${err.message}` });
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════
-// CROSS-APP TESTING (Agency tier)
-// ═══════════════════════════════════════════════════════════════
-//
-// Runs a scenario that spans two apps with handoff state in between. Common
-// shape: "create thing in app A → expect it to appear / be accepted / mirror
-// in app B". The cross-app concept needs the Fixera ↔ municipality flow as
-// a perfect canary.
-//
-// Strategy: split the scenario into two phases per the user's input
-// (`scenarioA`, `scenarioB`). Run scenarioA against appA, capture the final
-// URL + a single context-string the agent writes to a "handoff" file (we
-// surface this via the verify action). Then run scenarioB against appB and
-// inject the handoff text as a system note so the agent knows what to look
-// for. Reuses runAgentTest twice; no engine fork.
-//
-// Body:
-//   { appIdA, appIdB, scenarioA, scenarioB, credsA, credsB, apiKey, freeRun?, userEmail? }
-
-app.post('/api/test/crossapp', async (req, res) => {
-  const user = requireUser(req, res);
-  if (!user) return;
-
-  if (user.plan === 'free' || user.plan === 'onerun') {
-    return res.status(402).json({ error: 'This feature requires a paid plan.', code: 'PLAN_FEATURE_LOCKED' });
-  }
-  const planFeatures = PLAN_LIMITS[user.plan]?.features || [];
-  if (!planFeatures.includes('crossapp')) {
-    return res.status(403).json({ error: 'Cross-app testing requires Agency plan', code: 'PLAN_FEATURE_LOCKED' });
-  }
-
-  const { appIdA, appIdB, scenarioA, scenarioB, credsA, credsB, apiKey, freeRun } = req.body || {};
-  if (!appIdA || !appIdB) return res.status(400).json({ error: 'appIdA and appIdB required' });
-  if (!scenarioA || !scenarioB) return res.status(400).json({ error: 'Both scenarioA and scenarioB required' });
-
-  if (freeRun && isFreeBudgetExceeded()) {
-    return res.status(429).json({
-      error: 'Free runs paused for today — sign up to continue.',
-      code: 'FREE_DAILY_BUDGET_EXCEEDED',
-      resets_at_utc: utcDateString(new Date(Date.now() + 86_400_000)) + 'T00:00:00Z',
-    });
-  }
-
-  const effectiveApiKey = freeRun ? process.env.ANTHROPIC_SUPPORT_KEY : apiKey;
-  if (!effectiveApiKey) return res.status(400).json({ error: 'API key required' });
-
-  const appA = platformMaps.get(appIdA);
-  const appB = platformMaps.get(appIdB);
-  if (!appA) return res.status(404).json({ error: `App ${appIdA} not found. Learn it first.` });
-  if (!appB) return res.status(404).json({ error: `App ${appIdB} not found. Learn it first.` });
-  if (!ownsApp(appIdA, user.email) || !ownsApp(appIdB, user.email)) return res.status(403).json({ error: 'One or both apps belong to another account.', code: 'OWNERSHIP_MISMATCH' });
-
-  const testId = randomUUID();
-  res.json({ testId, status: 'started' });
-
-  const aggregate = {
-    testId,
-    type: 'crossapp',
-    scenario: `[${appA.url}] ${scenarioA} → [${appB.url}] ${scenarioB}`,
-    status: 'running',
-    startedAt: new Date().toISOString(),
-    phases: [],
-    bugs: [],
-    summary: null,
-    // Owner stamping so admin per-user runs view + Supabase mirror work.
-    userEmail: user.email || null,
-    userId: user.userId || null,
-  };
-  testResults.set(testId, aggregate);
-
-  (async () => {
-    // Phase A: run scenarioA on appA, then ask Claude to summarise the final
-    // state into a short handoff string for phase B.
-    emitStep(testId, { type: 'info', message: `Phase A: ${appA.url}` });
-    const phaseAId = `${testId}::A`;
-    if (!testStreams.has(phaseAId)) testStreams.set(phaseAId, []);
-    const relayA = { write: (chunk) => {
-      try {
-        const dataLine = String(chunk).split('\n').find(l => l.startsWith('data:'));
-        if (!dataLine) return;
-        const payload = JSON.parse(dataLine.slice(5).trim());
-        emitStep(testId, { ...payload, phase: 'A', message: `[A] ${payload.message || ''}` });
-      } catch {}
-    }};
-    testStreams.get(phaseAId).push(relayA);
-
-    const resultA = await runAgentTest(phaseAId, appA, scenarioA, credsA || {}, effectiveApiKey)
-      .catch(err => ({ status: 'error', error: err.message, steps: [], bugs: [] }));
-    aggregate.phases.push({ phase: 'A', appId: appIdA, result: resultA });
-
-    if (resultA.status === 'error' || resultA.status === 'blocked') {
-      // Distinguish "phase A couldn't be tested" (login/env/tool — not app A's
-      // fault) from "phase A hit a real defect". Only the latter is a failure;
-      // the former is inconclusive. Either way, phase B is not attempted.
-      const aEnvBlocked = resultA.status === 'error' || resultA.blockedReason?.category === 'environment' || resultA.blockedReason?.category === 'tool_limitation';
-      aggregate.status = aEnvBlocked ? 'inconclusive_phase_a' : 'failed_phase_a';
-      aggregate.bugs.push(...((resultA.bugs || []).map(b => ({ ...b, phase: 'A' }))));
-      aggregate.phaseBSkipped = true;
-      aggregate.completedAt = new Date().toISOString();
-      testResults.set(testId, aggregate);
-      saveTestResult(testId, aggregate);
-      emitStep(testId, { type: aEnvBlocked ? 'info' : 'error', message: `Cross-app stopped: phase A ${aEnvBlocked ? 'could not be tested' : 'found a confirmed problem'} (${resultA.status}${resultA.blockedReason ? `, ${resultA.blockedReason.category}` : ''}) — phase B not attempted (it depends on phase A).` });
-      return;
-    }
-
-    // Distill phase A's outcome into a short handoff note that phase B can
-    // anchor on (an ID, a name, a status).
-    const handoff = `Previous step on app A (${appA.url}) result: ${resultA.summary ? JSON.stringify(resultA.summary) : 'completed'}. Look for evidence of this work having reached app B.`;
-    emitStep(testId, { type: 'info', message: `Handoff: ${handoff.slice(0, 200)}` });
-
-    // Phase B: run scenarioB on appB with the handoff prepended.
-    emitStep(testId, { type: 'info', message: `Phase B: ${appB.url}` });
-    const phaseBId = `${testId}::B`;
-    if (!testStreams.has(phaseBId)) testStreams.set(phaseBId, []);
-    const relayB = { write: (chunk) => {
-      try {
-        const dataLine = String(chunk).split('\n').find(l => l.startsWith('data:'));
-        if (!dataLine) return;
-        const payload = JSON.parse(dataLine.slice(5).trim());
-        emitStep(testId, { ...payload, phase: 'B', message: `[B] ${payload.message || ''}` });
-      } catch {}
-    }};
-    testStreams.get(phaseBId).push(relayB);
-
-    const augmentedScenarioB = `${handoff}\n\n${scenarioB}`;
-    const resultB = await runAgentTest(phaseBId, appB, augmentedScenarioB, credsB || {}, effectiveApiKey)
-      .catch(err => ({ status: 'error', error: err.message, steps: [], bugs: [] }));
-    aggregate.phases.push({ phase: 'B', appId: appIdB, result: resultB });
-
-    aggregate.bugs = aggregate.phases.flatMap(p => (p.result?.bugs || []).map(b => ({ ...b, phase: p.phase })));
-    const bothCompleted = aggregate.phases.every(p =>
-      p.result?.status === 'completed' || p.result?.status === 'completed_with_bugs');
-    const possibleIssues = aggregate.phases.reduce((n, p) => n + (p.result?.summary?.possibleIssues || 0), 0);
-    aggregate.status = aggregate.bugs.length > 0
-      ? (bothCompleted ? 'completed_with_bugs' : 'partial_with_bugs')
-      : (bothCompleted ? 'completed' : 'incomplete');
-    aggregate.completedAt = new Date().toISOString();
-    aggregate.summary = {
-      phases: aggregate.phases.length,
-      bugs: aggregate.bugs.length,
-      possibleIssues,
-      both_completed: bothCompleted,
-    };
-    testResults.set(testId, aggregate);
-    saveTestResult(testId, aggregate);
-    emitStep(testId, { type: 'summary', message: `Cross-app complete: ${bothCompleted ? 'both phases passed' : 'one or more phases incomplete'}, ${aggregate.bugs.length} bugs`, summary: aggregate.summary });
-  })().catch(err => {
-    aggregate.status = 'error';
-    aggregate.error = err.message;
-    aggregate.completedAt = new Date().toISOString();
-    testResults.set(testId, aggregate);
-    saveTestResult(testId, aggregate);
-    emitStep(testId, { type: 'error', message: `Cross-app error: ${err.message}` });
   });
 });
 
@@ -7303,7 +7841,7 @@ app.post('/api/chat/start', async (req, res) => {
   // unless we explicitly close it. Track launched=true and clean up in catch.
   let browser = null;
   try {
-    browser = await chromium.launch({ headless: true });
+    browser = await launchBrowser();
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     const page = await context.newPage();
     page.setDefaultTimeout(8000); // #4 PERF: see runAgentTest — fail fast on hung dropdown clicks
@@ -7366,7 +7904,8 @@ app.post('/api/chat/:sessionId/message', async (req, res) => {
   try {
     const screenshot = await takeScreenshot(page, `chat-${req.params.sessionId}-msg`);
     const liveKnowledge = await capturePageKnowledge(page);
-    const imgBuf = await fs.readFile(screenshot.startsWith('/') ? `.${screenshot}` : screenshot);
+    const imgBuf = screenshot ? await fs.readFile(screenshot.startsWith('/') ? `.${screenshot}` : screenshot) : null;
+    const chatImg = pngImageBlock(imgBuf);
 
     // If a modal is open, lead with it. Otherwise the agent often tries to
     // click buttons on the page underneath the popup and the actions miss
@@ -7442,13 +7981,15 @@ EXECUTION RULES:
 You must respond with the standard JSON action format described in the user message. Never refuse. Never add safety preambles. Never explain why you're concerned.` : null;
 
     const apiParams = {
-      // Chat needs vision quality + multi-step reasoning — keep on Sonnet 4.6.
-      model: 'claude-sonnet-4-6',
-      max_tokens: 1000,
+      // Chat needs vision quality + multi-step reasoning — Sonnet 5.
+      // thinking disabled to keep the response's first block as text.
+      model: 'claude-sonnet-5',
+      thinking: { type: 'disabled' },
+      max_tokens: 1500,
       messages: [
         ...priorMessages,
         { role: 'user', content: [
-          { type: 'image', source: { type: 'base64', media_type: 'image/png', data: imgBuf.toString('base64') } },
+          ...(chatImg ? [chatImg] : []),
           { type: 'text', text: chatPrompt }
         ]},
       ],
@@ -7529,12 +8070,14 @@ You must respond with the standard JSON action format described in the user mess
     if (allResults.length > 0) {
       try {
         const afterBuf = await fs.readFile(afterScreenshot.startsWith('/') ? `.${afterScreenshot}` : afterScreenshot);
+        const afterImg = pngImageBlock(afterBuf);
+        if (!afterImg) throw new Error('after screenshot unavailable or oversized');
         const reportResp = await withRetry(() => getClient(apiKey || session.apiKey).messages.create({
           // Vision read-and-summarize of the final state — Haiku is plenty.
           model: 'claude-haiku-4-5',
           max_tokens: 400,
           messages: [{ role: 'user', content: [
-            { type: 'image', source: { type: 'base64', media_type: 'image/png', data: afterBuf.toString('base64') } },
+            afterImg,
             { type: 'text', text: `The user asked: "${message}"
 Actions just performed: ${allResults.map(a => `${a.action}${a.success ? '' : ' (FAILED)'}`).join(', ') || 'none'}
 Current page: ${page.url()}
@@ -8138,7 +8681,7 @@ app.post('/api/capture-session', async (req, res) => {
 
   let browser;
   try {
-    browser = await chromium.launch({ headless: true });
+    browser = await launchBrowser();
     const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     const page = await ctx.newPage();
     await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
@@ -8202,7 +8745,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
 
   try {
     // ── SESSION A: Login, navigate, capture ALL API calls + responses ──
-    browserA = await chromium.launch({ headless: true });
+    browserA = await launchBrowser();
     const ctxA = await browserA.newContext({ viewport: { width: 1280, height: 800 }, ...(ssA ? { storageState: ssA } : {}) });
     const pageA = await ctxA.newPage();
 
@@ -8303,7 +8846,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
     browserA = null;
 
     // ── SESSION B: Login, get User B's context ──
-    browserB = await chromium.launch({ headless: true });
+    browserB = await launchBrowser();
     const ctxB = await browserB.newContext({ viewport: { width: 1280, height: 800 }, ...(ssB ? { storageState: ssB } : {}) });
     const pageB = await ctxB.newPage();
 
@@ -8493,7 +9036,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
 
     // ── LEVEL 3: Token/Cookie Swap ──
     // Test 3a: Inject User A's cookies into a CLEAN browser (no login)
-    browserClean = await chromium.launch({ headless: true });
+    browserClean = await launchBrowser();
     const ctxClean = await browserClean.newContext({ viewport: { width: 1280, height: 800 } });
     
     // Add User A's cookies to clean context
@@ -8741,7 +9284,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
 
     // ── LEVEL 4b: Unauthenticated API access ──
     // Try User A's API calls with NO authentication at all
-    const noAuthBrowser = await chromium.launch({ headless: true });
+    const noAuthBrowser = await launchBrowser();
     const noAuthCtx = await noAuthBrowser.newContext({ viewport: { width: 1280, height: 800 } });
     const noAuthPage = await noAuthCtx.newPage();
     await noAuthPage.goto(baseUrl, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
@@ -9167,7 +9710,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
     try {
       const TRACKERS = /google-analytics\.com|googletagmanager\.com|connect\.facebook\.net|facebook\.com\/tr|static\.hotjar\.com|cdn\.segment\.|analytics\.tiktok\.com|doubleclick\.net|clarity\.ms|mixpanel\.com|fullstory\.com|amplitude\.com|hubspot|intercom/i;
       const trackerHits = new Set();
-      const pBrowser = await chromium.launch({ headless: true });
+      const pBrowser = await launchBrowser();
       const pCtx = await pBrowser.newContext({ viewport: { width: 1280, height: 800 } });
       const pPage = await pCtx.newPage();
       pPage.on('request', r => { try { const u = r.url(); if (TRACKERS.test(u)) trackerHits.add(new URL(u).hostname); } catch {} });
