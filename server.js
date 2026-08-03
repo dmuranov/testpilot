@@ -1521,10 +1521,19 @@ function choosePlaceholderFile(accept = '', name = '', pageText = '') {
   accept = String(accept).toLowerCase();
   const sig = `${accept} ${name} ${pageText}`.toLowerCase();
   const acceptsImage = /image|jpe?g|png|gif|webp|heic/.test(accept);
+  // Strong image signal FIRST. Photo-upload gates (job-completion "add a photo",
+  // avatars, logos) are the most common autonomous upload target, and their
+  // inputs very often have NO `accept` attribute — so the surrounding wording is
+  // the only signal. Check it before any document keyword, otherwise an
+  // unrelated "factura"/"invoice" elsewhere on a job page hijacks a photo upload
+  // and hands a PDF to a widget that only takes images (the Fixera "Finalizar
+  // trabajo" loop: byte-identical screenshots, 3-strike block, lifecycle stuck).
+  const photoWords = /\bfotos?\b|\bphotos?\b|\bimagen|\bimage\b|\bpicture\b|\bavatar\b|\blogos?\b|\bselfie\b|\bc[aá]mara\b|subir fotos|a[ñn]adir foto|adjuntar imagen/;
+  if (acceptsImage || photoWords.test(sig)) return ['placeholder.png'];
   let pickedFile = 'placeholder.png';
   if (/\.xlsx|\.xls|spreadsheet|excel/.test(accept) || /\bexcel\b|\bspreadsheet\b|\bxlsx?\b|\bcsv\b|hoja de calculo/.test(sig)) {
     pickedFile = 'placeholder.xlsx';
-  } else if (/\.pdf|application\/pdf/.test(accept) || (!acceptsImage && /\bpdf\b|\bdocumento\b|\bdocument\b/.test(sig))) {
+  } else if (/\.pdf|application\/pdf/.test(accept) || /\bpdf\b|\bdocumento\b|\bdocument\b|\bfactura\b|\binvoice\b/.test(sig)) {
     pickedFile = /invoice|factura|recibo|receipt|facture|\bbill\b/.test(sig) ? 'placeholder-invoice.pdf' : 'placeholder.pdf';
   }
   return pickedFile === 'placeholder.png' ? ['placeholder.png'] : [pickedFile, 'placeholder.png'];
@@ -1541,7 +1550,16 @@ async function supplyPlaceholderToFileInput(page, fileInputLocator) {
   let accept = '', name = '', pageText = '';
   try { accept = (await input.getAttribute('accept')) || ''; } catch {}
   try { name = ((await input.getAttribute('name')) || (await input.getAttribute('id')) || (await input.getAttribute('aria-label')) || ''); } catch {}
-  try { pageText = ((await page.locator('body').innerText({ timeout: 800 })) || '').slice(0, 4000); } catch {}
+  // Prefer the open dialog/modal's text — that's where the upload's own wording
+  // lives ("Subir fotos ahora"). Falling straight to whole-body text lets an
+  // invoice/factura mention elsewhere on the page outweigh the actual widget.
+  try {
+    const modal = page.locator('[role="dialog"]:visible, [aria-modal="true"]:visible, dialog[open]').first();
+    if (await modal.count().catch(() => 0)) {
+      pageText = ((await modal.innerText({ timeout: 800 })) || '').slice(0, 2000);
+    }
+  } catch {}
+  try { if (!pageText) pageText = ((await page.locator('body').innerText({ timeout: 800 })) || '').slice(0, 4000); } catch {}
   for (const filename of choosePlaceholderFile(accept, name, pageText)) {
     const p = path.resolve('./' + filename);
     try { await fs.access(p); await input.setInputFiles(p, { timeout: 5000 }); return filename; } catch {}
