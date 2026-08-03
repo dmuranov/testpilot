@@ -2112,6 +2112,80 @@ async function selectFromDropdown(page, triggerText, optionText) {
   ];
   const optionSel = '[role="option"], [cmdk-item], [data-radix-collection-item], [role="menuitem"]';
 
+  // ── NATIVE <select> FAST PATH ──────────────────────────────────────────────
+  // Everything below is built for CUSTOM dropdowns (cmdk/radix/div popovers):
+  // click the trigger, wait for an option list to render in the DOM, click it.
+  // A native <select> doesn't work that way — clicking it opens an OS-native
+  // popup that is NOT in the DOM, so popoverOpen() never sees options and the
+  // agent clicks the trigger forever, then the generic DOM scan matches stray
+  // <li>/<div> (e.g. nav items) as bogus "options". This is the Fixera
+  // "Seleccionar equipo" assign dropdown: 15 identical screenshots → 3-strike
+  // block, with the nav menu reported as the available options. Native selects
+  // have a dedicated, event-firing API (Playwright selectOption). Detect a
+  // matching <select> and drive it directly before any custom-dropdown logic.
+  {
+    const wantsAnyN = !(optionText || '').trim() || /^(any|first|the first|whichever|some|cualquier|primer|el primero|alg[uú]n|alguno)\b/i.test((optionText || '').trim());
+    const picked = await page.evaluate(({ label, want, anyMode }) => {
+      const STOP = new Set(['select','selecciona','seleccionar','seleccione','choose','elegir','elige','elija','escoge','escoger','wählen','auswählen','scegli','choisir','sélectionner','the','a','an','un','una','el','la','los','las','de','del','dropdown','field','campo','menu','list','lista','please','por','favor','from','to','in']);
+      const toks = s => (s || '').toLowerCase().replace(/[^a-záéíóúñü\s]/gi,' ').split(/\s+/).filter(w => w && !STOP.has(w));
+      const isPlaceholder = (o) => o.value === '' || /seleccion|select|choose|choisir|--|elij|elig|escog|auswäh/i.test((o.textContent||'').trim());
+      const selects = [...document.querySelectorAll('select')].filter(s => !s.disabled && s.offsetParent !== null && s.options.length);
+      if (!selects.length) return null;
+      const wantToks = toks(label);
+      let best = null, bestScore = -1;
+      for (const s of selects) {
+        const hay = new Set();
+        let lab = '';
+        if (s.id) { const le = document.querySelector(`label[for="${CSS.escape(s.id)}"]`); if (le) lab = le.textContent || ''; }
+        if (!lab) lab = s.getAttribute('aria-label') || '';
+        if (!lab) { let g = s; for (let d = 0; d < 3 && g; d++, g = g.parentElement) { const l = g.querySelector('label'); if (l && l.textContent.trim()) { lab = l.textContent; break; } } }
+        toks(lab).forEach(t => hay.add(t));
+        for (const o of s.options) toks(o.textContent).forEach(t => hay.add(t));
+        const score = wantToks.filter(w => hay.has(w)).length;
+        if (score > bestScore) { bestScore = score; best = s; }
+      }
+      // No token signal from the trigger text → only proceed when there's exactly
+      // one real select on screen, so we never hijack an unrelated one.
+      if (bestScore <= 0) { if (selects.length === 1) best = selects[0]; else return null; }
+      if (!best) return null;
+      const real = [...best.options].filter(o => !isPlaceholder(o));
+      if (!real.length) return null;
+      let chosen = null;
+      if (anyMode) {
+        chosen = real[0];
+      } else {
+        const w = (want || '').toLowerCase().trim();
+        chosen = real.find(o => (o.textContent || '').toLowerCase().trim() === w)
+              || real.find(o => (o.value || '').toLowerCase().trim() === w)
+              || real.find(o => { const t = (o.textContent || '').toLowerCase().trim(); return t && (t.includes(w) || w.includes(t)); });
+        if (!chosen) {
+          const wt = new Set(w.replace(/[^a-z0-9áéíóúñü ]/gi,' ').split(/\s+/).filter(x => x.length > 2));
+          let bo = null, bs = 0;
+          for (const o of real) { const tt = (o.textContent || '').toLowerCase().replace(/[^a-z0-9áéíóúñü ]/gi,' ').split(/\s+/); const sc = tt.filter(x => wt.has(x)).length; if (sc > bs) { bs = sc; bo = o; } }
+          chosen = bo;
+        }
+      }
+      if (!chosen) return { available: real.map(o => (o.textContent || '').trim()).filter(Boolean).slice(0, 25) };
+      best.setAttribute('data-tp-nselect', '1');
+      return { value: chosen.value || null, text: (chosen.textContent || '').trim() };
+    }, { label: triggerText, want: optionText, anyMode: wantsAnyN }).catch(() => null);
+
+    if (picked && (picked.value !== undefined && picked.value !== null || picked.text)) {
+      const nsel = page.locator('[data-tp-nselect]').first();
+      try {
+        await nsel.selectOption(picked.value != null ? { value: picked.value } : { label: picked.text }, { timeout: 3000 });
+        await page.evaluate(() => document.querySelectorAll('[data-tp-nselect]').forEach(e => e.removeAttribute('data-tp-nselect'))).catch(() => {});
+        await page.waitForTimeout(400);
+        return { success: true, selected: picked.text, method: 'native-select' };
+      } catch {
+        await page.evaluate(() => document.querySelectorAll('[data-tp-nselect]').forEach(e => e.removeAttribute('data-tp-nselect'))).catch(() => {});
+      }
+    } else if (picked && picked.available) {
+      return { success: false, reason: `Option "${optionText}" is not in this dropdown. Available options: ${picked.available.join(', ')}` };
+    }
+    // No matching native <select> → fall through to the custom-dropdown flow.
+  }
+
   // The popover is "open" once options OR a search box are actually on screen.
   const popoverOpen = async () => {
     if (await page.locator(optionSel).first().isVisible({ timeout: 250 }).catch(() => false)) return true;
