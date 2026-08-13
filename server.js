@@ -8650,6 +8650,33 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
     http: diag.http.slice(before.h),
   });
 
+  // The worst outcome a control can have is that the app STOPS RENDERING: a
+  // React render error unmounts the tree and leaves an empty page with no nav,
+  // no content and no way back. The old code saw only "a console error
+  // happened" and filed it next to a warning — the Fixera materials page was a
+  // white screen in production and the report said "broken: console TypeError".
+  // Read straight off the DOM: content before, nothing after.
+  const pageContent = () => page.evaluate(() => ({
+    text: ((document.body && document.body.innerText) || '').trim().length,
+    nodes: document.querySelectorAll('body *').length,
+  })).catch(() => null);
+  const hasContent = (c) => !!c && c.text >= 30;
+  // Never judge "blank" from a single snapshot. Right after a navigation the
+  // document is legitimately empty ({text:0,nodes:6}), and this app renders its
+  // shell first and fills it up to 3s later ({text:25,nodes:49} -> {text:288}).
+  // Both look exactly like a crash for an instant. Wait for content to arrive;
+  // only a page that never produces any is actually dead.
+  const settle = async (timeoutMs = 6000) => {
+    const deadline = Date.now() + timeoutMs;
+    let last = await pageContent();
+    while (!hasContent(last) && Date.now() < deadline) {
+      await page.waitForTimeout(500);
+      last = await pageContent();
+    }
+    return last;
+  };
+  const wentBlank = (b, a) => !!b && !!a && b.text > 200 && a.text < 30 && a.nodes < b.nodes / 4;
+
   // `deep` adds a hash of the page text itself. Sorting or filtering a list
   // REORDERS text without changing its length or the element count, so the
   // plain signature could not see a working dropdown and called it no_effect.
@@ -8763,14 +8790,52 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
         }
 
         const before = await domSig(item.kind === 'select');
+        let contentBefore = await pageContent();
+        // If the app is already dead when this control comes up, nothing
+        // measured here means anything — a blank page answers every click
+        // identically, which is how a real crash produced a screen full of
+        // "working" verdicts. Recover once; if it stays blank, say so plainly
+        // and stop, instead of filing meaningless results against the rest.
+        if (!hasContent(contentBefore)) {
+          contentBefore = await settle(6000);
+        }
+        if (!hasContent(contentBefore)) {
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+          contentBefore = await settle(8000);
+          if (!hasContent(contentBefore)) {
+            report.items.push({
+              page: path, kind: 'page', label: path, verdict: 'crashed',
+              detail: 'This page is blank — the app stopped rendering here, so nothing on it could be checked. A reload did not bring it back.',
+            });
+            emitSweep(sweepId, { type: 'fail', message: `  💥 ${path} — the app is blank here, even after a reload; skipping the rest of this page` });
+            checked++;
+            break;
+          }
+        }
+
         const eBefore = errSnapshot();
         const tabsBefore = tabsOpened;
         let acted = false;
-        // A CSS path beats a name: it reaches icon-only controls, and it cannot
-        // land on a different element that happens to share the same words.
+        // A CSS path reaches icon-only controls and cannot land on a different
+        // element that merely shares the same words — but it was recorded when
+        // the page was inventoried, and an SPA re-renders in between. An
+        // nth-of-type path that no longer points at the same element does not
+        // fail cleanly: it clicks the WRONG control. That is how "Calendario"
+        // opened /settings and reported it as working. For a control that HAS a
+        // name, the path is now checked against that name before it is trusted;
+        // when they disagree the name wins, since the name is what was judged.
+        let selectorOk = !!item.selector;
+        if (item.selector && item.named) {
+          const seen = await page.locator(item.selector).first().innerText({ timeout: 1500 }).catch(() => null);
+          if (seen !== null) {
+            const norm = (x) => String(x || '').replace(/\s+/g, ' ').trim().toLowerCase();
+            const a = norm(seen), b = norm(item.label);
+            if (a !== b && !a.startsWith(b) && !b.startsWith(a)) selectorOk = false;
+          }
+        }
         if (item.kind === 'select') {
           acted = await sweepDriveSelect(page, item);
-        } else if (item.selector) {
+        } else if (selectorOk) {
           acted = await page.locator(item.selector).first()
             .click({ timeout: 4000 }).then(() => true).catch(() => false);
         }
@@ -8791,9 +8856,23 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
 
         const hadError = errs.console.length || errs.failed.length || errs.http.length;
         let verdict, detail;
+        // Confirmed before reporting: an SPA can be mid-swap for a moment, and
+        // calling that a crash would be the worst kind of false alarm.
+        let blank = false;
+        if (acted && wentBlank(contentBefore, await pageContent())) {
+          await page.waitForTimeout(2500);
+          blank = wentBlank(contentBefore, await pageContent());
+        }
         if (!acted) {
           verdict = 'unreachable';
           detail = 'TestPilot could not click it (it may be covered, disabled or renamed)';
+        } else if (blank) {
+          // Ahead of the generic error branch: "the page went blank" is what the
+          // owner needs to read first, and the console error is the evidence for
+          // it rather than the headline.
+          verdict = 'crashed';
+          detail = 'The page went blank — the app stopped rendering and the navigation is gone'
+            + (errs.console.length ? `. Console: ${String(errs.console[0]).slice(0, 160)}` : '');
         } else if (hadError) {
           verdict = 'broken';
           detail = [
@@ -8823,9 +8902,32 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
           detail = (after || '').split('|').pop() !== (before || '').split('|').pop() ? 'Navigated' : 'Page updated';
         }
 
+        // Fixera's materials page draws, then vanishes a second later. A single
+        // measurement right after the click caught the first paint and called it
+        // working — the owner is left with a white screen the check called fine.
+        // Only controls that navigated AND otherwise look healthy pay this wait.
+        if (verdict === 'works' && page.url() !== url) {
+          // Give the destination the same chance to render that any page gets;
+          // a blank that survives the wait is a blank that a person would see.
+          const landed = await settle(5000);
+          if (wentBlank(contentBefore, landed)) {
+            const late = errSince(eBefore);
+            verdict = 'crashed';
+            detail = 'The page rendered and then went blank — the app crashed once its data arrived, taking the navigation with it'
+              + (late.console.length ? `. Console: ${String(late.console[0]).slice(0, 160)}` : '');
+          }
+        }
+
         report.items.push({ page: path, kind: item.kind, label: item.label, verdict, detail });
         const icon = verdict === 'works' ? '✅' : verdict === 'broken' ? '❌' : verdict === 'no_effect' ? '⚠️' : '⏭';
         emitSweep(sweepId, { type: verdict === 'broken' ? 'fail' : 'step', message: `  ${icon} [${item.kind}] "${item.label}" — ${verdict}` });
+
+        // A blank app answers nothing: without this, one crash turned into a
+        // cascade of "unreachable" verdicts against controls that were fine.
+        if (verdict === 'crashed') {
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+          await page.waitForTimeout(1200);
+        }
 
         // Return to the page under test so one control's navigation doesn't
         // silently move the sweep somewhere else.
@@ -8844,11 +8946,47 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
   } finally {
     report.completedAt = new Date().toISOString();
     report.counts = report.items.reduce((a, i) => { a[i.verdict] = (a[i.verdict] || 0) + 1; return a; }, {});
+
+    // A flaky backend that 500s for ten seconds used to be reported as eight
+    // broken controls, which reads like eight problems and buries the one that
+    // matters. Group by the error itself. A signature that fires under three or
+    // more unrelated controls was almost certainly already happening — a
+    // background poll, not something any one control did — so it is named as
+    // app-wide rather than pinned on whichever control was clicked at the time.
+    const defects = new Map();
+    for (const i of report.items) {
+      if (i.verdict !== 'broken' && i.verdict !== 'crashed') continue;
+      const sig = String(i.detail || '').replace(/[0-9a-f]{8,}/gi, '#').replace(/[0-9]+/g, '#').slice(0, 120);
+      if (!defects.has(sig)) defects.set(sig, { detail: i.detail, verdict: i.verdict, controls: [], pages: new Set() });
+      const d = defects.get(sig);
+      d.controls.push(i.label);
+      d.pages.add(i.page);
+      if (i.verdict === 'crashed') d.verdict = 'crashed';
+    }
+    report.defects = [...defects.values()].map((d) => ({
+      detail: d.detail,
+      verdict: d.verdict,
+      controls: d.controls.length,
+      pages: [...d.pages],
+      appWide: d.controls.length >= 3,
+    })).sort((a, b) => (a.verdict === 'crashed' ? -1 : 0) - (b.verdict === 'crashed' ? -1 : 0));
+    for (const d of report.defects) {
+      if (d.appWide) {
+        for (const i of report.items) {
+          if (i.verdict === 'broken' && String(i.detail || '').slice(0, 40) === String(d.detail || '').slice(0, 40)) {
+            i.appWide = true;
+          }
+        }
+      }
+    }
     try { await context.close(); } catch {}
     try { await browser.close(); } catch {}
     emitSweep(sweepId, {
       type: 'summary',
-      message: `Check complete: ${report.counts.works || 0} working · ${report.counts.broken || 0} broken · ${report.counts.no_effect || 0} suspicious · ${report.counts.skipped || 0} skipped`,
+      message: `Check complete: ${report.counts.works || 0} working · ${report.counts.crashed || 0} crashed · ${report.counts.broken || 0} broken · ${report.counts.no_effect || 0} suspicious · ${report.counts.skipped || 0} skipped`
+        + (report.defects && report.defects.length
+          ? ` — ${report.defects.length} distinct problem${report.defects.length === 1 ? '' : 's'}${report.defects.some((d) => d.appWide) ? ' (some app-wide, not caused by one control)' : ''}`
+          : ''),
     });
     emitSweep(sweepId, { type: 'done' });
     for (const r of (sweepStreams.get(sweepId) || [])) { try { r.end(); } catch {} }
