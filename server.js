@@ -54,14 +54,14 @@ async function mailer(opts) {
 mailer.sendMail = (opts) => mailer(opts);
 
 // Supabase REST helper
-async function supabase(method, table, body, query = '') {
+async function supabase(method, table, body, query = '', prefer = '') {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/${table}${query}`, {
     method,
     headers: {
       'Content-Type': 'application/json',
       'apikey': SUPABASE_SECRET,
       'Authorization': `Bearer ${SUPABASE_SECRET}`,
-      'Prefer': method === 'POST' ? 'return=representation' : ''
+      'Prefer': prefer || (method === 'POST' ? 'return=representation' : '')
     },
     body: body ? JSON.stringify(body) : undefined
   });
@@ -618,11 +618,20 @@ async function getAppByNormalized(urlNormalized) {
 async function createAppRow({ url_normalized, url_original, owner_email }) {
   if (!SUPABASE_URL) return null;
   try {
-    const rows = await supabase('POST', 'app_ownership', { url_normalized, url_original, owner_email });
-    return Array.isArray(rows) ? rows[0] : rows;
+    // Two concurrent learns of the same URL used to race into a unique
+    // violation on url_normalized, which threw, logged, and then re-fetched.
+    // ignore-duplicates makes the insert idempotent instead: on conflict
+    // PostgREST returns no row and the ORIGINAL owner stands — merge-duplicates
+    // would have handed the app to whoever raced in second.
+    // on_conflict names the target: the unique constraint is on url_normalized,
+    // not the primary key, and without it PostgREST ignores the resolution
+    // preference and 409s exactly as before.
+    const rows = await supabase('POST', 'app_ownership', { url_normalized, url_original, owner_email }, '?on_conflict=url_normalized', 'resolution=ignore-duplicates,return=representation');
+    const row = Array.isArray(rows) ? rows[0] : rows;
+    return row || await getAppByNormalized(url_normalized);
   } catch (err) {
-    // Likely a unique-violation race; fetch and return whatever's there.
-    console.warn('[app_ownership] create failed (race?):', err.message);
+    // A real failure now — the benign race no longer reaches here.
+    console.warn('[app_ownership] create failed:', err.message);
     return await getAppByNormalized(url_normalized);
   }
 }
