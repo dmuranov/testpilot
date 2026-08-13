@@ -8613,7 +8613,22 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
   let appOrigin = null;
   try { appOrigin = new URL(appKnowledge.url).origin; } catch {}
   const firstParty = (u) => { try { return new URL(u).origin === appOrigin; } catch { return false; } };
-  page.on('console', (m) => { try { if (m.type() === 'error' && diag.console.length < 300) diag.console.push(String(m.text()).slice(0, 250)); } catch {} });
+  // The response channel above deliberately ignores other origins. The console
+  // channel used to swallow everything, so a 500 from a THIRD-PARTY backend
+  // came back as "this control is broken" — and was pinned on whichever control
+  // happened to be clicked while it fired. On the Fixera dashboard that turned
+  // one failing base44.app endpoint into 12 broken nav links.
+  // A console error counts only when it comes from the app's own code, or when
+  // it carries no source at all (a bare console.error the app itself wrote).
+  page.on('console', (m) => {
+    try {
+      if (m.type() !== 'error' || diag.console.length >= 300) return;
+      let src = '';
+      try { const loc = m.location(); src = (loc && loc.url) || ''; } catch {}
+      if (src && !firstParty(src)) return;
+      diag.console.push(String(m.text()).slice(0, 250));
+    } catch {}
+  });
   page.on('pageerror', (e) => { if (diag.console.length < 300) diag.console.push('pageerror: ' + String(e && e.message).slice(0, 250)); });
   page.on('requestfailed', (r) => { try { if (firstParty(r.url()) && diag.failed.length < 300) diag.failed.push(r.url().slice(0, 200)); } catch {} });
   page.on('response', (r) => { try { if (r.status() >= 400 && firstParty(r.url()) && diag.http.length < 300) diag.http.push(r.status() + ' ' + r.url().slice(0, 180)); } catch {} });
