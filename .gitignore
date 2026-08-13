@@ -36,3 +36,14 @@ _bak/
 *.migrated
 *.pdf
 *.xlsx
+
+# ── Runtime state written by the server (per-install, not baseline) ──
+cleanup-configs.json
+sweep-decisions.json
+free-sweep-used.json
+schedules.json
+embed-tokens.json
+content-engine-results*.json
+
+# ── Ad-hoc gauntlet drivers (contain test credentials) ──
+pp-*.mjs

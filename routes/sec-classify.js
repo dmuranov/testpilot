@@ -61,6 +61,23 @@ export function looksLikeCommit(outcome, action, target) {
     || (String(action) === 'click' && COMMIT_CLICK.test(String(target || '')));
 }
 
+// Sub-classify a commit as create / mutate / destroy — for the cleanup ledger.
+// CONSERVATIVE on create: only clearly-create verbs, never the ambiguous "saved",
+// so a merely-edited record is never marked for teardown. A false miss (orphan)
+// is safe; a false create (deleting a real record) is not.
+const CREATE_RE = /\b(created|submitted|published|posted|added)\b|cread|enviad|publicad|a[ñn]adid|agregad/i;
+const DESTROY_RE = /\b(deleted|removed|cancell?ed)\b|eliminad|borrad|cancelad/i;
+const CREATE_TARGET = /\b(create|add|new|submit|post|publish)\b|crear|a[ñn]adir|agregar|nuev|publicar/i;
+const DESTROY_TARGET = /\b(delete|remove|trash|discard)\b|eliminar|borrar|quitar|descartar/i;
+export function classifyCommit({ action, outcome, status }) {
+  if (!isCommitStep({ action, outcome, status })) return null;
+  const o = String(outcome || '');
+  const clickTgt = String(action && action.action) === 'click' ? String((action && action.target) || '') : '';
+  if (DESTROY_RE.test(o) || DESTROY_TARGET.test(clickTgt)) return 'destroy';
+  if (CREATE_RE.test(o) || CREATE_TARGET.test(clickTgt)) return 'create';
+  return 'mutate';
+}
+
 // ── SECURITY: public-path + auth-endpoint heuristics ───────────
 export function isPublicPath(url) { return /\/public\//i.test(String(url || '')); }
 
@@ -123,7 +140,61 @@ export const WSTG = {
   broken_resource: { id: 'TP-PERF-04', name: 'Broken resources', trust: '★★★★★' },
   privacy_tracking: { id: 'TP-PRIV-01 (GDPR/ePrivacy)', name: 'Pre-consent tracking', trust: '★★★★★' },
   privacy_cookie: { id: 'TP-PRIV-02 (GDPR/ePrivacy)', name: 'Pre-consent cookies', trust: '★★★★★' },
+  data_exposure: { id: 'OWASP-API3 / WSTG-v42-ATHZ-04', name: 'Excessive data exposure', trust: '★★★★☆' },
+  xss_reflected: { id: 'WSTG-v42-INPV-01', name: 'Reflected XSS', trust: '★★★★☆' },
+  session_fixation: { id: 'WSTG-v42-SESS-03', name: 'Session fixation', trust: '★★★★★' },
+  logout_invalidation: { id: 'WSTG-v42-SESS-06', name: 'Session termination (logout)', trust: '★★★★☆' },
+  secret_exposure: { id: 'WSTG-v42-CONF-04 / OWASP-A02', name: 'Exposed secret in client bundle', trust: '★★★★★' },
+  rls_exposure: { id: 'WSTG-v42-ATHZ-02 / Supabase-RLS', name: 'Supabase RLS / anon-key exposure', trust: '★★★★★' },
 };
+
+// ── SECURITY: exposed secrets in the client JS bundle ──────────
+// Vibe-coded apps routinely ship LIVE keys / service-role secrets in frontend
+// JS. High-signal only (distinctive prefixes + a DECODED Supabase JWT role, so
+// the safe anon key is ignored and only a real service_role key fires) — public
+// results must not false-positive. Returns [{name, sev, redacted, file, note}].
+const SECRET_PATTERNS = [
+  { name: 'Stripe live secret key', re: /sk_live_[A-Za-z0-9]{20,}/g, sev: 'critical' },
+  { name: 'Stripe restricted key',  re: /rk_live_[A-Za-z0-9]{20,}/g, sev: 'critical' },
+  { name: 'Anthropic API key',      re: /sk-ant-[A-Za-z0-9-]{24,}/g, sev: 'critical' },
+  { name: 'Supabase secret key',    re: /sb_secret_[A-Za-z0-9_-]{20,}/g, sev: 'critical' },
+  { name: 'OpenAI project key',     re: /sk-proj-[A-Za-z0-9_-]{20,}/g, sev: 'critical' },
+  { name: 'Google API key',         re: /AIza[0-9A-Za-z_-]{35}/g, sev: 'high' },
+  { name: 'AWS access key ID',      re: /AKIA[0-9A-Z]{16}/g, sev: 'critical' },
+  { name: 'GitHub token',           re: /gh[pousr]_[A-Za-z0-9]{36,}/g, sev: 'critical' },
+  { name: 'Private key block',      re: /-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----/g, sev: 'critical' },
+  { name: 'Supabase service env var', re: /SUPABASE_SERVICE(?:_ROLE)?_KEY/g, sev: 'high' },
+];
+function tpRedact(s) { s = String(s); return s.length > 14 ? s.slice(0, 9) + '…' + s.slice(-4) : s.slice(0, 5) + '…'; }
+export function scanForSecrets(haystacks) {
+  const found = new Map();
+  const add = (name, sev, sample, file, note) => { const k = name + '|' + sample; if (!found.has(k)) found.set(k, { name, sev, redacted: sample, file, note }); };
+  for (const h of (haystacks || [])) {
+    const text = String(h.text || '');
+    if (!text) continue;
+    const file = (String(h.url || '').split('?')[0].split('/').pop()) || h.url || 'bundle';
+    for (const p of SECRET_PATTERNS) {
+      p.re.lastIndex = 0; let m, guard = 0;
+      while ((m = p.re.exec(text)) && guard++ < 50) {
+        add(p.name, p.sev, tpRedact(m[0]), file, `A ${p.name} is present in your client-side JavaScript (${file}) — anyone can read it straight from the browser. Rotate it now and move it to the server.`);
+        if (found.size > 60) break;
+      }
+    }
+    const jwtRe = /eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{8,}/g;
+    let jm, jg = 0;
+    while ((jm = jwtRe.exec(text)) && jg++ < 50) {
+      try {
+        const b64 = jm[0].split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+        const payload = JSON.parse(Buffer.from(b64, 'base64').toString('utf8'));
+        if (payload && payload.role === 'service_role') {
+          add('Supabase service_role key', 'critical', tpRedact(jm[0]), file, `Your Supabase SERVICE_ROLE key is embedded in the client bundle (${file}). It bypasses ALL row-level security — anyone can read or wipe your entire database. Rotate it immediately; the browser should only ever use the anon key.`);
+        }
+      } catch {}
+      if (found.size > 60) break;
+    }
+  }
+  return [...found.values()];
+}
 
 // A SUSPICIOUS/unconfirmed verdict is INDICATIVE regardless of the test's
 // baseline confidence → ★★★☆☆ + a caveat. Mutates the finding in place
@@ -139,4 +210,99 @@ export function stampFinding(r) {
     r.note += ' [INDICATIVE — not auto-confirmed; manual verification needed before treating as a real finding].';
   }
   return r;
+}
+
+
+// ── SECURITY: static-asset detection ───────────────────────────
+// Static assets (JS/CSS bundles, images, fonts, media, WebAssembly / game-engine
+// data like .wasm/.pck/.data) are PUBLIC BY ARCHITECTURE — the browser cannot
+// load them otherwise. Loaders (Godot, Unity, Vite) fetch them via XHR/fetch so
+// they get captured, but they are NOT API endpoints; serving them without auth
+// is not an authz bug. Excluded from no_auth / cross-tenant checks so the vuln
+// count reflects real data endpoints only. NOTE: .json is deliberately absent —
+// data APIs commonly use it.
+const STATIC_ASSET_EXT = /\.(?:js|mjs|cjs|jsx|ts|tsx|css|scss|sass|less|map|wasm|pck|data|unityweb|glb|gltf|bin|png|jpe?g|gif|svg|webp|avif|ico|bmp|cur|woff2?|ttf|eot|otf|mp4|webm|ogg|ogv|mp3|wav|flac|m4a|mov|pdf|zip|gz|br|txt)$/i;
+export function isStaticAsset(url) {
+  const path = String(url || '').split('#')[0].split('?')[0];
+  return STATIC_ASSET_EXT.test(path);
+}
+
+// ── SECURITY: Supabase anon-key / RLS exposure ─────────────────
+// Extract a target's Supabase project URL + PUBLIC anon key from its client
+// bundle. The anon key is MEANT to be public — the real question is whether the
+// tables behind it are protected by Row-Level Security. Returns {url, anonKey}
+// or null. anonKey is a JWT whose decoded role is 'anon' (NOT service_role — a
+// service_role in the bundle is the separate, already-flagged critical leak).
+export function extractSupabaseConfig(haystacks) {
+  let url = null, anonKey = null;
+  const urlRe = /https:\/\/[a-z0-9]{16,}\.supabase\.co/i;
+  const jwtRe = /eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{8,}/g;
+  for (const h of (haystacks || [])) {
+    const text = String(h.text || '');
+    if (!text) continue;
+    if (!url) { const m = text.match(urlRe); if (m) url = m[0]; }
+    if (!anonKey) {
+      jwtRe.lastIndex = 0; let jm, guard = 0;
+      while ((jm = jwtRe.exec(text)) && guard++ < 200) {
+        try {
+          const b64 = jm[0].split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+          const payload = JSON.parse(Buffer.from(b64, 'base64').toString('utf8'));
+          if (payload && payload.role === 'anon') { anonKey = jm[0]; break; }
+        } catch {}
+      }
+      // Modern Supabase public key format (2024+) is not a JWT: sb_publishable_...
+      if (!anonKey) { const pm = text.match(/sb_publishable_[A-Za-z0-9_-]{20,}/); if (pm) anonKey = pm[0]; }
+    }
+    if (url && anonKey) break;
+  }
+  return (url && anonKey) ? { url, anonKey } : null;
+}
+
+// Table names PostgREST exposes, parsed from the OpenAPI (Swagger 2.0) spec
+// served at GET <url>/rest/v1/ with the anon apikey. Tables/views appear as
+// top-level 'definitions' and as single-segment 'paths'. Excludes the root and
+// rpc/ function endpoints.
+export function supabaseTablesFromSpec(spec) {
+  const out = new Set();
+  if (spec && spec.definitions && typeof spec.definitions === 'object') {
+    for (const k of Object.keys(spec.definitions)) out.add(k);
+  }
+  if (spec && spec.paths && typeof spec.paths === 'object') {
+    for (const p of Object.keys(spec.paths)) {
+      const m = String(p).match(/^\/([A-Za-z0-9_]+)$/);
+      if (m && m[1] && !/^rpc$/i.test(m[1])) out.add(m[1]);
+    }
+  }
+  return [...out];
+}
+
+// Classify one anon-key READ probe against a Supabase table. The anon key is
+// public, so a 200 returning ROWS means RLS is missing/permissive for anon.
+// Sensitive columns (PII/secrets) → VULNERABLE/critical (an unambiguous leak).
+// Rows without obvious PII → SUSPICIOUS/medium (could be an intended public
+// catalog — verify, don't scream). Anon-readable but empty → SUSPICIOUS/low.
+// Any non-200 (401/403/404) → anon blocked → SAFE.
+export function rlsReadVerdict({ status, rowCount, sensitiveFields }) {
+  if (status !== 200) return { verdict: 'SAFE', severity: 'none' };                                   // 401/403/404 — anon blocked or table absent
+  if (rowCount > 0 && sensitiveFields && sensitiveFields.length) return { verdict: 'VULNERABLE', severity: 'critical' };
+  if (rowCount > 0) return { verdict: 'SUSPICIOUS', severity: 'medium' };                              // real rows readable by anon — verify intent
+  return { verdict: 'SAFE', severity: 'none' };                                                        // 200 [] — RLS filtering rows / no data exposed
+}
+
+// Discover candidate Supabase table names from the app's OWN traffic + bundle.
+// Necessary because modern Supabase blocks OpenAPI introspection for public keys
+// (GET /rest/v1/ → 401), so the spec can't be listed. We look for the
+// /rest/v1/<table> paths the app itself calls — the real tables, no guessing.
+// Excludes the rpc/ function namespace.
+export function supabaseTablesFromTraffic(sources) {
+  const out = new Set();
+  const re = /\/rest\/v1\/([A-Za-z0-9_]+)/g;
+  for (const src of (sources || [])) {
+    const text = String(src || '');
+    let m; re.lastIndex = 0; let guard = 0;
+    while ((m = re.exec(text)) && guard++ < 20000) {
+      if (m[1] && !/^rpc$/i.test(m[1])) out.add(m[1]);
+    }
+  }
+  return [...out];
 }

@@ -50,6 +50,10 @@
   .later{background:transparent;color:#8a8a8a;border:1px solid #333;font-weight:400;font-size:13px;padding:10px;margin-top:0}
   .later:hover{color:#fff;border-color:#666;opacity:1}
 </style>
+<script type="text/javascript">
+/* Cookie consent — gates Microsoft Clarity (GDPR/ePrivacy: no analytics before opt-in; choice remembered). */
+(function(){var KEY='tp-cookie-consent';function loadClarity(){(function(c,l,a,r,i,t,y){c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y)})(window,document,"clarity","script","w97af8wesr");}function get(){try{return localStorage.getItem(KEY);}catch(e){return null;}}function decide(v){try{localStorage.setItem(KEY,v);}catch(e){}var b=document.getElementById('tp-consent');if(b&&b.parentNode)b.parentNode.removeChild(b);if(v==='granted')loadClarity();}var c=get();if(c==='granted'){loadClarity();return;}if(c==='denied'){return;}function show(){if(document.getElementById('tp-consent'))return;var d=document.createElement('div');d.id='tp-consent';d.setAttribute('role','dialog');d.setAttribute('aria-label','Cookie consent');d.style.cssText='position:fixed;left:16px;right:16px;bottom:16px;z-index:2147483647;max-width:560px;margin:0 auto;background:#111;border:1px solid rgba(200,240,64,0.3);border-radius:6px;padding:16px 18px;font-family:system-ui,-apple-system,sans-serif;box-shadow:0 8px 32px rgba(0,0,0,0.55)';d.innerHTML='<p style="margin:0 0 12px;font-size:13px;line-height:1.6;color:#cfcfcf">We use analytics cookies (Microsoft Clarity) to see how TestPilot is used and improve it. Accept or decline — your choice is remembered. See our <a href="/privacy.html" style="color:#c8f040">Privacy Policy</a>.</p><div style="display:flex;gap:8px;justify-content:flex-end"><button id="tpc-no" style="background:transparent;border:1px solid #444;color:#ccc;font-size:13px;padding:8px 16px;border-radius:4px;cursor:pointer">Decline</button><button id="tpc-yes" style="background:#c8f040;border:none;color:#080808;font-weight:700;font-size:13px;padding:8px 16px;border-radius:4px;cursor:pointer">Accept</button></div>';document.body.appendChild(d);document.getElementById('tpc-yes').onclick=function(){decide('granted');};document.getElementById('tpc-no').onclick=function(){decide('denied');};}if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',show);}else{show();}})();
+</script>
 </head>
 <body>
 
@@ -69,12 +73,18 @@
     <input id="f-url" type="url" placeholder="https://your-app.com" autocomplete="url" inputmode="url" />
 
     <div style="margin-top:18px;padding:14px;background:#080808;border:1px solid #222;border-radius:3px">
-      <div style="font-size:11px;color:#8a8a8a;font-family:monospace;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:10px">App login (optional — leave blank if public)</div>
-      <label for="f-start-app-email" style="margin-top:0">App login email</label>
-      <input id="f-start-app-email" type="email" placeholder="testuser@your-app.com" autocomplete="off" />
-      <label for="f-start-app-pw">App login password</label>
-      <input id="f-start-app-pw" type="password" placeholder="••••••••" autocomplete="off" />
-      <div style="font-size:11px;color:#666;margin-top:8px;font-family:monospace">// give us creds for a test account so we can crawl past the login wall</div>
+      <div style="font-size:11px;color:#8a8a8a;font-family:monospace;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:10px">App login</div>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:0;font-size:12px;color:#a8a8a8">
+        <input id="f-no-login" type="checkbox" onchange="toggleStartLogin()" style="width:15px;height:15px;accent-color:#c8f040;cursor:pointer;margin:0" />
+        No login needed — my app is publicly accessible
+      </label>
+      <div id="f-login-fields" style="margin-top:12px">
+        <label for="f-start-app-email" style="margin-top:0">App login email</label>
+        <input id="f-start-app-email" type="email" placeholder="testuser@your-app.com" autocomplete="off" />
+        <label for="f-start-app-pw">App login password</label>
+        <input id="f-start-app-pw" type="password" placeholder="••••••••" autocomplete="off" />
+        <div style="font-size:11px;color:#666;margin-top:8px;font-family:monospace">// use a TEST account — we log in with these to crawl past the sign-in wall</div>
+      </div>
     </div>
 
     <div id="step-start-err" style="display:none" class="err"></div>
@@ -120,6 +130,16 @@
 </div>
 
 <!-- Paywall popup (shown over report) -->
+<!-- APP READY — the funnel used to slide silently from the crawl log to the
+     scenario form. Users read that as "nothing happened" and restarted. -->
+<div class="modal" id="ready-pop">
+  <div class="modal-card" style="max-width:460px;padding:28px">
+    <div class="modal-h">Your app is <span style="color:#c8f040">ready to test</span></div>
+    <div class="modal-sub" id="ready-pop-sub">// deep crawl complete</div>
+    <p style="font-size:13px;color:#aaa;line-height:1.7;margin:0 0 22px">TestPilot has mapped your app&rsquo;s pages, forms and buttons. Next: tell it what to test &mdash; one sentence in plain english is enough.</p>
+    <button onclick="closeReadyPop()" style="width:100%">Choose your test &rarr;</button>
+  </div>
+</div>
 <div class="modal" id="paywall">
   <div class="modal-card">
     <div class="modal-h">That was your free run.</div>
@@ -128,7 +148,7 @@
       <div class="plan" onclick="checkout('onerun')">
         <div class="plan-name">ONE TIME RUN</div>
         <div class="plan-price">€5</div>
-        <div class="plan-line">1 app · unlimited scenario tests</div>
+        <div class="plan-line">1 app · unlimited flow tests</div>
       </div>
       <div class="plan featured" onclick="checkout('starter')">
         <div class="plan-name">STARTER</div>
@@ -143,7 +163,7 @@
       <div class="plan" onclick="checkout('agency')">
         <div class="plan-name">AGENCY</div>
         <div class="plan-price">€249<small>/mo</small></div>
-        <div class="plan-line">unlimited · + cross-app + security</div>
+        <div class="plan-line">unlimited · + security scanning</div>
       </div>
     </div>
     <button class="later" onclick="closePaywall()">Maybe later — show me the report</button>
@@ -151,7 +171,19 @@
 </div>
 
 <script>
-const state = { appId: null, testId: null, userEmail: null, appEmail: '', appPw: '' };
+const state = { appId: null, testId: null, userEmail: null, appEmail: '', appPw: '', learnSummary: '' };
+
+function showReadyPop() {
+  const sub = document.getElementById('ready-pop-sub');
+  if (sub) sub.textContent = '// ' + (state.learnSummary || 'deep crawl complete');
+  document.getElementById('ready-pop').classList.add('open');
+}
+
+function closeReadyPop() {
+  document.getElementById('ready-pop').classList.remove('open');
+  const ta = document.getElementById('f-scenario');
+  if (ta) ta.focus();
+}
 
 function show(id) {
   document.querySelectorAll('.card').forEach(c => c.style.display = 'none');
@@ -176,15 +208,22 @@ function showErr(boxId, msg) {
 function clearErr(boxId) {
   document.getElementById(boxId).style.display = 'none';
 }
+function toggleStartLogin() {
+  const noLogin = document.getElementById('f-no-login').checked;
+  const f = document.getElementById('f-login-fields');
+  if (f) f.style.display = noLogin ? 'none' : 'block';
+}
 
 async function startFunnel() {
   clearErr('step-start-err');
   const email = document.getElementById('f-email').value.trim().toLowerCase();
   const url = document.getElementById('f-url').value.trim();
-  const appEmail = document.getElementById('f-start-app-email').value.trim();
-  const appPw = document.getElementById('f-start-app-pw').value;
+  const noLogin = document.getElementById('f-no-login').checked;
+  const appEmail = noLogin ? '' : document.getElementById('f-start-app-email').value.trim();
+  const appPw = noLogin ? '' : document.getElementById('f-start-app-pw').value;
   if (!email || !email.includes('@')) return showErr('step-start-err', 'Enter a valid email');
   if (!url) return showErr('step-start-err', 'Enter the URL of the app you want to test');
+  if (!noLogin && (!appEmail || !appPw)) return showErr('step-start-err', 'Enter a test login for your app so we can crawl past the sign-in wall — or check "No login needed" if it\'s public');
 
   const btn = document.getElementById('step-start-btn');
   btn.disabled = true; btn.textContent = 'Starting…';
@@ -258,11 +297,20 @@ async function runLearnStream({ url, userEmail, appEmail, appPw }) {
         try {
           const ev = JSON.parse(line.substring(6));
           if (ev.appId) state.appId = ev.appId;
+          if (ev.phase === 'complete' && ev.message) state.learnSummary = ev.message;
           const kind = ev.phase === 'error' ? 'err' : ev.phase === 'done' ? 'ok' : '';
           if (ev.message) appendStream('step-learn-stream', ev.message, kind);
           if (ev.phase === 'done') {
-            // Move to scenario step
-            setTimeout(() => show('step-scenario'), 500);
+            // Hand off to the dashboard. The funnel exists to get an app
+            // learned; everything after that (choosing a test type, running
+            // it, reading the report) belongs inside the product, where the
+            // nav is. Asking for a scenario on this bare page is where cold
+            // visitors stalled out.
+            appendStream('step-learn-stream', '\u2705 App learned \u2014 opening your dashboard\u2026', 'ok');
+            const _lid = state.appId || ev.appId || '';
+            setTimeout(() => {
+              window.location.href = '/app?learned=' + encodeURIComponent(_lid);
+            }, 1300);
             return;
           }
           if (ev.phase === 'error') return;
@@ -314,7 +362,7 @@ async function runFunnelTest() {
 }
 
 function streamTest(testId) {
-  appendStream('step-test-stream', '⏳ Test starting…', 'info');
+  appendStream('step-test-stream', '⏳ Connecting to test runner…', 'info');
   const es = new EventSource('/api/test/' + testId + '/stream');
   es.onmessage = (e) => {
     try {

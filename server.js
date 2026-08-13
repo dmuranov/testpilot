@@ -3,16 +3,16 @@ import { runStagingSafeTests } from './routes/staging-test.js';
 import netlifyRoutes from './routes/netlify.js';
 import githubRoutes from './routes/github.js';
 import { classifyFailure, summarizeFindings, isConfirmedAppBug, Category, Confidence } from './routes/classify.js';
-import { parseScopeCap, shouldFlagDropdownDivergence, isCommitStep, isPublicPath, isAuthReplayEndpoint, corsVerdict, noAuthVerdict, crossTenantVerdict, stampFinding } from './routes/sec-classify.js';
+import { parseScopeCap, shouldFlagDropdownDivergence, isCommitStep, classifyCommit, isPublicPath, isAuthReplayEndpoint, corsVerdict, noAuthVerdict, crossTenantVerdict, stampFinding, scanForSecrets, isStaticAsset, extractSupabaseConfig, supabaseTablesFromSpec, supabaseTablesFromTraffic, rlsReadVerdict } from './routes/sec-classify.js';
 import { detectUndisclosedRename, renameDisclosureNote, terminalVerifyDiagnostics, summaryLooksBlocked } from './routes/done-gates.js';
 import psl from 'psl';
-import { loadRecipe, saveRecipe, shouldCaptureRun, isReplayableAction, replayStepHeld, stepIdentity, EMAIL_TOKEN, PASSWORD_TOKEN } from './routes/recipes.js';
+import { loadRecipe, saveRecipe, shouldCaptureRun, isReplayableAction, replayStepHeld, stepIdentity, recipeKey, EMAIL_TOKEN, PASSWORD_TOKEN } from './routes/recipes.js';
 import { assertPublicUrl } from './routes/ssrf.js';
 import express from 'express';
 import cors from 'cors';
 import { chromium } from 'playwright';
 import Anthropic from '@anthropic-ai/sdk';
-import { randomUUID, createHash, timingSafeEqual } from 'crypto';
+import { randomUUID, createHash, timingSafeEqual, createCipheriv, createDecipheriv, randomBytes } from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'node:os';
@@ -28,6 +28,8 @@ const APP_URL = process.env.APP_URL || 'https://testpilotapp.dev';
 
 // Email via Resend
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
+// Where new-signup notifications are sent.
+const SIGNUP_NOTIFY_EMAIL = process.env.SIGNUP_NOTIFY_EMAIL || 'danijel.muranovic@gmail.com';
 async function mailer(opts) {
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
@@ -145,24 +147,33 @@ const PRICE_IDS = {
   starter: 'price_1TI3Hd4PhClyPmHIOrwq9a8E',
   pro: 'price_1TI3Jr4PhClyPmHIzzMEIGQg',
   agency: 'price_1TI3L24PhClyPmHIcWQNc4jb',
-  onerun: 'price_1TI3OM4PhClyPmHIDvt0iEco'
+  onerun: 'price_1TI3OM4PhClyPmHIDvt0iEco',
+  // Solo €10/mo recurring. Set STRIPE_SOLO_PRICE_ID in .env to the live price id;
+  // until then Solo checkout returns a clean "Invalid plan" (everything else is
+  // already wired: subscription mode + generic webhook mapping).
+  ...(process.env.STRIPE_SOLO_PRICE_ID ? { solo: process.env.STRIPE_SOLO_PRICE_ID } : {}),
 };
 const PLAN_LIMITS = {
-  // Free: one app, one scenario test, then paywall. Enforced via app_slots_used
-  // (per /api/learn) and free_run_used (per /api/test).
-  free:    { apps: 1, features: ['scenario'] },
-  // OneRun (TestPilot One Time Run): one app, unlimited scenario tests on it.
-  onerun:  { apps: 1, features: ['scenario'] },
-  starter: { apps: 3, features: ['scenario', 'interactive'] },
-  pro:     { apps: 10, features: ['scenario', 'interactive', 'multirole'] },
-  agency:  { apps: 999, features: ['scenario', 'interactive', 'multirole', 'security'] },
-  // Operator/superuser accounts. WITHOUT these entries, `PLAN_LIMITS['admin']`
-  // is undefined → features fall back to [] → admin/tester get treated as a
-  // free plan and are silently blocked from multirole, security, and
-  // hit the 1-app cap on /api/learn. They should have everything. Additive —
-  // does not change any paying plan's limits.
-  admin:   { apps: 9999, features: ['scenario', 'interactive', 'multirole', 'security'] },
-  tester:  { apps: 9999, features: ['scenario', 'interactive', 'multirole', 'security'] }
+  // Pricing v2: every PAID tier includes the whole product; the only limit is
+  // number of apps. `runs: null` = unlimited; `runs: 1` = capped (free/onerun).
+  // Free: 1 app, 1 scenario run, then paywall. Scenario-only on purpose:
+  // multirole needs two accounts, security probes authz — neither suits an
+  // anonymous first run. Enforced via app_slots_used + free_run_used.
+  free:    { apps: 1,    runs: 1,    features: ['scenario'] },
+  // OneRun: 1 app, ONE run credit per €5 (users.credits). The single credit
+  // unlocks ANY run type — scenario, multirole, OR security — one use, refunded
+  // if TestPilot itself fails. The multirole + security endpoints reserve/refund
+  // the credit the same way /api/test does. (Interactive chat = a live session,
+  // not a discrete run — stays subscription-only.)
+  onerun:  { apps: 1,    runs: 1,    features: ['scenario', 'multirole', 'security'] },
+  // Solo €10/mo: 1 app, unlimited runs, every feature. Recurring subscription.
+  solo:    { apps: 1,    runs: null, features: ['scenario', 'interactive', 'multirole', 'security'] },
+  starter: { apps: 3,    runs: null, features: ['scenario', 'interactive', 'multirole', 'security'] },
+  pro:     { apps: 10,   runs: null, features: ['scenario', 'interactive', 'multirole', 'security'] },
+  agency:  { apps: 999,  runs: null, features: ['scenario', 'interactive', 'multirole', 'security'] },
+  // Operator/superuser accounts — everything. Additive; no paying plan changes.
+  admin:   { apps: 9999, runs: null, features: ['scenario', 'interactive', 'multirole', 'security'] },
+  tester:  { apps: 9999, runs: null, features: ['scenario', 'interactive', 'multirole', 'security'] }
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -171,6 +182,32 @@ const PLAN_LIMITS = {
 const PORT = process.env.PORT || 3001;
 const SCREENSHOT_DIR = './screenshots';
 const MAPS_DIR = './platform-maps';
+// Super admin: bypasses app-ownership blocks so it can learn/test ANY app,
+// regardless of which account first claimed it.
+const SUPER_ADMIN_EMAIL = (process.env.SUPER_ADMIN_EMAIL || 'danijel.muranovic@gmail.com').toLowerCase();
+// Compare canonically (canonicalEmail strips gmail dots + plus-tags) so the
+// super admin still matches after an email has been through canonicalEmail()
+// on the free-run identity path — otherwise danijel.muranovic@ (stored WITH a
+// dot) would never equal the dot-stripped canonical form and the bypass breaks.
+const isSuperAdmin = (e) => !!e && canonicalEmail(e) === canonicalEmail(SUPER_ADMIN_EMAIL);
+// Canonicalize an email for FREE-RUN identity so plus-aliases and gmail dots
+// can't mint unlimited free runs (you+1@ / you+2@ / y.o.u@ → one identity).
+// Applied ONLY to anonymous funnel/free emails — never to a logged-in session
+// email (that would break the account's own row lookup).
+function canonicalEmail(email) {
+  const e = String(email || '').trim().toLowerCase();
+  // NEVER rewrite the super admin's identity — its account (admin plan, app
+  // ownership bypass) is keyed by the exact address incl. gmail dots. Stripping
+  // dots here would resolve danijel.muranovic@ to a different (free) account.
+  if (e === SUPER_ADMIN_EMAIL) return e;
+  const at = e.lastIndexOf('@');
+  if (at < 1) return e;
+  let local = e.slice(0, at);
+  const domain = e.slice(at + 1);
+  local = local.split('+')[0]; // strip +tag — treated as the same inbox by all major providers
+  if (domain === 'gmail.com' || domain === 'googlemail.com') local = local.replace(/\./g, ''); // gmail ignores dots
+  return local ? local + '@' + domain : e;
+}
 const BRAIN_FILE = './platform-maps/_global_brain.json';
 const MAX_AGENT_STEPS = 120;
 
@@ -505,16 +542,11 @@ function normalizeAppUrl(raw) {
   } catch {
     return { ok: false, error: 'Invalid URL' };
   }
-  let host = url.hostname.toLowerCase().replace(/^www\./, '');
-  const isNoCode = NOCODE_HOSTS.some(h => host === h || host.endsWith('.' + h));
-  if (!isNoCode) {
-    // Public Suffix List → the true registrable domain, incl. multi-label TLDs:
-    // foo.co.uk → foo.co.uk (NOT co.uk), so two different .co.uk apps are no
-    // longer collapsed to the same owner key. Falls back to the raw host when
-    // psl can't parse it (IPs, single-label hosts, localhost).
-    const registrable = psl.get(host);
-    if (registrable) host = registrable;
-  }
+  const host = url.hostname.toLowerCase().replace(/^www\./, '');
+  // App identity = the FULL hostname (minus www). Distinct subdomains are
+  // DISTINCT apps: municipality.foo.es and dashboardpro.foo.es must NOT collide.
+  // (psl.get() registrable-domain collapse removed; multi-label TLDs like
+  // foo.co.uk are preserved by keeping the full host.)
   return { ok: true, normalized: host, original: String(raw).trim() };
 }
 
@@ -546,7 +578,21 @@ async function createOrGetUser(email) {
       free_run_used: false,
       app_slots_used: 0,
     });
-    return Array.isArray(rows) ? rows[0] : rows;
+    const created = Array.isArray(rows) ? rows[0] : rows;
+    // New-signup notification → SIGNUP_NOTIFY_EMAIL. Fire-and-forget: a mail
+    // failure (or missing RESEND_API_KEY) must never block or crash a signup.
+    // Only fires here (the create branch), so it's once per genuinely new email.
+    if (created) {
+      const safe = String(email).replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+      const when = new Date().toISOString();
+      mailer({
+        to: SIGNUP_NOTIFY_EMAIL,
+        subject: `🎉 New TestPilot signup: ${email}`,
+        text: `A new client just signed up.\n\nEmail: ${email}\nPlan: free\nWhen: ${when}`,
+        html: `<h2>🎉 New TestPilot signup</h2><p><strong>Email:</strong> ${safe}<br><strong>Plan:</strong> free<br><strong>When:</strong> ${when}</p>`,
+      }).then(() => console.log('[signup] notified for', email)).catch(e => console.warn('[signup] notify failed:', e.message));
+    }
+    return created;
   } catch (err) {
     console.warn('[users] create failed:', err.message);
     // If create raced with another request, fall back to a re-lookup.
@@ -699,7 +745,28 @@ app.use((req, res, next) => {
   });
   next();
 });
-app.use('/screenshots', express.static(SCREENSHOT_DIR));
+// Screenshots are OWNER-GATED (not plain static) so a leaked screenshot URL
+// isn't viewable by the public. Test screenshots ("<uuid>...") resolve to their
+// owner via testResults (disk-hydrated → survives restart); crawl screenshots
+// ("crawl-<appId>-...") via the map's ownerHash. Ownerless (staging-safe
+// capability-URL) tests + unresolvable files serve as before (UUID-obscurity),
+// so email-link report views keep working. Super admin sees all.
+app.get('/screenshots/:file', (req, res) => {
+  const file = req.params.file || '';
+  if (file.includes('/') || file.includes('..') || !/\.(png|jpe?g|webp)$/i.test(file)) return res.status(400).end();
+  const me = requesterEmail(req);
+  const admin = isSuperAdmin(me);
+  const uuid = file.match(/^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+  if (uuid) {
+    const tr = testResults.get(uuid[1]);
+    if (!admin && tr && tr.userEmail && String(tr.userEmail).toLowerCase() !== me) return res.status(403).end();
+  } else if (file.startsWith('crawl-')) {
+    const am = file.match(/^crawl-(.+?--[0-9a-f]{4}-[0-9a-f]{4})-/i);
+    const m = am && platformMaps.get(am[1]);
+    if (!admin && m && m.ownerHash && m.ownerHash !== userHash(me)) return res.status(403).end();
+  }
+  res.sendFile(path.resolve(SCREENSHOT_DIR, file), err => { if (err && !res.headersSent) res.status(404).end(); });
+});
 // Force browsers to revalidate HTML on every request (still gets a 304 if
 // unchanged — efficient). Without this, browsers cached old index.html
 // aggressively and ran stale frontend code for hours after a deploy, with
@@ -725,6 +792,24 @@ let trafficLog = [];
   try {
     const data = await fs.readFile(TRAFFIC_FILE, 'utf-8');
     trafficLog = JSON.parse(data);
+    // One-time backfill: rows written before the classifier existed have no
+    // `bot` flag. Done here rather than in a migration script so it cannot
+    // race the server's own writes to the same file.
+    let _tagged = 0;
+    for (const e of trafficLog) {
+      if (typeof e.bot !== 'boolean') { e.bot = classifyLegacyEntry(e); if (e.bot) _tagged++; }
+    }
+    if (_tagged) console.log(`[traffic] classified ${_tagged} historical hits as automated (of ${trafficLog.length})`);
+    // Probe paths recognised after those rows were already written. Only ever
+    // false -> true, and only on path evidence, so nothing classified by
+    // user-agent can be weakened. Safe to run on every boot.
+    let _retagged = 0;
+    for (const e of trafficLog) {
+      if (e.bot === false && (BOT_PATH_RE.test(e.path || '') || BOT_EXACT_RE.test(e.path || '') || BOT_MALFORMED_RE.test(e.path || ''))) {
+        e.bot = true; _retagged++;
+      }
+    }
+    if (_retagged) console.log(`[traffic] re-tagged ${_retagged} rows as automated on newly recognised probe paths`);
   } catch { trafficLog = []; }
 })();
 
@@ -744,6 +829,78 @@ function getSource(referer) {
   return 'other';
 }
 
+// ── AUTOMATED-TRAFFIC CLASSIFIER ──────────────────────────────────────────
+// Scanners walking known CMS/framework paths, requests with no user-agent at
+// all, and port-80 probes that arrive with an http:// referrer pointing back
+// at us. Tagged, never dropped: knowing you are scanned 1,800 times is useful,
+// counting it as an audience is not.
+const BOT_PATH_RE = /(^|\/)(wp-admin|wp-content|wp-includes|wp-json|wp-login|xmlrpc|actuator|_profiler|phpinfo|phpmyadmin|cgi-bin|id_rsa|id_dsa|id_ed25519|graphql|_next|cdn-cgi|solr|jenkins|struts|autodiscover|owa|boaform|hudson|telescope|debug|management\/config|server-status|\.well-known\/security)/i;
+// Paths that are only ever probes or malformed requests — this app serves no
+// such page, so an exact hit is never a visitor. (/api/* never reaches here.)
+const BOT_EXACT_RE = /^\/(env|config|status|info|version|metrics|v[0-9]+)$/i;
+// Scrapers that paste a data: URI into the request line.
+const BOT_MALFORMED_RE = /^\/(data:|https?:|\/\/)/i;
+const BOT_UA_RE = /bot\b|crawler|crawl|spider|scrap|curl\/|wget|python-requests|python-urllib|httpx|go-http|libwww|java\/|okhttp|scan|nuclei|nikto|masscan|zgrab|censys|expanse|semrush|ahrefs|dataprovider|headlesschrome/i;
+const SELF_HTTP_REF_RE = /^http:\/\/(www\.)?testpilotapp\.dev/i;
+
+function isAutomatedRequest({ path, ua, referer }) {
+  const pth = path || '';
+  if (BOT_PATH_RE.test(pth) || BOT_EXACT_RE.test(pth) || BOT_MALFORMED_RE.test(pth)) return true;
+  const agent = String(ua || '');
+  if (!agent.trim()) return true;              // every real browser sends one
+  if (BOT_UA_RE.test(agent)) return true;
+  // A browser following our own http→https redirect does NOT carry a referrer;
+  // an http:// self-referrer is a port-80 prober.
+  if (SELF_HTTP_REF_RE.test(String(referer || ''))) return true;
+  return false;
+}
+
+// ── OWNER TRAFFIC ─────────────────────────────────────────────────────────
+// The operator's own browsing is not an audience. Requests with an admin
+// session are owner traffic; the IP behind them is remembered so the same
+// machine's logged-OUT visits (landing page, incognito checks) are caught too.
+const ownerIps = new Map(); // ip -> last seen (ms)
+const OWNER_IP_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+const LOOPBACK_RE = /^(127\.|::1$|::ffff:127\.|localhost$)/i;
+
+function clientIpOf(req) {
+  const fwd = String(req.headers['x-forwarded-for'] || '');
+  return (fwd.split(',')[0] || '').trim() || req.socket?.remoteAddress || '';
+}
+
+// Loopback is never evidence of WHO is asking — it just means the request did
+// not come through the proxy. Refuse to attribute identity to it.
+function isAttributableIp(ip) {
+  return !!ip && !LOOPBACK_RE.test(ip);
+}
+
+function isOwnerRequest(req) {
+  let session = null;
+  try {
+    const tok = req.cookies && req.cookies.tpsession;
+    session = tok ? sessions.get(tok) : null;
+  } catch {}
+  const ip = clientIpOf(req);
+  const isAdminSession = !!(session && session.email && (isSuperAdmin(session.email) || session.plan === 'admin'));
+  if (isAdminSession) {
+    if (isAttributableIp(ip)) ownerIps.set(ip, Date.now());
+    return true;   // the session itself is proof, regardless of IP
+  }
+  if (isAttributableIp(ip)) {
+    const seen = ownerIps.get(ip);
+    if (seen && Date.now() - seen < OWNER_IP_TTL_MS) return true;
+    if (seen) ownerIps.delete(ip);
+  }
+  return false;
+}
+
+// Historical rows predate this and carry no user-agent — classify them on what
+// we do have (path + referrer) so old and new numbers are comparable.
+function classifyLegacyEntry(e) {
+  return isAutomatedRequest({ path: e.path, ua: 'legacy-unknown', referer: e.referer });
+}
+
 app.use((req, res, next) => {
   const skip = req.path.startsWith('/api') || req.path.startsWith('/screenshots') || req.path.includes('.');
   if (!skip) {
@@ -752,6 +909,8 @@ app.use((req, res, next) => {
       path: req.path,
       source: getSource(req.headers.referer || ''),
       referer: req.headers.referer || '',
+      bot: isAutomatedRequest({ path: req.path, ua: req.headers['user-agent'], referer: req.headers.referer }),
+      owner: isOwnerRequest(req),
     };
     trafficLog.push(entry);
     if (trafficLog.length > 10000) trafficLog = trafficLog.slice(-10000);
@@ -793,13 +952,29 @@ app.get('/api/admin/traffic', (req, res) => {
   const week = trafficLog.filter(e => e.ts >= weekStart.getTime());
 
   function summarize(entries) {
+    // `total` = OUTSIDE VISITORS. Scanners and the operator's own browsing are
+    // reported separately rather than folded in — a denominator full of bots
+    // and self-traffic makes every ratio a lie.
+    const humans = entries.filter(e => !e.bot);
+    const bots = entries.length - humans.length;
+    const ownerHits = humans.filter(e => e.owner === true);
+    const outside = humans.filter(e => e.owner !== true);
     const bySource = {};
     const byPage = {};
-    entries.forEach(e => {
+    outside.forEach(e => {
       bySource[e.source] = (bySource[e.source] || 0) + 1;
       byPage[e.path] = (byPage[e.path] || 0) + 1;
     });
-    return { total: entries.length, bySource, byPage };
+    return {
+      total: outside.length,        // real visitors
+      owner: ownerHits.length,      // your own browsing / automation
+      bots,
+      botShare: entries.length ? Math.round((bots / entries.length) * 100) + '%' : '0%',
+      rawTotal: entries.length,
+      note: 'total = outside visitors only; rows logged before 2026-08-13 have no owner data and count as outside',
+      bySource,
+      byPage,
+    };
   }
 
   res.json({
@@ -894,13 +1069,29 @@ app.get('/api/stats/traffic', (req, res) => {
   const week = trafficLog.filter(e => e.ts >= weekStart.getTime());
 
   function summarize(entries) {
+    // `total` = OUTSIDE VISITORS. Scanners and the operator's own browsing are
+    // reported separately rather than folded in — a denominator full of bots
+    // and self-traffic makes every ratio a lie.
+    const humans = entries.filter(e => !e.bot);
+    const bots = entries.length - humans.length;
+    const ownerHits = humans.filter(e => e.owner === true);
+    const outside = humans.filter(e => e.owner !== true);
     const bySource = {};
     const byPage = {};
-    entries.forEach(e => {
+    outside.forEach(e => {
       bySource[e.source] = (bySource[e.source] || 0) + 1;
       byPage[e.path] = (byPage[e.path] || 0) + 1;
     });
-    return { total: entries.length, bySource, byPage };
+    return {
+      total: outside.length,        // real visitors
+      owner: ownerHits.length,      // your own browsing / automation
+      bots,
+      botShare: entries.length ? Math.round((bots / entries.length) * 100) + '%' : '0%',
+      rawTotal: entries.length,
+      note: 'total = outside visitors only; rows logged before 2026-08-13 have no owner data and count as outside',
+      bySource,
+      byPage,
+    };
   }
 
   res.json({
@@ -926,6 +1117,260 @@ app.get('/first-run', (req, res) => res.sendFile(path.resolve('./first-run.html'
 // treats knowledge-of-sessionId as auth (sessionIds are 128-bit UUIDs
 // and sessions expire after 30 min idle — acceptable for V1).
 app.get('/chat', (req, res) => res.sendFile(path.resolve('./chat-embed.html')));
+
+// ===============================================================
+// EMBED WIDGET (v1 prototype) - one-line <script> drop-in that puts a
+// floating "Test" button inside the customer own app (see embed.js).
+// ===============================================================
+app.get("/embed.js", (req, res) => {
+  res.set("Content-Type", "application/javascript; charset=utf-8");
+  res.set("Cache-Control", "public, max-age=300");
+  res.sendFile(path.resolve("./embed.js"));
+});
+app.get("/widget", (req, res) => {
+  res.set("Cache-Control", "no-cache");
+  res.sendFile(path.resolve("./widget.html"));
+});
+
+// ═══════════════════════════════════════════════════════════════
+// EMBED WIDGET — token store + BYOK (v1-hardened)
+// ═══════════════════════════════════════════════════════════════
+// The widget runs inside a THIRD-PARTY app, so it can only hold a
+// publishable pk_ token. The owner's Anthropic secret key is stored here
+// (encrypted at rest) and resolved from the token at run time, so every
+// run bills to the customer's own key. Tokens are minted by /api/embed/connect
+// after the owner connects their key + learns the app once.
+const EMBED_TOKENS_FILE = './embed-tokens.json';
+
+// Per-token rate limit for widget test runs. The pk_ token is PUBLIC (it sits
+// in the host page's HTML), so anyone can copy it. Cap runs per token so a
+// copied token can't burn the owner's Anthropic budget or hog the shared scan
+// slots. 30/hour is generous for real testing, tight against abuse.
+const embedRunBuckets = new Map(); // token -> [timestamps]
+function checkEmbedRunRate(token, windowMs = 3_600_000, max = 30) {
+  const now = Date.now();
+  const times = (embedRunBuckets.get(token) || []).filter(t => now - t < windowMs);
+  if (times.length >= max) return { allowed: false, retryAfter: Math.ceil((windowMs - (now - times[0])) / 1000) };
+  times.push(now); embedRunBuckets.set(token, times);
+  return { allowed: true };
+}
+setInterval(() => {
+  const cutoff = Date.now() - 3_600_000;
+  for (const [k, t] of embedRunBuckets) { const f = t.filter(x => x > cutoff); if (!f.length) embedRunBuckets.delete(k); else embedRunBuckets.set(k, f); }
+}, 600_000);
+const embedTokens = new Map(); // token -> { owner, keyEnc, appId, appUrl, createdAt, revoked, learning }
+
+function embedEncKey() {
+  const raw = process.env.TP_EMBED_ENC_KEY || '';
+  return /^[0-9a-fA-F]{64}$/.test(raw) ? Buffer.from(raw, 'hex') : null;
+}
+function encryptSecret(plain) {
+  const key = embedEncKey();
+  if (!key) throw new Error('TP_EMBED_ENC_KEY not configured');
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  const ct = Buffer.concat([cipher.update(String(plain), 'utf8'), cipher.final()]);
+  return [iv.toString('hex'), cipher.getAuthTag().toString('hex'), ct.toString('hex')].join(':');
+}
+function decryptSecret(blob) {
+  const key = embedEncKey();
+  if (!key) throw new Error('TP_EMBED_ENC_KEY not configured');
+  const [ivh, tagh, cth] = String(blob).split(':');
+  const d = createDecipheriv('aes-256-gcm', key, Buffer.from(ivh, 'hex'));
+  d.setAuthTag(Buffer.from(tagh, 'hex'));
+  return Buffer.concat([d.update(Buffer.from(cth, 'hex')), d.final()]).toString('utf8');
+}
+async function loadEmbedTokens() {
+  try {
+    const data = await fs.readFile(EMBED_TOKENS_FILE, 'utf-8');
+    for (const t of JSON.parse(data)) embedTokens.set(t.token, t);
+    console.log(`[embed] loaded ${embedTokens.size} tokens from disk`);
+  } catch { /* first run */ }
+}
+function saveEmbedTokens() {
+  fs.writeFile(EMBED_TOKENS_FILE, JSON.stringify([...embedTokens.values()]))
+    .catch(e => console.error('[embed] token save failed:', e.message));
+}
+function newPkToken() { return 'pk_live_' + randomBytes(18).toString('hex'); }
+
+// Resolve a pk_ token -> { owner, apiKey (decrypted, may be null), appId, appUrl }, or null.
+function resolveEmbedToken(token) {
+  if (!token) return null;
+  const rec = embedTokens.get(token);
+  if (rec && !rec.revoked) {
+    let apiKey = null;
+    try { apiKey = rec.keyEnc ? decryptSecret(rec.keyEnc) : null; }
+    catch (e) { console.error('[embed] decrypt failed:', e.message); return null; }
+    return { owner: rec.owner, apiKey, appId: rec.appId, appUrl: rec.appUrl };
+  }
+  // Back-compat: env map (support-key BYOK, no per-owner key).
+  try { const map = JSON.parse(process.env.TP_EMBED_TOKENS || '{}'); if (map[token]) return { owner: map[token], apiKey: null, appId: null, appUrl: null }; } catch {}
+  return null;
+}
+
+// Portal (authenticated): connect an app to the widget. Validates the owner's
+// Anthropic key, learns the app once (crawlApp), stores the encrypted key, and
+// mints a pk_ token + the install snippet.
+app.post('/api/embed/connect', async (req, res) => {
+  const user = requireUser(req, res);
+  if (!user) return;
+  try {
+    const { anthropicKey, appUrl, email, password } = req.body || {};
+    if (!anthropicKey || !/^sk-ant-/.test(String(anthropicKey))) {
+      return res.status(400).json({ error: 'A valid Anthropic API key (sk-ant-…) is required.' });
+    }
+    if (!appUrl) return res.status(400).json({ error: 'appUrl required' });
+    if (!embedEncKey()) return res.status(500).json({ error: 'Server key store not configured (TP_EMBED_ENC_KEY).' });
+
+    const norm = normalizeAppUrl(appUrl);
+    if (!norm.ok) return res.status(400).json({ error: norm.error });
+    const safe = await assertPublicUrl(appUrl);
+    if (!safe.ok) return res.status(400).json({ error: safe.error, code: 'URL_BLOCKED' });
+
+    // Validate the key with a tiny call before we store it.
+    try {
+      const client = getClient(anthropicKey);
+      await client.messages.create({ model: 'claude-haiku-4-5-20251001', max_tokens: 4, messages: [{ role: 'user', content: 'ping' }] });
+    } catch (e) {
+      return res.status(400).json({ error: 'Anthropic key rejected: ' + String(e.message || '').slice(0, 140) });
+    }
+
+    const owner = (user.email || '').trim().toLowerCase();
+    const ownerH = userHash(owner);
+
+    // Already learned for this owner?
+    let learnedAppId = null;
+    for (const [id, m] of platformMaps) {
+      if (!m || !m.url) continue;
+      const mn = normalizeAppUrl(m.url);
+      if (mn.ok && mn.normalized === norm.normalized && (!m.ownerHash || m.ownerHash === ownerH)) { learnedAppId = id; break; }
+    }
+
+    const token = newPkToken();
+    const rec = {
+      token, owner, keyEnc: encryptSecret(anthropicKey),
+      appId: learnedAppId, appUrl: norm.original,
+      createdAt: new Date().toISOString(), revoked: false, learning: !learnedAppId,
+    };
+    embedTokens.set(token, rec);
+    saveEmbedTokens();
+
+    res.json({
+      token, appId: learnedAppId, learning: !learnedAppId,
+      snippet: `<script src="https://testpilotapp.dev/embed.js" data-tp-token="${token}" data-tp-gate="team" defer></script>`,
+    });
+
+    // Learn in the background if needed — uses the OWNER's key (BYOK for the crawl too).
+    if (!learnedAppId) {
+      (async () => {
+        const appId = appUrl.replace(/https?:\/\//, '').replace(/[^a-z0-9]/gi, '-').substring(0, 40) + '--' + ownerH.substring(0, 4) + '-' + randomUUID().substring(0, 4);
+        try {
+          await acquireScanSlot();
+          await crawlApp(appId, appUrl, { email, password }, '', anthropicKey, () => {}, owner);
+          rec.appId = appId; rec.learning = false; saveEmbedTokens();
+          console.log('[embed] learned app for token', token.slice(0, 14), '→', appId);
+        } catch (e) {
+          rec.learning = false; rec.learnError = String(e.message || '').slice(0, 200); saveEmbedTokens();
+          console.error('[embed] background learn failed:', e.message);
+        } finally { releaseScanSlot(); }
+      })();
+    }
+  } catch (e) {
+    if (!res.headersSent) res.status(500).json({ error: e.message });
+  }
+});
+
+// Portal (authenticated): list / revoke the caller's embed tokens.
+app.get('/api/embed/tokens', (req, res) => {
+  const user = requireUser(req, res);
+  if (!user) return;
+  const owner = (user.email || '').trim().toLowerCase();
+  const rows = [...embedTokens.values()].filter(t => t.owner === owner && !t.revoked)
+    .map(t => ({ token: t.token, appUrl: t.appUrl, appId: t.appId, learning: !!t.learning, learnError: t.learnError || null, createdAt: t.createdAt }));
+  res.json({ tokens: rows });
+});
+app.post('/api/embed/revoke', (req, res) => {
+  const user = requireUser(req, res);
+  if (!user) return;
+  const owner = (user.email || '').trim().toLowerCase();
+  const { token } = req.body || {};
+  const rec = embedTokens.get(token);
+  if (!rec || rec.owner !== owner) return res.status(404).json({ error: 'Token not found' });
+  rec.revoked = true; saveEmbedTokens();
+  res.json({ ok: true });
+});
+
+// Launch a test from the widget. Resolves the pk_ token from the store, runs
+// with the OWNER's key (BYOK), falling back to the support key only for legacy
+// env-map tokens. SSE via /api/test/:testId/stream.
+app.post('/api/embed/run', async (req, res) => {
+  try {
+    const { token, target, kind, description, auth } = req.body || {};
+    if (!target) return res.status(400).json({ error: 'No target URL.' });
+
+    const resolved = resolveEmbedToken(token);
+    if (!resolved) return res.status(401).json({ error: 'Unrecognized TestPilot token. Connect this app in the portal first.' });
+    // The pk_ token is public — rate-limit runs so a copied token can't drain
+    // the owner's Anthropic budget or starve the shared scan queue.
+    const rl = checkEmbedRunRate(token);
+    if (!rl.allowed) return res.status(429).json({ error: 'Too many test runs for this widget right now — try again shortly.', code: 'RATE_LIMITED', retry_after_seconds: rl.retryAfter });
+    const owner = resolved.owner;
+
+    const tnorm = normalizeAppUrl(target);
+    if (!tnorm.ok) return res.status(400).json({ error: tnorm.error });
+    const ownerH = userHash(owner);
+
+    // Prefer the token's learned appId; else match a learned map by URL.
+    let appId = resolved.appId || null, appKnowledge = appId ? platformMaps.get(appId) : null;
+    if (!appKnowledge) {
+      for (const [id, m] of platformMaps) {
+        if (!m || !m.url) continue;
+        const mn = normalizeAppUrl(m.url);
+        if (mn.ok && mn.normalized === tnorm.normalized && (!m.ownerHash || m.ownerHash === ownerH)) { appId = id; appKnowledge = m; break; }
+      }
+    }
+    if (!appKnowledge) {
+      const rec = embedTokens.get(token);
+      if (rec && rec.learning) return res.status(409).json({ error: 'Still learning this app — try again in a moment.', code: 'LEARNING' });
+      return res.status(404).json({ error: 'TestPilot hasn’t learned this app yet — connect it in the portal.' });
+    }
+
+    const scenarios = {
+      lifecycle: 'Walk the primary end-to-end user flow of this app from start to finish. Report any step that breaks, errors, or dead-ends.',
+      security: 'Security check: look for pages or actions reachable without proper authorization, exposed admin or privileged functions, or data shown that the current user should not see. Report any auth gaps. (Full cross-account BOLA/IDOR needs two accounts.)',
+      thispage: 'Exercise every interactive element (buttons, forms, inputs, toggles) on the page at ' + target + '. Report anything that errors or misbehaves.',
+      describe: description || 'Test the main functionality of this app and report any issues.',
+    };
+    const scenario = scenarios[kind] || scenarios.lifecycle;
+
+    let sessionState = null;
+    if (auth && (auth.bearer || (auth.storage && Object.keys(auth.storage).length))) {
+      try {
+        const originUrl = new URL(target).origin;
+        const originEntry = { origin: originUrl, localStorage: [] };
+        if (auth.storage) for (const k in auth.storage) originEntry.localStorage.push({ name: k, value: auth.storage[k] });
+        sessionState = { cookies: [], origins: [originEntry] };
+      } catch {}
+    }
+
+    // BYOK: the owner's stored key. Legacy env-map tokens fall back to support.
+    const effectiveApiKey = resolved.apiKey || process.env.ANTHROPIC_SUPPORT_KEY;
+    if (!effectiveApiKey) return res.status(500).json({ error: 'No API key available for this token.' });
+
+    const testId = randomUUID();
+    res.json({ testId, status: 'started' });
+    testResults.set(testId, { testId, appId, scenario, status: 'starting', userEmail: owner, source: 'embed', startedAt: new Date().toISOString(), steps: [], bugs: [] });
+    (async () => {
+      await acquireScanSlot();
+      try { await runAgentTest(testId, appKnowledge, scenario, { ownerEmail: owner, sessionState, allowReplay: true }, effectiveApiKey); }
+      catch (e) { const r = testResults.get(testId); if (r) { r.status = 'error'; r.error = e.message; } }
+      finally { releaseScanSlot(); }
+    })();
+  } catch (e) {
+    if (!res.headersSent) res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/live-test/:testId', (req, res) => res.sendFile(path.resolve('./live-test.html')));
 
 // ── FUNNEL START — first-run flow (no magic link) ──────────────
@@ -937,7 +1382,7 @@ app.get('/live-test/:testId', (req, res) => res.sendFile(path.resolve('./live-te
 // /api/test recognize the user without a magic link round-trip.
 app.post('/api/funnel/start', async (req, res) => {
   try {
-    const userEmail = String(req.body?.userEmail || '').trim().toLowerCase();
+    const userEmail = canonicalEmail(req.body?.userEmail);
     const rawUrl = String(req.body?.url || '').trim();
 
     if (!userEmail || !isValidEmailSyntax(userEmail)) {
@@ -959,9 +1404,9 @@ app.post('/api/funnel/start', async (req, res) => {
       });
     }
 
-    // App ownership: if claimed by someone else, reject.
+    // App ownership: if claimed by someone else, reject. Super admin bypasses.
     const existingApp = await getAppByNormalized(norm.normalized);
-    if (existingApp && existingApp.owner_email && existingApp.owner_email !== userEmail) {
+    if (existingApp && existingApp.owner_email && existingApp.owner_email !== userEmail && !isSuperAdmin(userEmail)) {
       return res.status(403).json({
         ok: false,
         error: 'This app is already learned by another account. Sign in to continue.',
@@ -1662,7 +2107,15 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
 
   try {
     // Try common login patterns — multiple email field selectors
-    const emailSelectors = ['#email', 'input[type="email"]', 'input[name="email"]', 'input[placeholder*="email" i]', 'input[placeholder*="correo" i]', 'input[autocomplete="email"]', 'input[autocomplete="username"]'];
+    // Ordered by intent: email patterns first so an email field always wins when
+    // an app offers both, then username patterns for the (very common) apps that
+    // sign in with a handle and have no email field anywhere.
+    const emailSelectors = [
+      '#email', 'input[type="email"]', 'input[name="email"]', 'input[placeholder*="email" i]', 'input[placeholder*="correo" i]', 'input[autocomplete="email"]', 'input[autocomplete="username"]',
+      '#username', '#user-name', '#user', '#userid', '#login',
+      'input[name*="user" i]', 'input[id*="user" i]', 'input[placeholder*="user" i]', 'input[placeholder*="usuario" i]',
+      'input[name="login"]', 'input[name*="handle" i]'
+    ];
     const passSelectors = ['#password', 'input[type="password"]', 'input[name="password"]'];
     // Buttons that ADVANCE an email-first flow to its password step (distinct from
     // the final sign-in submit). "Continue with Email" is Vercel/Auth0/Okta-style.
@@ -1777,15 +2230,20 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
     const bodyText = await page.textContent('body').catch(() => '');
     const hasError = /invalid|incorrect|wrong|error|failed|falló|incorrecta/i.test(bodyText.substring(0, 500));
 
-    if (hasError && newUrl.includes('login')) {
-      return { success: false, screenshot: afterScreenshot, error: 'Login failed — invalid credentials or error message detected' };
+    // Decide on what the page SHOWS, not on what the URL happens to spell. The
+    // old test (`!newUrl.includes('login')`) was true for every sign-in page
+    // whose URL lacks the word "login" — including root-path SPAs — so it
+    // reported success for logins that never happened.
+    const formStillVisible = await page.locator(LOGIN_FORM_SELECTOR).first().isVisible({ timeout: 2500 }).catch(() => false);
+
+    if (formStillVisible) {
+      if (hasError) {
+        return { success: false, screenshot: afterScreenshot, error: 'Login failed — the app showed an error and the sign-in form is still on screen. Check the credentials for this app.' };
+      }
+      return { success: false, screenshot: afterScreenshot, error: `Login did not take — the sign-in form is still on screen after submitting (still at ${newUrl}). Either the credentials are wrong, or the username/email field on this app was not recognised. If it signs in with a magic link or SSO popup, capture a session in your browser and use "bring your own session".` };
     }
 
-    if (newUrl !== currentUrl || !newUrl.includes('login')) {
-      return { success: true, screenshot: afterScreenshot, message: `Logged in. Now at: ${newUrl}` };
-    }
-
-    return { success: false, screenshot: afterScreenshot, error: 'Login did not redirect — credentials may be wrong' };
+    return { success: true, screenshot: afterScreenshot, message: `Logged in. Now at: ${newUrl}` };
   } catch (e) {
     return { success: false, screenshot, error: e.message };
   }
@@ -2502,6 +2960,145 @@ async function fillField(page, fieldInfo, value) {
 }
 
 // Click a button reliably
+
+// ── TOGGLE CONTROLS (checkbox / switch / radio) ────────────────────────────
+// These carry no accessible name of their own, so clickButton's
+// role → text → aria → :has-text ladder can never reach them. Name them the
+// way a human does — by the row they belong to — and give the agent a way to
+// act on them.
+const TP_TOGGLE_SEL = 'input[type="checkbox"], input[type="radio"], [role="checkbox"], [role="switch"]';
+
+function tpToggleNamerSource() {
+  // Runs in-page. Returns [{ i, name, checked, kind }] for every visible toggle.
+  return `(() => {
+    const SEL = '${TP_TOGGLE_SEL}';
+    const vis = (e) => {
+      if (!e) return false;
+      const r = e.getBoundingClientRect();
+      const cs = getComputedStyle(e);
+      if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+      // A styled checkbox can be 0x0 with a ::before doing the drawing, so a
+      // zero box is not proof it is unusable — only an explicitly hidden or
+      // detached node is.
+      return e.offsetParent !== null || r.width > 0 || r.height > 0;
+    };
+    const clean = (t) => (t || '').replace(/\\s+/g, ' ').trim();
+    const out = [];
+    document.querySelectorAll(SEL).forEach((el, i) => {
+      if (!vis(el)) return;
+      let name = clean(el.getAttribute('aria-label') || el.getAttribute('title') || '');
+      const id = el.getAttribute('id');
+      if (!name && id) {
+        try { const le = document.querySelector('label[for="' + CSS.escape(id) + '"]'); if (le) name = clean(le.textContent); } catch (e) {}
+      }
+      if (!name) {
+        const lb = el.getAttribute('aria-labelledby');
+        if (lb) { const le = document.getElementById(lb); if (le) name = clean(le.textContent); }
+      }
+      if (!name) {
+        const wrap = el.closest('label');
+        if (wrap) name = clean(wrap.textContent);
+      }
+      if (!name) {
+        // Sibling label — the todo-list shape: <input><label>Buy milk</label>
+        let sib = el.nextElementSibling;
+        for (let h = 0; h < 2 && sib && !name; h++) {
+          if (sib.tagName === 'LABEL' || sib.tagName === 'SPAN' || sib.tagName === 'DIV') {
+            const t = clean(sib.textContent);
+            if (t && t.length < 80) name = t;
+          }
+          sib = sib.nextElementSibling;
+        }
+      }
+      if (!name) {
+        // The row it lives in. This is how a person identifies it: "the
+        // checkbox next to Buy milk".
+        const row = el.closest('li, tr, [role="listitem"], [role="row"], [role="option"]');
+        if (row) {
+          const t = clean(row.innerText || row.textContent);
+          if (t && t.length < 120) name = t;
+        }
+      }
+      const kind = el.getAttribute('role') === 'switch' ? 'switch'
+                 : (el.getAttribute('type') === 'radio' || el.getAttribute('role') === 'radio') ? 'radio'
+                 : 'checkbox';
+      const checked = el.checked === true || el.getAttribute('aria-checked') === 'true';
+      out.push({ i, name: name || '(unnamed ' + kind + ')', checked, kind });
+    });
+    return out;
+  })()`;
+}
+
+async function findToggles(page) {
+  try { return await page.evaluate(tpToggleNamerSource()) || []; }
+  catch { return []; }
+}
+
+// Flip the toggle whose derived name best matches `target`. Returns
+// { ok, name, kind, was, now } — `now` is read back from the DOM so the
+// outcome reports what actually happened rather than what we asked for.
+async function clickToggleByName(page, target) {
+  const want = String(target || '').trim().toLowerCase();
+  if (!want) return { ok: false };
+  const toggles = await findToggles(page);
+  if (!toggles.length) return { ok: false, toggles };
+
+  const norm = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const w = norm(want);
+  // Exact, then contains-either-way, then a generic toggle word when exactly
+  // one control is present (the agent groping with "toggle"/"checkbox"/"○").
+  let hit = toggles.find(t => norm(t.name) === w)
+        || toggles.find(t => norm(t.name).includes(w) && w.length >= 3)
+        || toggles.find(t => w.includes(norm(t.name)) && norm(t.name).length >= 3);
+  if (!hit && toggles.length === 1 && /toggle|checkbox|check\b|tick|switch|mark|complete|done|[○◯☐☑✓✔]/i.test(want)) {
+    hit = toggles[0];
+  }
+  if (!hit) return { ok: false, toggles };
+
+  try {
+    const idx = hit.i;
+    await page.evaluate(({ sel, idx }) => {
+      const el = document.querySelectorAll(sel)[idx];
+      if (el) el.setAttribute('data-tp-toggle', '1');
+    }, { sel: TP_TOGGLE_SEL, idx });
+    const loc = page.locator('[data-tp-toggle="1"]').first();
+    // force: a styled checkbox is often visually replaced by a pseudo-element,
+    // so Playwright's actionability check can consider it obscured even though
+    // clicking it is exactly what a user does.
+    await loc.click({ timeout: 4000, force: true }).catch(async () => {
+      await page.evaluate(() => {
+        const el = document.querySelector('[data-tp-toggle="1"]');
+        if (el) el.click();
+      });
+    });
+    await page.waitForTimeout(700);
+    const now = await page.evaluate(() => {
+      const el = document.querySelector('[data-tp-toggle="1"]');
+      if (!el) return null;
+      return el.checked === true || el.getAttribute('aria-checked') === 'true';
+    }).catch(() => null);
+    await page.evaluate(() => {
+      const el = document.querySelector('[data-tp-toggle="1"]');
+      if (el) el.removeAttribute('data-tp-toggle');
+    }).catch(() => {});
+    return { ok: true, name: hit.name, kind: hit.kind, was: hit.checked, now };
+  } catch (e) {
+    await page.evaluate(() => {
+      const el = document.querySelector('[data-tp-toggle="1"]');
+      if (el) el.removeAttribute('data-tp-toggle');
+    }).catch(() => {});
+    return { ok: false, toggles, error: e.message };
+  }
+}
+
+function describeToggles(toggles) {
+  if (!toggles || !toggles.length) return '';
+  const list = toggles.slice(0, 8)
+    .map(t => `"${t.name}" (${t.kind}, ${t.checked ? 'checked' : 'unchecked'})`)
+    .join(', ');
+  return ` This page has toggle controls that are NOT plain buttons — click one by its name: ${list}.`;
+}
+
 async function clickButton(page, label, { skipEscape = false, frame = null } = {}) {
   // Frame-scoped resolution: the target lives inside an <iframe> (capture tagged
   // it with a frame selector). A FrameLocator lets Playwright reach into the
@@ -2914,7 +3511,10 @@ async function crawlApp(appId, url, credentials, description, apiKey, onProgress
         ? { success: false, error: 'Provided session is expired or invalid — paste a fresh sessionState.' }
         : { success: true, method: 'sessionState' };
     } else {
-      onProgress?.({ phase: 'login', message: 'Logging in...' });
+      // Only narrate a login when credentials were actually supplied —
+      // announcing "Logging in…" for an app the user declared public reads
+      // like the crawler ignored them.
+      if (credentials?.email) onProgress?.({ phase: 'login', message: 'Logging in...' });
       loginResult = await visionLogin(page, credentials, apiKey, { runId: appId, emit: onProgress });
     }
     appKnowledge.loginFlow = loginResult;
@@ -2932,7 +3532,11 @@ async function crawlApp(appId, url, credentials, description, apiKey, onProgress
       err.failureCause = cls.cause;
       throw err;
     }
-    onProgress?.({ phase: 'login', message: `Logged in at ${page.url()}` });
+    // Public apps get an accurate line instead of a login that never happened —
+    // loginResult.message already reads 'No login required — public app'.
+    onProgress?.({ phase: 'login', message: credentials?.email
+      ? `Logged in at ${page.url()}`
+      : (loginResult?.message || 'Public app — no login needed') });
 
     const baseUrl = new URL(url).origin;
     const MAX_PAGES = 40;
@@ -4322,7 +4926,19 @@ Return ONLY valid JSON.`
       await fs.writeFile(path.join(MAPS_DIR, `${appId}.json`), JSON.stringify(appKnowledge, null, 2));
       platformMaps.set(appId, appKnowledge);
     }
-    onProgress?.({ phase: 'complete', message: `Deep crawl complete. ${Object.keys(appKnowledge.pages).length} pages, ${Object.keys(appKnowledge.formRecipes).length} forms learned.` });
+    const _pageCount = Object.keys(appKnowledge.pages).length;
+    const _formCount = Object.keys(appKnowledge.formRecipes).length;
+    onProgress?.({ phase: 'complete', message: `Deep crawl complete. ${_pageCount} pages, ${_formCount} forms learned.` });
+    // Thin-crawl advisory: only the entry page was reachable — almost always a
+    // sign-in wall the crawl couldn't pass. Explain it so "1 pages, 0 forms"
+    // doesn't read as a broken/empty app to a first-time user.
+    if (_pageCount <= 1 && _formCount === 0) {
+      if (credentials?.email) {
+        onProgress?.({ phase: 'complete', message: `⚠️ Only the entry page was mapped — the crawl didn't get past the first screen. Re-learn with a valid test login to map the full app. (Your test can still run — TestPilot logs in on the fly during the test itself.)` });
+      } else {
+        onProgress?.({ phase: 'complete', message: `⚠️ Only one page was reachable — this app looks login-gated. Re-learn with a test account so we can crawl behind the sign-in wall.` });
+      }
+    }
 
     return appKnowledge;
   } finally {
@@ -4646,6 +5262,55 @@ async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey)
   page.setDefaultTimeout(8000);
   page.setDefaultNavigationTimeout(60000);
 
+  // ── Runtime diagnostics capture (gap #11) ──────────────────────────────
+  // Objective, app-side bug evidence the vision agent can't see on a screenshot:
+  // uncaught JS exceptions, console errors, and failed / 4xx-5xx network calls.
+  // Collected passively for the whole run, correlated to the step in progress,
+  // surfaced in the report as `result.diagnostics`. NOT auto-promoted to `bugs`
+  // (the trust engine keeps `bugs` = agent-CONFIRMED defects only) — this is
+  // evidence a human/agent can weigh, not a verdict.
+  const diagAppOrigin = (() => { try { return new URL(appKnowledge.url).origin; } catch { return null; } })();
+  const diag = { pageErrors: [], consoleErrors: [], failedRequests: [], httpErrors: [] };
+  const DIAG_CAP = 120;
+  const diagStep = () => result.steps.length;                 // step currently in progress
+  const diagFirstParty = (u) => { try { return new URL(u).origin === diagAppOrigin; } catch { return false; } };
+  const diagSeenNet = new Set();
+  page.on('pageerror', (err) => {
+    if (diag.pageErrors.length >= DIAG_CAP) return;
+    diag.pageErrors.push({ step: diagStep(), message: String(err && err.message || err).slice(0, 400), stack: String(err && err.stack || '').slice(0, 600) });
+  });
+  page.on('console', (msg) => {
+    try {
+      if (msg.type() !== 'error') return;                     // errors only — warnings are too noisy to be evidence
+      if (diag.consoleErrors.length >= DIAG_CAP) return;
+      const loc = msg.location() || {};
+      diag.consoleErrors.push({ step: diagStep(), text: (msg.text() || '').slice(0, 400), url: loc.url || '', line: loc.lineNumber, firstParty: diagFirstParty(loc.url || '') });
+    } catch {}
+  });
+  page.on('requestfailed', (req) => {
+    try {
+      if (diag.failedRequests.length >= DIAG_CAP) return;
+      const u = req.url();
+      if (u.startsWith('data:') || u.startsWith('blob:')) return;
+      const key = 'F|' + req.method() + '|' + u;
+      if (diagSeenNet.has(key)) return; diagSeenNet.add(key);
+      diag.failedRequests.push({ step: diagStep(), method: req.method(), url: u.slice(0, 300), failure: (req.failure() && req.failure().errorText) || '', firstParty: diagFirstParty(u) });
+    } catch {}
+  });
+  page.on('response', (resp) => {
+    try {
+      const s = resp.status();
+      if (s < 400) return;                                    // only error responses
+      if (diag.httpErrors.length >= DIAG_CAP) return;
+      const u = resp.url();
+      if (u.startsWith('data:')) return;
+      const method = resp.request().method();
+      const key = 'H|' + method + '|' + u + '|' + s;
+      if (diagSeenNet.has(key)) return; diagSeenNet.add(key);
+      diag.httpErrors.push({ step: diagStep(), method, url: u.slice(0, 300), status: s, firstParty: diagFirstParty(u) });
+    } catch {}
+  });
+
   // File-upload handling. Whenever an agent click triggers an
   // <input type="file"> (Subir fotos, Upload, Choose file, etc.), Playwright
   // fires this event. Ladder:
@@ -4763,6 +5428,8 @@ async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey)
     // environment issues, uncertain) for the "couldn't verify these" section.
     bugs: [],
     findings: [],
+    // Cleanup ledger: records THIS run created (for post-run teardown).
+    createdEntities: [],
     summary: null
   };
   testResults.set(testId, result);
@@ -5018,6 +5685,7 @@ RULES:
     • Real state-change buttons usually say: "Emitir", "Issue", "Finalizar", "Confirmar", "Aceptar", "Marcar como [estado]", "Cerrar", "Pagar", "Marcar como pagada", "Mark as sent/paid/closed".
     Each \`pageContext\` feedback now includes a "Status badges visible:" line listing the current state badges (e.g. "Borrador | Activa"). After you click what you believe is a state-change button, READ the next turn's status badges. If the badge did not change, you clicked the wrong button — look for an "Emitir", "Marcar como", or similar action button instead. Do NOT report "the state-change button is missing" as an app bug until you have verified you tried the actual state-change button (not an email/PDF/share variant) AND the badge still did not change after the click + a wait_save.
 11. SESSION SCOPE — VERY IMPORTANT: Only verify outcomes for entities YOU created or EXPLICITLY interacted with during this test session. The page often shows many pre-existing records (other jobs, other clients, other invoices). Do NOT assert about them. If you created "Trabajo para Laura Fernandez", verify THAT one's status — not the global list count, not other jobs' states. When using the "verify" action, name the specific entity in the check string (e.g. "verify job 'Trabajo para Laura Fernandez' shows status Completado", not "verify all jobs are completed").
+20. KNOWN-STATE — SEED & TEARDOWN: A check like "confirm 2 items remain" is only meaningful when the starting data is known. When the scenario needs specific starting data that is not already present, CREATE it yourself first (seed) — that is expected, not cheating. Where you name things, tag what you create with a recognizable "TP-TEST" prefix so you can find it again. When the scenario asks you to clean up, or tells you to make the run repeatable, then AFTER the assertions DELETE the records you created during THIS run so the app returns to its starting state (teardown). ABSOLUTE SAFETY RULE — never break this even if the scenario is ambiguous: only ever delete or edit records that YOU created in THIS run. NEVER delete, overwrite, or modify any pre-existing record, or anything you did not create this run. If you cannot be certain you created a record, do NOT touch it — leave it and say so. In your done summary, name exactly what you created and what you removed.
 7. After saving, the app may redirect. I'll tell you where.
 8. If a button or field isn't visible, scroll down first, then try again.
 9. NEVER give up early. Keep trying different approaches. Only use "done" when you have genuinely completed ALL steps in the scenario OR exhausted every possible approach.
@@ -5306,6 +5974,23 @@ What is your first action?`,
               status = 'retry'; needsReflection = true;
               break;
             }
+            // DESTRUCTIVE-CLICK GUARD: a loose scenario ("click every button")
+            // walks the agent straight into Delete / Delete all / Remove on a
+            // REAL app holding REAL data. Only ever destroy something the user
+            // actually asked to destroy, or test data this run created itself.
+            {
+              const _userScenario = String(scenario || '').split('(Repeatable run:')[0];
+              const _wantsDeletion = /\b(delete|delet|remove|discard|borrar|elimina|suprim|l[oö]schen|excluir)\b/i.test(_userScenario);
+              const _ownTestData = /TP-TEST/i.test(tgt) || (typeof currentEntity !== 'undefined' && /TP-TEST/i.test(String(currentEntity || '')));
+              const _bare = tgt.replace(/[\u{1F5D1}\u{FE0F}\u2715\u2716\u00D7]/gu, ' ').replace(/\s+/g, ' ').trim();
+              const _destructive = /^(delete|delete all|remove|remove all|borrar|eliminar|suprimir|l[oö]schen|excluir|clear all|reset all|wipe|destroy|delete account|delete everything)$/i.test(_bare)
+                || /\b(delete all|remove all|clear all|wipe|delete account|delete everything)\b/i.test(_bare);
+              if (_destructive && !_wantsDeletion && !_ownTestData) {
+                outcome = `BLOCKED — refusing to click "${tgt}": it DESTROYS data in a real app and your scenario never asked for anything to be deleted. TestPilot only removes records it created itself (tagged TP-TEST). Pick a non-destructive action and continue. If deleting really is the thing under test, say so explicitly in the scenario.`;
+                status = 'retry'; needsReflection = true;
+                break;
+              }
+            }
             // FILE-UPLOAD INTENT (G2): a native <input type="file"> renders as
             // "Choose File / No file chosen" (or "Subir/Examinar/Browse") — text
             // with NO matchable DOM label, so a text-based click never fires the
@@ -5493,6 +6178,17 @@ What is your first action?`,
                 .filter(t => t.length > 1);
             }).catch(() => []);
             
+            // Fingerprint the page so a click that changes NOTHING can be told
+            // apart from one that did something invisible-ish. Includes every
+            // toggle's checked state, which is the whole point here.
+            const domSignature = () => page.evaluate(() => {
+              const t = (document.body && document.body.innerText) || '';
+              const checks = [...document.querySelectorAll('input[type="checkbox"], input[type="radio"], [role="checkbox"], [role="switch"]')]
+                .map(e => (e.checked === true || e.getAttribute('aria-checked') === 'true') ? '1' : '0').join('');
+              return t.length + '|' + document.querySelectorAll('*').length + '|' + checks + '|' + location.href;
+            }).catch(() => null);
+            const sigBefore = await domSignature();
+
             const clickResult = await clickButton(page, action.target);
             if (clickResult.success) {
               await page.waitForTimeout(1500);
@@ -5501,6 +6197,23 @@ What is your first action?`,
               outcome = navigated
                 ? `Clicked "${action.target}" → navigated to ${page.url()}`
                 : `Clicked "${action.target}"`;
+
+              // The click resolved but achieved nothing. The classic cause is a
+              // <label> with no `for` sitting next to the real control — click
+              // the text of a todo and the page simply does not care. If that
+              // row owns a toggle, operate THAT instead of letting the agent
+              // repeat a no-op until the run is killed.
+              if (!navigated) {
+                const sigAfter = await domSignature();
+                if (sigBefore && sigAfter && sigBefore === sigAfter) {
+                  const tg = await clickToggleByName(page, action.target);
+                  if (tg.ok && tg.now !== null && tg.was !== tg.now) {
+                    outcome = `Clicked "${action.target}" but the page did not change — that text is a label, not the control. Toggled the ${tg.kind} belonging to that row instead → now ${tg.now ? 'CHECKED' : 'UNCHECKED'}`;
+                  } else if (!tg.ok) {
+                    outcome += ` — but NOTHING on the page changed. Do not repeat this exact click.${describeToggles(tg.toggles)}`;
+                  }
+                }
+              }
               // URL change = new page context. Clear fill trackers so any
               // residual state from the previous page's form doesn't bleed
               // into the new page's form (e.g. a "Cantidad" input on this
@@ -5631,7 +6344,16 @@ What is your first action?`,
               } catch {}
 
             } else {
-              outcome = `Could not find "${action.target}" on screen`;
+              // Nothing resolved by name/text/aria. Before giving up, try
+              // toggle semantics — a checkbox or switch has no accessible name
+              // of its own, so it is invisible to every strategy above.
+              const tg = await clickToggleByName(page, action.target);
+              if (tg.ok) {
+                outcome = `Toggled ${tg.kind} "${tg.name}" — now ${tg.now === null ? 'changed' : (tg.now ? 'CHECKED' : 'UNCHECKED')}${tg.was === tg.now && tg.now !== null ? ' (state did not change — it may be controlled by something else)' : ''}`;
+                status = tg.now === null || tg.was !== tg.now ? 'pass' : 'retry';
+                break;
+              }
+              outcome = `Could not find "${action.target}" on screen.` + describeToggles(tg.toggles);
               status = 'retry';
               const k = tgtRaw.toLowerCase().slice(0, 50);
               const prev = recentFailedClicks.get(k);
@@ -5732,6 +6454,51 @@ Look at this turn's screenshot and the Buttons / Fields lists. Pick something el
             if (filled) {
               outcome = `Filled "${fieldTarget}" with "${fieldValue}"`;
               recentFills.set(fillKey, stepNum);
+
+              // COMMIT-ON-ENTER inputs (to-do / tag / chat / lone "add item"
+              // boxes) hold the typed value until Enter is pressed — a plain
+              // .fill() leaves them uncommitted and the agent loops forever
+              // (this is exactly what stalled the TodoMVC self-seed run).
+              // Decide whether to commit: honor an explicit action.submit /
+              // action.enter, else auto-detect a STANDALONE add-item input. We
+              // never press Enter on a multi-field form (would submit early) or
+              // a live-filter search box (would over-navigate). We inspect the
+              // focused element — .fill() focuses the input it wrote to.
+              try {
+                const dec = await page.evaluate(() => {
+                  const el = document.activeElement;
+                  if (!el) return { commit: false };
+                  const tag = el.tagName;
+                  if (tag !== 'INPUT' && tag !== 'TEXTAREA') return { commit: false };
+                  if (tag === 'INPUT') {
+                    const t = (el.getAttribute('type') || 'text').toLowerCase();
+                    // Only plain text-ish inputs; never number/email/password/date/etc.
+                    if (!['text', 'search', 'url', 'tel', ''].includes(t)) return { commit: false };
+                  }
+                  const meta = ((el.getAttribute('placeholder') || '') + ' ' + (el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('name') || '') + ' ' + (el.id || '')).toLowerCase();
+                  const isSearch = /buscar|search|chercher|suchen|zoeken|cerca|pesquisar|szukaj|filtr/.test(meta);
+                  if (isSearch) return { commit: false };            // live-filter — leave Enter alone
+                  const addPat = /what needs to be done|add (a |an )?(to-?do|task|item|tag|label|note|comment|skill|row)|new (item|task|to-?do|tag|entry|row)|press enter|type.*enter|añadir|agregar|nueva? tarea|nuevo elemento|neue aufgabe|ajouter/;
+                  const form = el.closest('form');
+                  const scope = form || el.parentElement?.parentElement || el.parentElement || document.body;
+                  const textInputs = scope.querySelectorAll('input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=submit]):not([type=button]), textarea');
+                  const submitBtns = scope.querySelectorAll('button[type=submit], input[type=submit]');
+                  const lone = textInputs.length === 1 && submitBtns.length === 0;   // standalone add-item box
+                  return { commit: addPat.test(meta) || lone };
+                });
+                const flag = (action.submit === true || action.enter === true) ? true
+                           : (action.submit === false || action.enter === false) ? false
+                           : null;
+                const shouldCommit = flag === null ? !!dec.commit : flag;
+                if (shouldCommit) {
+                  const before = await page.evaluate(() => (document.activeElement && 'value' in document.activeElement) ? document.activeElement.value : null);
+                  await page.keyboard.press('Enter').catch(() => {});
+                  await page.waitForTimeout(600);
+                  const after = await page.evaluate(() => (document.activeElement && 'value' in document.activeElement) ? document.activeElement.value : null);
+                  // An add-item input clearing itself after Enter is a strong "committed" signal.
+                  outcome += (before && (after === '' || after === null)) ? ' (pressed Enter — input cleared, item committed)' : ' (pressed Enter to commit)';
+                }
+              } catch {}
               // Wait for search results if it's a search field
               if (/buscar|search|chercher|suchen|zoeken|cerca|pesquisar|szukaj|filter|filtrar/i.test(fieldTarget)) {
                 await page.waitForTimeout(1500);
@@ -6352,8 +7119,37 @@ RESPOND ONLY JSON: {"confirmed":true,"detail":"the visible failure"} or {"confir
         intent: agentIntent, // chain-of-thought line the agent wrote before the JSON
         outcome,
         status,
-        screenshot
+        screenshot,
+        url: (() => { try { return page.url(); } catch { return ''; } })()
       });
+
+      // ── Cleanup ledger (test-data teardown) ──────────────────────────────
+      // Track records THIS run CREATES so they can be cleaned up afterward.
+      // Conservative create-only; drop an entry the agent later deletes in-run.
+      try {
+        const _o = String(outcome || '');
+        const _tp = /TP-?TEST/i.test(String(action.value || '')) || /TP-?TEST/i.test(String(action.target || ''));
+        const _kind = classifyCommit({ action, outcome, status });
+        const _isDestroy = _kind === 'destroy';
+        // Capture a create when the commit classifier says so, OR when the agent
+        // (rule 20) just created a TP-TEST-tagged record via fill/click.
+        const _isCreate = !_isDestroy && (_kind === 'create'
+          || (status === 'pass' && _tp && (action.action === 'fill' || action.action === 'click')
+              && !/deleted|removed|eliminad|borrad/i.test(_o)));
+        if (_isDestroy) {
+          result.createdEntities = result.createdEntities.filter(e =>
+            !(e.id && _o.includes(e.id)) && !(e.label && e.label.length > 3 && _o.includes(e.label)));
+        } else if (_isCreate) {
+          const _idm = _o.match(/\[ID:\s*([^\]]+)\]/);
+          const _label = String(action.value || action.target || '').slice(0, 140);
+          const _dup = result.createdEntities.some(e => e.label === _label && _label.length > 2);
+          if (!_dup) result.createdEntities.push({
+            step: stepNum, label: _label,
+            id: _idm ? _idm[1].trim() : null,
+            url: (() => { try { return page.url(); } catch { return ''; } })(),
+          });
+        }
+      } catch {}
 
       // Snapshot the executor's outcome BEFORE any nudge text is appended below
       // ([HINT]/[PROGRESS] from the scope guard, the loop-coach STRONG HINT). The
@@ -6867,6 +7663,23 @@ Output structure (exact sections, max 220 words total):
   } finally {
     if (heartbeat) clearInterval(heartbeat);
     await browser.close();
+    // gap #11: attach runtime diagnostics + a compact count (first-party = the
+    // app's own origin, i.e. the errors that are almost certainly its own bugs).
+    try {
+      const fp = (a) => a.filter((x) => x.firstParty);
+      result.diagnostics = diag;
+      result.diagnosticsSummary = {
+        pageErrors: diag.pageErrors.length,
+        consoleErrors: diag.consoleErrors.length,
+        failedRequests: diag.failedRequests.length,
+        httpErrors: diag.httpErrors.length,
+        firstPartyPageErrors: diag.pageErrors.length,
+        firstPartyConsoleErrors: fp(diag.consoleErrors).length,
+        firstPartyFailedRequests: fp(diag.failedRequests).length,
+        firstPartyHttpErrors: fp(diag.httpErrors).length,
+      };
+    } catch {}
+    await runCleanup(result);   // test-data teardown via the customer's cleanup endpoint (if configured)
     testResults.set(testId, result);
     await saveTestResult(testId, result);
   }
@@ -6880,7 +7693,7 @@ app.post('/api/debug/inspect', async (req, res) => {
   // Operator-only browser-driver — gated behind admin auth so it's invisible to
   // clients and the public internet (was unauthenticated → SSRF/abuse vector).
   if (!requireAdmin(req, res)) return;
-  const { url, email, password, buttonLabel, apiKey } = req.body;
+  const { url, email, password, buttonLabel, apiKey } = req.body || {};
   const dbgSafe = await assertPublicUrl(url);
   if (!dbgSafe.ok) return res.status(400).json({ error: dbgSafe.error, code: 'URL_BLOCKED' });
   const browser = await launchBrowser();
@@ -7058,7 +7871,7 @@ app.post('/api/learn', async (req, res) => {
   // `userEmail` is the TestPilot account email (the "owner"). The funnel
   // rework introduced this distinction so the landing-modal flow can
   // submit just userEmail+url with no app credentials.
-  const { url, email, password, description, apiKey, freeLearn, userEmail, sessionState: rawSessionState } = req.body;
+  const { url, email, password, description, apiKey, freeLearn, userEmail, sessionState: rawSessionState } = req.body || {};
   // "Bring your own session" for crawl — same purpose as on /api/test.
   const ssParsed = parseSessionState(rawSessionState);
   if (!ssParsed.ok) return res.status(400).json({ error: ssParsed.error, code: 'SESSION_STATE_INVALID' });
@@ -7069,7 +7882,7 @@ app.post('/api/learn', async (req, res) => {
   // last-ditch fall back to the app login email (legacy clients).
   const token = req.cookies?.tpsession;
   const sessionUser = token ? sessions.get(token) : null;
-  const ownerEmail = (sessionUser?.email || userEmail || email || '').trim().toLowerCase();
+  const ownerEmail = sessionUser?.email ? sessionUser.email.trim().toLowerCase() : canonicalEmail(userEmail || email);
   if (!ownerEmail) return res.status(400).json({ error: 'Email required' });
   if (!isValidEmailSyntax(ownerEmail)) {
     return res.status(400).json({ error: 'Invalid email address', code: 'EMAIL_INVALID' });
@@ -7090,9 +7903,9 @@ app.post('/api/learn', async (req, res) => {
   const userPlan = sessionUser?.plan || dbUser.plan || 'free';
   const planLimits = PLAN_LIMITS[userPlan] || PLAN_LIMITS.free;
 
-  // Ownership check: if the URL is already claimed by someone else, reject.
+  // Ownership check: if the URL is already claimed by someone else, reject. Super admin bypasses.
   const existingApp = await getAppByNormalized(norm.normalized);
-  if (existingApp && existingApp.owner_email && existingApp.owner_email !== ownerEmail) {
+  if (existingApp && existingApp.owner_email && existingApp.owner_email !== ownerEmail && !isSuperAdmin(ownerEmail)) {
     return res.status(403).json({
       error: 'This app is already learned by another account.',
       code: 'APP_OWNED_BY_OTHER',
@@ -7188,6 +8001,142 @@ function releaseScanSlot() {
   else activeScans = Math.max(0, activeScans - 1);    // no waiter → free the slot
 }
 
+// Repeat guard for onerun charging: last terminal status per (owner|recipeKey).
+// In-memory (resets on restart — a cross-restart 2nd-unverified may charge; €5,
+// acceptable). Used to make a 2nd consecutive completed_with_unverified free.
+const lastTerminalStatus = new Map();
+
+// OneRun credit primitives shared by the run endpoints (multirole, security).
+// A onerun user's single credit is reserved when a run starts and refunded
+// unless the run produced a verdict — so €5 buys exactly one run of ANY type,
+// never charged when TestPilot itself fails. (/api/test has its own inline
+// version with the completed_with_unverified repeat guard.)
+async function reserveRunCreditOrDeny(res, userPlan, ownerEmail, dbUser) {
+  if (userPlan !== 'onerun') return { ok: true, reserved: false };
+  const credits = Number(dbUser?.credits || 0);
+  if (credits <= 0) {
+    res.status(402).json({ error: 'Your one-time run has been used. Buy another run, or subscribe to keep testing.', code: 'ONERUN_EXHAUSTED' });
+    return { ok: false, reserved: false };
+  }
+  await supabase('PATCH', 'users', { credits: credits - 1 }, `?email=eq.${encodeURIComponent(ownerEmail)}`).catch(() => {});
+  for (const [, s] of sessions) { if (s.email === ownerEmail) s.credits = credits - 1; }
+  return { ok: true, reserved: true };
+}
+async function refundRunCredit(ownerEmail) {
+  try {
+    const row = await getUserByEmail(ownerEmail);
+    const cur = Number(row?.credits || 0);
+    await supabase('PATCH', 'users', { credits: cur + 1 }, `?email=eq.${encodeURIComponent(ownerEmail)}`);
+    for (const [, s] of sessions) { if (s.email === ownerEmail) s.credits = cur + 1; }
+  } catch {}
+}
+
+// ═══════════════════════════════════════════════════════════════
+// TEST-DATA CLEANUP (ledger + webhook)
+// ───────────────────────────────────────────────────────────────
+// Per-app cleanup config: a customer-owned endpoint + token. After a run,
+// TestPilot POSTs the created-entity ledger; the customer's endpoint deletes
+// those records by id (deterministic — no UI flakiness). Persists to disk; the
+// token is encrypted at rest.
+const CLEANUP_FILE = './cleanup-configs.json';
+const cleanupConfigs = new Map(); // appId -> { appId, ownerEmail, cleanupUrl, cleanupTokenEnc, active, ... }
+async function loadCleanupConfigs() {
+  try {
+    const raw = await fs.readFile(CLEANUP_FILE, 'utf-8');
+    for (const c of JSON.parse(raw)) cleanupConfigs.set(c.appId, c);
+    console.log(`[cleanup] loaded ${cleanupConfigs.size} config(s)`);
+  } catch (e) { if (e.code !== 'ENOENT') console.warn('[cleanup] load failed:', e.message); }
+}
+function saveCleanupConfigs() {
+  fs.writeFile(CLEANUP_FILE, JSON.stringify([...cleanupConfigs.values()], null, 2))
+    .catch(err => console.warn('[cleanup] save failed:', err.message));
+}
+loadCleanupConfigs();
+function publicCleanup(c) { if (!c) return null; const { cleanupTokenEnc, ...rest } = c; return { ...rest, hasToken: !!cleanupTokenEnc }; }
+
+// After a run: POST the surviving created-entities to the cleanup endpoint.
+async function runCleanup(result) {
+  try {
+    const survivors = Array.isArray(result.createdEntities) ? result.createdEntities : [];
+    const cfg = cleanupConfigs.get(result.appId);
+    if (!cfg || !cfg.active || !cfg.cleanupUrl) { result.cleanup = { configured: false, created: survivors.length, orphans: survivors.length }; return; }
+    if (survivors.length === 0) { result.cleanup = { configured: true, created: 0, deleted: 0, orphans: 0 }; return; }
+    const safe = await assertPublicUrl(cfg.cleanupUrl);
+    if (!safe.ok) { result.cleanup = { configured: true, created: survivors.length, deleted: 0, orphans: survivors.length, error: 'cleanup URL blocked: ' + safe.error }; return; }
+    let token = ''; try { token = cfg.cleanupTokenEnc ? decryptSecret(cfg.cleanupTokenEnc) : ''; } catch {}
+    const payload = { token, testId: result.testId, appId: result.appId, entities: survivors.map(e => ({ id: e.id, label: e.label, url: e.url })) };
+    const r = await fetch(cfg.cleanupUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: AbortSignal.timeout(20000) });
+    const body = await r.json().catch(() => ({}));
+    const deleted = Array.isArray(body.deleted) ? body.deleted.length : (typeof body.deleted === 'number' ? body.deleted : (r.ok ? survivors.length : 0));
+    result.cleanup = { configured: true, created: survivors.length, status: r.status, ok: r.ok, deleted, orphans: Math.max(0, survivors.length - deleted), errors: body.errors || (r.ok ? [] : [`HTTP ${r.status}`]) };
+    console.log(`[cleanup] ${result.appId}: sent ${survivors.length}, deleted ${deleted}, HTTP ${r.status}`);
+  } catch (e) {
+    const n = (result.createdEntities || []).length;
+    result.cleanup = { configured: true, created: n, deleted: 0, orphans: n, error: String(e.message || e).slice(0, 140) };
+  }
+}
+
+// ── Cleanup config CRUD (owner-gated) ──
+app.post('/api/apps/:appId/cleanup', async (req, res) => {
+  const user = requireUser(req, res); if (!user) return;
+  const appId = req.params.appId;
+  const me = (user.email || '').toLowerCase();
+  if (!platformMaps.get(appId)) return res.status(404).json({ error: 'App not found. Learn it first.' });
+  if (!ownsApp(appId, user.email) && !isSuperAdmin(me)) return res.status(403).json({ error: 'This app belongs to another account.', code: 'OWNERSHIP_MISMATCH' });
+  const { cleanupUrl, cleanupToken, active } = req.body || {};
+  if (!cleanupUrl) return res.status(400).json({ error: 'cleanupUrl required' });
+  const safe = await assertPublicUrl(cleanupUrl);
+  if (!safe.ok) return res.status(400).json({ error: safe.error, code: 'URL_BLOCKED' });
+  const prev = cleanupConfigs.get(appId) || {};
+  let tokenEnc = prev.cleanupTokenEnc || null;
+  if (cleanupToken) { try { tokenEnc = encryptSecret(cleanupToken); } catch { return res.status(500).json({ error: 'Secret store unavailable' }); } }
+  const rec = { appId, ownerEmail: me, cleanupUrl: String(cleanupUrl).trim(), cleanupTokenEnc: tokenEnc, active: active !== false, createdAt: prev.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString() };
+  cleanupConfigs.set(appId, rec); saveCleanupConfigs();
+  res.json({ ok: true, cleanup: publicCleanup(rec) });
+});
+app.get('/api/apps/:appId/cleanup', (req, res) => {
+  const user = requireUser(req, res); if (!user) return;
+  const appId = req.params.appId; const me = (user.email || '').toLowerCase();
+  if (!ownsApp(appId, user.email) && !isSuperAdmin(me)) return res.status(403).json({ error: 'Not yours' });
+  res.json({ cleanup: publicCleanup(cleanupConfigs.get(appId)) });
+});
+app.delete('/api/apps/:appId/cleanup', (req, res) => {
+  const user = requireUser(req, res); if (!user) return;
+  const appId = req.params.appId; const me = (user.email || '').toLowerCase();
+  if (!ownsApp(appId, user.email) && !isSuperAdmin(me)) return res.status(403).json({ error: 'Not yours' });
+  cleanupConfigs.delete(appId); saveCleanupConfigs();
+  res.json({ ok: true });
+});
+
+// A scenario has to assert something that can be TRUE or FALSE when the run
+// ends. "Click every button" asserts nothing: the agent cannot finish it, so
+// it explores until the budget dies and the user is told nothing — having
+// spent a run. Catch that before anything is charged.
+function assessScenario(raw) {
+  const s = String(raw || '').split('(Repeatable run:')[0].trim();
+  const words = s.split(/\s+/).filter(Boolean);
+  if (words.length < 4) return { ok: false, reason: 'too_short' };
+  // Sweep instructions: "click every button", "test everything", "all screens".
+  const sweep = /\b(click|press|tap|test|try|check|explore)\s+(on\s+)?(every|all|each)\b|\bevery\s+(button|bottom|workflow|page|link|screen|feature|form)\b|\btest\s+(everything|all)\b|\ball\s+(the\s+)?(buttons|bottoms|workflows|pages|links|screens)\b/i.test(s);
+  // Any stated outcome — an assertion, or a sequence that ends somewhere.
+  const hasGoal = /\b(verify|verif|check that|confirm|ensure|expect|should|assert|appears?|shows?|displays?|listed|visible|created|saved|updated|deleted|receives?|redirects?)\b/i.test(s);
+  if (sweep && !hasGoal) return { ok: false, reason: 'no_goal' };
+  return { ok: true };
+}
+
+// Ground the advice in THIS app so the rewrite is obvious.
+function scenarioSuggestion(appId) {
+  try {
+    const m = platformMaps.get(appId);
+    const secs = (((m || {}).summary || {}).sections || []).map(s => s && s.name).filter(Boolean).slice(0, 2);
+    if (secs.length) {
+      return `For this app, try: "Go to ${secs[0]}, create a new entry called TP-TEST, and verify it appears in the list"` +
+             (secs[1] ? ` — or "Open ${secs[1]} and check its data loads".` : '.');
+    }
+  } catch {}
+  return 'For example: "Log in, create a new project called TP-TEST, and verify it appears in the list."';
+}
+
 app.post('/api/test', async (req, res) => {
   const { appId, scenario, email, password, apiKey, freeRun, userEmail, sessionState: rawSessionState } = req.body;
   // "Bring your own session" — paste an already-authenticated Playwright
@@ -7196,6 +8145,19 @@ app.post('/api/test', async (req, res) => {
   const ss = parseSessionState(rawSessionState);
   if (!ss.ok) return res.status(400).json({ error: ss.error, code: 'SESSION_STATE_INVALID' });
   const sessionState = ss.sessionState;
+
+  // Gate BEFORE any budget check, credit reservation or free-run burn, so an
+  // untestable instruction costs the user nothing.
+  const _sa = assessScenario(scenario);
+  if (!_sa.ok) {
+    return res.status(422).json({
+      code: 'SCENARIO_NOT_TESTABLE',
+      error: _sa.reason === 'too_short'
+        ? 'That scenario is too short to run. Say what TestPilot should do, and what should be true afterwards.'
+        : 'That scenario has nothing to check, so the run could neither pass nor fail — it would click around until it ran out of budget and tell you nothing about your app. Name one flow, and what should be true at the end.',
+      hint: scenarioSuggestion(appId),
+    });
+  }
 
   // Daily free-tier ceiling — same gate as /api/learn. Paid runs (own
   // apiKey) bypass entirely.
@@ -7210,7 +8172,7 @@ app.post('/api/test', async (req, res) => {
   // Resolve owner: session > body. We need this BEFORE the plan/free_run gate.
   const token = req.cookies?.tpsession;
   const sessionUser = token ? sessions.get(token) : null;
-  const ownerEmail = (sessionUser?.email || userEmail || '').trim().toLowerCase();
+  const ownerEmail = sessionUser?.email ? sessionUser.email.trim().toLowerCase() : canonicalEmail(userEmail);
   const ownerUserId = sessionUser?.userId || null;
 
   // Plan + free-run gate. Look up the user's persisted plan/free_run_used so
@@ -7235,6 +8197,17 @@ app.post('/api/test', async (req, res) => {
     }
   }
 
+  // OneRun gate: out of credits => 402 early (cheap check, before app/key
+  // validation) so a used-up buyer learns immediately. The credit HOLD (reserve)
+  // happens just before the run starts and is refunded unless the run reaches a
+  // charged status — see below.
+  if (userPlan === 'onerun' && !freeRun && Number(dbUser?.credits || 0) <= 0) {
+    return res.status(402).json({
+      error: 'Your one-time run has been used. Buy another run, or subscribe to keep testing.',
+      code: 'ONERUN_EXHAUSTED',
+    });
+  }
+
   // App ownership gate: a logged-in free user can only test their own app.
   // Apps learned via the new modal flow are tracked in the apps table; we
   // look up the appId's URL via platformMaps and match by normalized URL.
@@ -7244,7 +8217,7 @@ app.post('/api/test', async (req, res) => {
     const norm = normalizeAppUrl(appKnowledge.url);
     if (norm.ok) {
       const ownerOfApp = await getAppByNormalized(norm.normalized);
-      if (ownerOfApp && ownerOfApp.owner_email && ownerOfApp.owner_email !== ownerEmail) {
+      if (ownerOfApp && ownerOfApp.owner_email && ownerOfApp.owner_email !== ownerEmail && !isSuperAdmin(ownerEmail)) {
         return res.status(403).json({
           error: 'This app belongs to another account.',
           code: 'APP_OWNED_BY_OTHER',
@@ -7263,6 +8236,20 @@ app.post('/api/test', async (req, res) => {
     if (words > 100) return res.status(400).json({ error: 'Free run limited to 100 words' });
   }
 
+  // OneRun reserve: hold 1 credit now (the gate above already guaranteed > 0).
+  // Permanently consumed only if the run reaches a charged status; otherwise
+  // refunded in the runner's finally — so a blocked/tool/environment failure
+  // never burns the customer's €5. Closes the old "one €5 = unlimited runs" hole.
+  let oneRunReserved = false;
+  if (userPlan === 'onerun' && !freeRun) {
+    const credits = Number(dbUser?.credits || 0);
+    if (credits > 0) {
+      await supabase('PATCH', 'users', { credits: credits - 1 }, `?email=eq.${encodeURIComponent(ownerEmail)}`).catch(() => {});
+      for (const [, s] of sessions) { if (s.email === ownerEmail) s.credits = credits - 1; }
+      oneRunReserved = true;
+    }
+  }
+
   const testId = randomUUID();
   // SCAN CONCURRENCY CAP: if all slots are busy, the scan is QUEUED (not
   // rejected) and starts automatically when one frees.
@@ -7276,7 +8263,8 @@ app.post('/api/test', async (req, res) => {
   // burn — if the test errors out the user still loses their free run, but
   // that prevents abuse via aborted-then-retried calls. Frontend gets the 402
   // on the NEXT /api/test attempt.
-  if (userPlan === 'free' && ownerEmail) {
+  const freeRunBurned = userPlan === 'free' && !!ownerEmail;
+  if (freeRunBurned) {
     supabase('PATCH', 'users', { free_run_used: true }, `?email=eq.${encodeURIComponent(ownerEmail)}`).catch(() => {});
     let dirty = false;
     for (const [, session] of sessions) {
@@ -7290,6 +8278,10 @@ app.post('/api/test', async (req, res) => {
   // (via credentials) so it survives a queue delay + the placeholder overwrite.
   (async () => {
     await acquireScanSlot();
+    // Slot opened. Flip the placeholder off 'queued' and, if this scan actually
+    // waited in line, tell the watching user it's starting now.
+    { const _r = testResults.get(testId); if (_r && _r.status === 'queued') _r.status = 'starting'; }
+    if (willQueue) emitStep(testId, { type: 'info', message: '▶ A runner just freed up — starting your scan now…' });
     try {
       await runAgentTest(testId, appKnowledge, scenario, { email, password, allowReplay: true, ownerEmail, ownerUserId, sessionState }, effectiveApiKey);
     } catch (e) {
@@ -7302,9 +8294,524 @@ app.post('/api/test', async (req, res) => {
       }
     } finally {
       releaseScanSlot();
-      recordScanOutcome(testResults.get(testId)?.status); // feeds the error-burst alert
+      const _finalStatus = testResults.get(testId)?.status;
+      recordScanOutcome(_finalStatus); // feeds the error-burst alert
+      // OneRun charging: the reserved credit is permanently consumed ONLY on a
+      // charged status; anything else (blocked / error / config_error /
+      // incomplete / completed_with_unverified) refunds it. Single positive rule
+      // so it can't drift as classify.js evolves.
+      // Charged only when the run produced a verdict about the app. Repeat guard:
+      // two consecutive completed_with_unverified on the same (user, app,
+      // scenario) = the tool failing to confirm → the 2nd is free.
+      const CHARGED_STATUSES = ['completed', 'completed_with_bugs', 'completed_with_unverified'];
+
+      // Same rule as the OneRun credit below: a run only counts if it produced
+      // a verdict about the APP. Ending blocked/error/incomplete is our tooling
+      // failing, and charging a first-time visitor's single free run for that
+      // — then asking them for a card — is indefensible.
+      if (freeRunBurned && !CHARGED_STATUSES.includes(_finalStatus)) {
+        try {
+          await supabase('PATCH', 'users', { free_run_used: false }, `?email=eq.${encodeURIComponent(ownerEmail)}`);
+          for (const [, s] of sessions) { if (s.email === ownerEmail) s.free_run_used = false; }
+          saveSessions();
+          emitStep(testId, { type: 'info', message: 'ℹ️ This run didn\'t get far enough to judge your app, so your free run is still available.' });
+        } catch {}
+      }
+      if (oneRunReserved && ownerEmail) {
+        const _rk = ownerEmail + '|' + recipeKey(appId, scenario);
+        const _prev = lastTerminalStatus.get(_rk);
+        const _repeatUnverified = _finalStatus === 'completed_with_unverified' && _prev === 'completed_with_unverified';
+        lastTerminalStatus.set(_rk, _finalStatus);
+        const _charge = CHARGED_STATUSES.includes(_finalStatus) && !_repeatUnverified;
+        if (!_charge) {
+          try {
+            const _row = await getUserByEmail(ownerEmail);
+            const _cur = Number(_row?.credits || 0);
+            await supabase('PATCH', 'users', { credits: _cur + 1 }, `?email=eq.${encodeURIComponent(ownerEmail)}`);
+            for (const [, s] of sessions) { if (s.email === ownerEmail) s.credits = _cur + 1; }
+            emitStep(testId, { type: 'info', message: _repeatUnverified
+              ? 'ℹ️ Two runs in a row couldn’t be fully verified, so this one is on us — your credit was refunded.'
+              : 'ℹ️ This run did not complete, so your one-time run credit was not charged (refunded).' });
+          } catch {}
+        }
+      }
     }
   })();
+});
+
+
+// ═══════════════════════════════════════════════════════════════
+// CHECK EVERYTHING — deterministic sweep of every interactive control
+// ═══════════════════════════════════════════════════════════════
+const sweepResults = new Map();     // sweepId -> report
+const sweepStreams = new Map();     // sweepId -> [res]
+const pendingConfirms = new Map();  // sweepId -> { resolve, timer }
+const SWEEP_DECISIONS_FILE = './sweep-decisions.json';
+// One free sweep on the house per free account — same shape as the free
+// security scan, so the two can't drift apart.
+const FREE_SWEEP_FILE = './free-sweep-used.json';
+const freeSweepUsed = new Set();
+async function loadFreeSweepUsed() {
+  try { for (const e of JSON.parse(await fs.readFile(FREE_SWEEP_FILE, 'utf-8'))) freeSweepUsed.add(e); } catch {}
+}
+function saveFreeSweepUsed() { fs.writeFile(FREE_SWEEP_FILE, JSON.stringify([...freeSweepUsed])).catch(() => {}); }
+// One sweep at a time per person — three of these can otherwise hold every
+// runner for eight minutes and stall paid work.
+const activeSweepsByUser = new Map();
+let sweepDecisions = {};            // appId -> { [label]: { allow, at, by } }
+
+async function loadSweepDecisions() {
+  try { sweepDecisions = JSON.parse(await fs.readFile(SWEEP_DECISIONS_FILE, 'utf-8')); }
+  catch { sweepDecisions = {}; }
+}
+async function saveSweepDecisions() {
+  try { await fs.writeFile(SWEEP_DECISIONS_FILE, JSON.stringify(sweepDecisions, null, 2)); } catch {}
+}
+
+function emitSweep(sweepId, event) {
+  const rs = sweepStreams.get(sweepId) || [];
+  const payload = `data: ${JSON.stringify(event)}\n\n`;
+  for (const r of rs) { try { r.write(payload); } catch {} }
+  const rep = sweepResults.get(sweepId);
+  if (rep && event.type !== 'ping') rep.log.push(event);
+}
+
+// Same shape as awaitTwoFactorCode: park a promise the HTTP route resolves.
+function awaitSweepConfirmation(sweepId, { timeoutMs = 10 * 60 * 1000 } = {}) {
+  return new Promise((resolve) => {
+    const prev = pendingConfirms.get(sweepId);
+    if (prev) { clearTimeout(prev.timer); pendingConfirms.delete(sweepId); prev.resolve({ allow: false, timedOut: true }); }
+    // Timing out means "do not touch it" — never destroy data because nobody answered.
+    const timer = setTimeout(() => { pendingConfirms.delete(sweepId); resolve({ allow: false, timedOut: true }); }, timeoutMs);
+    pendingConfirms.set(sweepId, { resolve, timer });
+  });
+}
+
+// A control whose click could destroy data. Deliberately broader than the
+// agent's guard: here we ASK rather than refuse, so a false positive costs one
+// question, while a miss could cost the user real records.
+// Destroys data.
+const SWEEP_DESTRUCTIVE_RE = /\b(delete|remove|borrar|elimina|eliminar|suprim|l[oö]schen|excluir|destroy|wipe|trash|bin|papelera|clear all|reset|revoke|cancel subscription|deactivate|archive|unpublish|expulsar|dar de baja)\b/i;
+// Commits something outward or irreversible. A deleted record can be restored
+// from a backup; an email sent to a real customer cannot be unsent, and a
+// published post cannot be unseen. These deserve the same question.
+const SWEEP_COMMIT_RE = /\b(save|guardar|speichern|salvar|enregistrer|send|enviar|publish|publicar|post\b|share|compartir|submit|enviar formulario|confirm|confirmar|pay|pagar|checkout|purchase|order\b|subscribe|invite|invitar|approve|aprobar|reject|rechazar|assign|asignar|finalizar|complete order|place order|book\b|reservar|schedule\b|notify|notificar|export|import|apply|aplicar|update|actualizar)\b/i;
+
+// Glyphs that mean "destroy" on their own, in every app that has ever shipped.
+const SWEEP_DESTRUCTIVE_GLYPH_RE = /[\u{1F5D1}\u{232B}\u{2716}\u{274C}]/u;   // 🗑 ⌫ ✖ ❌
+
+function sweepGateReason(label) {
+  const raw = String(label || '');
+  // Check the glyph BEFORE stripping it: a bare 🗑 is a delete button, and
+  // stripping first left an empty string that matched nothing and sailed
+  // through as harmless.
+  if (SWEEP_DESTRUCTIVE_GLYPH_RE.test(raw)) return 'destructive';
+  const bare = raw.replace(/[\u{1F5D1}\u{FE0F}✕✖×]/gu, ' ').replace(/\s+/g, ' ').trim();
+  if (SWEEP_DESTRUCTIVE_RE.test(bare)) return 'destructive';
+  if (SWEEP_COMMIT_RE.test(bare)) return 'commit';
+  // Nothing but symbols/punctuation left: we cannot read what it does, so it
+  // gets the same question as a control with no label at all.
+  if (!/[\p{L}\p{N}]/u.test(bare)) return 'unnamed';
+  return null;
+}
+
+function isDestructiveLabel(label) { return sweepGateReason(label) !== null; }
+
+// In-page inventory of everything a person could click or flip.
+const SWEEP_INVENTORY = `(() => {
+  const vis = (e) => {
+    try {
+      const cs = getComputedStyle(e); if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') return false;
+      const r = e.getBoundingClientRect();
+      return (e.offsetParent !== null || r.width > 0 || r.height > 0) && r.width < 2000 && r.height < 1200;
+    } catch (x) { return false; }
+  };
+  const clean = (t) => (t || '').replace(/\\s+/g, ' ').trim();
+
+  // A stable way back to an element that has no name of its own.
+  const cssPath = (el) => {
+    try {
+      if (el.id && /^[A-Za-z][\\w-]*$/.test(el.id)) return '#' + el.id;
+      const tid = el.getAttribute('data-testid') || el.getAttribute('data-test') || el.getAttribute('data-cy');
+      if (tid) return '[data-testid="' + tid + '"]';
+      const parts = [];
+      let n = el;
+      while (n && n.nodeType === 1 && n !== document.body && parts.length < 7) {
+        let seg = n.tagName.toLowerCase();
+        const parent = n.parentElement;
+        if (parent) {
+          const sibs = Array.prototype.filter.call(parent.children, (c) => c.tagName === n.tagName);
+          if (sibs.length > 1) seg += ':nth-of-type(' + (sibs.indexOf(n) + 1) + ')';
+        }
+        parts.unshift(seg);
+        n = parent;
+      }
+      return parts.length ? 'body ' + parts.join(' > ') : null;
+    } catch (x) { return null; }
+  };
+
+  const isControl = (e) => {
+    const tag = e.tagName;
+    if (tag === 'BUTTON' || tag === 'A' || tag === 'SELECT') return true;
+    if (tag === 'INPUT') return ['submit', 'button', 'checkbox', 'radio', 'reset'].indexOf((e.getAttribute('type') || '').toLowerCase()) >= 0;
+    const role = (e.getAttribute('role') || '').toLowerCase();
+    if (['button', 'link', 'tab', 'menuitem', 'switch', 'checkbox', 'option'].indexOf(role) >= 0) return true;
+    if (e.hasAttribute('onclick')) return true;
+    if (e.classList && e.classList.contains('clickable-element')) return true;   // Bubble
+    const ti = e.getAttribute('tabindex');
+    if (ti !== null && ti !== '-1') return true;
+    try { if (getComputedStyle(e).cursor === 'pointer') return true; } catch (x) {}
+    return false;
+  };
+
+  const all = Array.prototype.slice.call(document.querySelectorAll('body *'));
+  const candidates = all.filter((e) => vis(e) && isControl(e));
+  // Innermost only: a wrapper that merely CONTAINS a control is not the control.
+  const leaves = candidates.filter((e) => !candidates.some((o) => o !== e && e.contains(o)));
+
+  const out = []; const seen = new Set();
+  for (const el of leaves) {
+    const tag = el.tagName;
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    let kind = 'button';
+    if (tag === 'A' || role === 'link') kind = 'link';
+    else if (type === 'checkbox' || type === 'radio' || role === 'switch' || role === 'checkbox') kind = 'toggle';
+
+    let label = clean(el.getAttribute('aria-label') || el.getAttribute('title'));
+    if (!label && kind === 'toggle') {
+      const id = el.getAttribute('id');
+      if (id) { try { const le = document.querySelector('label[for="' + CSS.escape(id) + '"]'); if (le) label = clean(le.textContent); } catch (x) {} }
+      if (!label) { const w = el.closest('label'); if (w) label = clean(w.textContent); }
+      if (!label) { const s = el.nextElementSibling; if (s) { const t = clean(s.textContent); if (t && t.length < 80) label = t; } }
+      if (!label) { const row = el.closest('li, tr, [role="listitem"], [role="row"]'); if (row) { const t = clean(row.innerText || row.textContent); if (t && t.length < 120) label = t; } }
+    }
+    if (!label) label = clean(el.textContent);
+    if (!label) { const img = el.querySelector && el.querySelector('img[alt]'); if (img) label = clean(img.getAttribute('alt')); }
+    if (!label && el.value && kind !== 'toggle') label = clean(el.value);
+    if (label.length > 60) label = label.slice(0, 60);
+
+    const selector = cssPath(el);
+    if (!label && !selector) continue;           // genuinely unreachable
+    const named = !!label;
+    if (!label) label = '(icon)';                // still clicked, still reported
+
+    const key = kind + '|' + (named ? label.toLowerCase() : selector);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ kind, label, selector, named });
+    if (out.length >= 40) break;
+  }
+  return out;
+})()`;
+
+async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', apiKey = '' } = {}) {
+  const report = sweepResults.get(sweepId);
+  const browser = await launchBrowser();
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 800 },
+    ...(credentials?.sessionState ? { storageState: credentials.sessionState } : {}),
+  });
+  const page = await context.newPage();
+
+  // Live error capture. Counters are read before/after each click so a fault
+  // is attributed to the control that actually caused it.
+  const diag = { console: [], failed: [], http: [] };
+  let appOrigin = null;
+  try { appOrigin = new URL(appKnowledge.url).origin; } catch {}
+  const firstParty = (u) => { try { return new URL(u).origin === appOrigin; } catch { return false; } };
+  page.on('console', (m) => { try { if (m.type() === 'error' && diag.console.length < 300) diag.console.push(String(m.text()).slice(0, 250)); } catch {} });
+  page.on('pageerror', (e) => { if (diag.console.length < 300) diag.console.push('pageerror: ' + String(e && e.message).slice(0, 250)); });
+  page.on('requestfailed', (r) => { try { if (firstParty(r.url()) && diag.failed.length < 300) diag.failed.push(r.url().slice(0, 200)); } catch {} });
+  page.on('response', (r) => { try { if (r.status() >= 400 && firstParty(r.url()) && diag.http.length < 300) diag.http.push(r.status() + ' ' + r.url().slice(0, 180)); } catch {} });
+  const errSnapshot = () => ({ c: diag.console.length, f: diag.failed.length, h: diag.http.length });
+  const errSince = (before) => ({
+    console: diag.console.slice(before.c),
+    failed: diag.failed.slice(before.f),
+    http: diag.http.slice(before.h),
+  });
+
+  const domSig = () => page.evaluate(() => {
+    const t = (document.body && document.body.innerText) || '';
+    const checks = [...document.querySelectorAll('input[type="checkbox"], input[type="radio"], [role="checkbox"], [role="switch"]')]
+      .map(e => (e.checked === true || e.getAttribute('aria-checked') === 'true') ? '1' : '0').join('');
+    return t.length + '|' + document.querySelectorAll('*').length + '|' + checks + '|' + location.href;
+  }).catch(() => null);
+
+  const MAX_PAGES = 6, MAX_PER_PAGE = 12, MAX_TOTAL = 40;
+  const DEADLINE = Date.now() + 8 * 60 * 1000;
+  let checked = 0;
+
+  try {
+    emitSweep(sweepId, { type: 'info', message: `Opening ${appKnowledge.url}…` });
+    await page.goto(appKnowledge.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await page.waitForTimeout(1500);
+
+    if (credentials?.email && !credentials?.sessionState) {
+      emitSweep(sweepId, { type: 'info', message: 'Logging in…' });
+      // Whoever the route decided pays — the support key only when the route
+      // granted a free allowance, otherwise the caller's own key.
+      const li = await visionLogin(page, credentials, apiKey, { runId: sweepId, emit: () => {} }).catch(e => ({ success: false, error: e.message }));
+      emitSweep(sweepId, { type: li.success ? 'pass' : 'fail', message: li.success ? 'Login successful' : `Could not log in: ${li.error || 'unknown'}` });
+      if (!li.success) {
+        report.status = 'blocked';
+        report.error = li.error || 'login failed';
+        return;
+      }
+    }
+
+    const base = new URL(appKnowledge.url);
+    const paths = Object.keys(appKnowledge.pages || {}).filter(p => !p.includes('::')).slice(0, MAX_PAGES);
+    const targets = paths.length ? paths : ['/'];
+
+    for (const path of targets) {
+      if (checked >= MAX_TOTAL || Date.now() > DEADLINE) break;
+      const url = path.startsWith('#') || path.startsWith('/#')
+        ? base.origin + base.pathname + (path.startsWith('/') ? path.slice(1) : path)
+        : base.origin + path;
+      emitSweep(sweepId, { type: 'info', message: `— ${path}` });
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      await page.waitForTimeout(1200);
+
+      let inventory = [];
+      try { inventory = await page.evaluate(SWEEP_INVENTORY) || []; } catch {}
+      inventory = inventory.slice(0, MAX_PER_PAGE);
+      emitSweep(sweepId, { type: 'info', message: `  ${inventory.length} controls found` });
+
+      for (const item of inventory) {
+        if (checked >= MAX_TOTAL || Date.now() > DEADLINE) break;
+
+        // ── Destructive? Stop and ask a human. ──────────────────────────
+        // An unnamed control cannot be judged by its words, and this sweep
+        // clicks things a person never labelled. Ask about those too rather
+        // than gambling that the icon is harmless.
+        const gate = item.named ? sweepGateReason(item.label) : 'unnamed';
+        if (gate) {
+          const decisionKey = (item.named ? item.label : 'selector:' + item.selector).toLowerCase();
+          const remembered = (sweepDecisions[appKnowledge.appId] || {})[decisionKey];
+          let allow, source = 'asked';
+          if (remembered && typeof remembered.allow === 'boolean') {
+            allow = remembered.allow; source = 'remembered';
+          } else {
+            emitSweep(sweepId, {
+              type: 'awaiting_confirm',
+              sweepId,
+              label: item.label,
+              page: path,
+              reason: gate,
+              question: gate === 'destructive'
+                ? `Should I click "${item.label}" on ${path}? It may permanently delete real data in your app, and TestPilot cannot undo that.`
+                : gate === 'unnamed'
+                ? `There is a control on ${path} with no label — an icon-only button (${item.selector}). I cannot tell what it does from the outside, and it could be a delete. Click it?`
+                : `Should I click "${item.label}" on ${path}? This looks like it commits something for real — it could send an email, publish, order or approve on your live app, and TestPilot cannot take that back.`,
+            });
+            const answer = await awaitSweepConfirmation(sweepId);
+            allow = !!answer.allow;
+            if (answer.remember) {
+              sweepDecisions[appKnowledge.appId] = sweepDecisions[appKnowledge.appId] || {};
+              sweepDecisions[appKnowledge.appId][decisionKey] = { allow, at: new Date().toISOString(), by: ownerEmail || 'unknown' };
+              await saveSweepDecisions();
+            }
+            if (answer.timedOut) source = 'no answer';
+          }
+          if (!allow) {
+            report.items.push({ page: path, kind: item.kind, label: item.label, verdict: 'skipped', detail: `${gate === 'commit' ? 'Commits something for real' : gate === 'unnamed' ? 'Unlabelled control — cannot tell what it does' : 'Destructive'} — not clicked (${source})` });
+            emitSweep(sweepId, { type: 'skip', message: `  ⏭ "${item.label}" — ${gate}, not clicked (${source})` });
+            checked++;
+            continue;
+          }
+          emitSweep(sweepId, { type: 'info', message: `  ✔ "${item.label}" — approved (${source})` });
+        }
+
+        const before = await domSig();
+        const eBefore = errSnapshot();
+        let acted = false;
+        // A CSS path beats a name: it reaches icon-only controls, and it cannot
+        // land on a different element that happens to share the same words.
+        if (item.selector) {
+          acted = await page.locator(item.selector).first()
+            .click({ timeout: 4000 }).then(() => true).catch(() => false);
+        }
+        if (!acted && item.named) {
+          if (item.kind === 'toggle') {
+            const tg = await clickToggleByName(page, item.label);
+            acted = !!tg.ok;
+          } else {
+            const cr = await clickButton(page, item.label).catch(() => ({ success: false }));
+            acted = !!cr.success;
+          }
+        }
+        await page.waitForTimeout(1200);
+        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+        const after = await domSig();
+        const errs = errSince(eBefore);
+        checked++;
+
+        const hadError = errs.console.length || errs.failed.length || errs.http.length;
+        let verdict, detail;
+        if (!acted) {
+          verdict = 'unreachable';
+          detail = 'TestPilot could not click it (it may be covered, disabled or renamed)';
+        } else if (hadError) {
+          verdict = 'broken';
+          detail = [
+            errs.http.length ? `${errs.http.length} failed request(s): ${errs.http[0]}` : '',
+            errs.failed.length ? `${errs.failed.length} network failure(s)` : '',
+            errs.console.length ? `console: ${errs.console[0]}` : '',
+          ].filter(Boolean).join(' · ');
+        } else if (before && after && before === after) {
+          // Retry once before calling anything dead — this is where a naive
+          // sweep starts crying wolf.
+          const eB2 = errSnapshot();
+          if (item.selector) await page.locator(item.selector).first().click({ timeout: 3000 }).catch(() => {});
+          else if (item.kind === 'toggle') await clickToggleByName(page, item.label);
+          else await clickButton(page, item.label).catch(() => {});
+          await page.waitForTimeout(1200);
+          const after2 = await domSig();
+          const errs2 = errSince(eB2);
+          if (errs2.console.length || errs2.http.length) { verdict = 'broken'; detail = `console/network error on retry: ${(errs2.http[0] || errs2.console[0] || '').slice(0, 120)}`; }
+          else if (after2 && after2 !== before) { verdict = 'works'; detail = 'Responded on the second click'; }
+          else { verdict = 'no_effect'; detail = 'Clicked twice, nothing on the page changed. May be correct (e.g. a link to the page you are already on) — worth an eye.'; }
+        } else {
+          verdict = 'works';
+          detail = (after || '').split('|').pop() !== (before || '').split('|').pop() ? 'Navigated' : 'Page updated';
+        }
+
+        report.items.push({ page: path, kind: item.kind, label: item.label, verdict, detail });
+        const icon = verdict === 'works' ? '✅' : verdict === 'broken' ? '❌' : verdict === 'no_effect' ? '⚠️' : '⏭';
+        emitSweep(sweepId, { type: verdict === 'broken' ? 'fail' : 'step', message: `  ${icon} [${item.kind}] "${item.label}" — ${verdict}` });
+
+        // Return to the page under test so one control's navigation doesn't
+        // silently move the sweep somewhere else.
+        if ((await page.url()) !== url) {
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+          await page.waitForTimeout(700);
+        }
+      }
+    }
+
+    report.status = 'completed';
+  } catch (e) {
+    report.status = 'error';
+    report.error = e.message;
+    emitSweep(sweepId, { type: 'fail', message: `Sweep error: ${e.message}` });
+  } finally {
+    report.completedAt = new Date().toISOString();
+    report.counts = report.items.reduce((a, i) => { a[i.verdict] = (a[i.verdict] || 0) + 1; return a; }, {});
+    try { await context.close(); } catch {}
+    try { await browser.close(); } catch {}
+    emitSweep(sweepId, {
+      type: 'summary',
+      message: `Check complete: ${report.counts.works || 0} working · ${report.counts.broken || 0} broken · ${report.counts.no_effect || 0} suspicious · ${report.counts.skipped || 0} skipped`,
+    });
+    emitSweep(sweepId, { type: 'done' });
+    for (const r of (sweepStreams.get(sweepId) || [])) { try { r.end(); } catch {} }
+    sweepStreams.delete(sweepId);
+  }
+}
+
+// Start a sweep.
+app.post('/api/sweep', async (req, res) => {
+  const sessionUser = requireUser(req, res);
+  if (!sessionUser) return;
+  let { appId, email, password, apiKey, sessionState: rawSessionState } = req.body || {};
+  const appKnowledge = platformMaps.get(appId);
+  if (!appKnowledge) return res.status(404).json({ error: 'App not found' });
+  if (!ownsApp(appId, sessionUser.email)) return res.status(403).json({ error: 'This app belongs to another account.', code: 'OWNERSHIP_MISMATCH' });
+  const ss = parseSessionState(rawSessionState);
+  if (!ss.ok) return res.status(400).json({ error: ss.error, code: 'SESSION_STATE_INVALID' });
+
+  // One at a time per person.
+  if (activeSweepsByUser.get(canonicalEmail(sessionUser.email))) {
+    return res.status(429).json({ error: 'A check is already running on your account — wait for it to finish.', code: 'SWEEP_IN_PROGRESS' });
+  }
+
+  // A login is the ONLY part of a sweep that costs model tokens. A public app
+  // costs nothing, so it needs neither a key nor an allowance — charging for
+  // it would be inventing a cost that doesn't exist.
+  const needsLogin = !!email && !ss.sessionState;
+  let freeSweep = false;
+  if (needsLogin) {
+    if (sessionUser.plan === 'free') {
+      const _ce = canonicalEmail(sessionUser.email);
+      if (freeSweepUsed.has(_ce)) {
+        return res.status(402).json({ error: 'You have used your free check on a login-protected app — choose a plan, or add your own API key.', code: 'FREE_SWEEP_USED' });
+      }
+      if (isFreeBudgetExceeded()) {
+        return res.status(429).json({ error: 'Free runs are paused for today — try again tomorrow.', code: 'FREE_DAILY_BUDGET_EXCEEDED' });
+      }
+      freeSweep = true;
+      apiKey = process.env.ANTHROPIC_SUPPORT_KEY;
+      freeSweepUsed.add(_ce);
+      saveFreeSweepUsed();
+    }
+    if (!apiKey) return res.status(400).json({ error: 'Add your Claude API key to check an app that needs a login.', code: 'API_KEY_REQUIRED' });
+  }
+
+  const sweepId = randomUUID();
+  sweepResults.set(sweepId, {
+    sweepId, appId, url: appKnowledge.url, userEmail: sessionUser.email,
+    startedAt: new Date().toISOString(), status: 'running', items: [], log: [],
+  });
+  res.json({ sweepId, status: 'started' });
+
+  const _ceRun = canonicalEmail(sessionUser.email);
+  activeSweepsByUser.set(_ceRun, sweepId);
+  (async () => {
+    await acquireScanSlot();
+    try {
+      await runSweep(sweepId, appKnowledge, { email, password, sessionState: ss.sessionState }, { ownerEmail: sessionUser.email, apiKey });
+    } catch (e) {
+      const r = sweepResults.get(sweepId);
+      if (r) { r.status = 'error'; r.error = e.message; }
+    } finally {
+      releaseScanSlot();
+      activeSweepsByUser.delete(_ceRun);
+      recordScanOutcome(sweepResults.get(sweepId)?.status);
+      // Keep memory bounded — reports are read right after the run, not weeks later.
+      if (sweepResults.size > 60) {
+        const oldest = [...sweepResults.entries()].sort((a, b) => new Date(a[1].startedAt) - new Date(b[1].startedAt)).slice(0, sweepResults.size - 60);
+        for (const [k] of oldest) { sweepResults.delete(k); sweepStreams.delete(k); }
+      }
+    }
+  })();
+});
+
+// Live stream.
+app.get('/api/sweep/:id/stream', (req, res) => {
+  const rep = sweepResults.get(req.params.id);
+  if (!rep) return res.status(404).end();
+  if (rep.userEmail && rep.userEmail !== requesterEmail(req)) return res.status(403).end();
+  res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
+  if (!sweepStreams.has(req.params.id)) sweepStreams.set(req.params.id, []);
+  sweepStreams.get(req.params.id).push(res);
+  for (const ev of rep.log) { try { res.write(`data: ${JSON.stringify(ev)}\n\n`); } catch {} }
+  req.on('close', () => {
+    const arr = sweepStreams.get(req.params.id) || [];
+    const i = arr.indexOf(res);
+    if (i >= 0) arr.splice(i, 1);
+  });
+});
+
+// Result.
+app.get('/api/sweep/:id', (req, res) => {
+  const rep = sweepResults.get(req.params.id);
+  if (!rep) return res.status(404).json({ error: 'Not found' });
+  if (rep.userEmail && rep.userEmail !== requesterEmail(req)) return res.status(403).json({ error: 'This check belongs to another account.' });
+  res.json(rep);
+});
+
+// Answer a destructive-click question.
+app.post('/api/sweep/:id/confirm', (req, res) => {
+  const rep = sweepResults.get(req.params.id);
+  if (!rep) return res.status(404).json({ error: 'Not found' });
+  if (rep.userEmail && rep.userEmail !== requesterEmail(req)) return res.status(403).json({ error: 'Forbidden' });
+  const p = pendingConfirms.get(req.params.id);
+  if (!p) return res.status(404).json({ error: 'This check is not waiting for an answer.' });
+  clearTimeout(p.timer);
+  pendingConfirms.delete(req.params.id);
+  p.resolve({ allow: req.body?.allow === true, remember: req.body?.remember === true });
+  res.json({ ok: true });
 });
 
 // SSE stream
@@ -7319,6 +8826,13 @@ app.get('/api/test/:testId/stream', (req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
   if (!testStreams.has(req.params.testId)) testStreams.set(req.params.testId, []);
   testStreams.get(req.params.testId).push(res);
+  // If the scan is still waiting for a free concurrency slot, tell THIS client
+  // right away — the live step stream stays silent until a slot opens, so
+  // without this a queued user just stares at a spinner with no explanation.
+  const _queuedRow = testResults.get(req.params.testId);
+  if (_queuedRow && _queuedRow.status === 'queued') {
+    try { res.write(`data: ${JSON.stringify({ type: 'info', message: '⏳ All test runners are busy right now — your scan is queued and will start automatically the moment one frees up. You can leave this page open; no need to refresh.' })}\n\n`); } catch {}
+  }
   req.on('close', () => {
     const listeners = testStreams.get(req.params.testId) || [];
     testStreams.set(req.params.testId, listeners.filter(r => r !== res));
@@ -7462,12 +8976,12 @@ app.post('/api/test/multirole', async (req, res) => {
   // Funnel rework: free/onerun → 402 with the unified paywall copy. Other
   // tiers fall through to the feature-list check (Starter doesn't have
   // multirole either; that's still 403).
-  if (user.plan === 'free' || user.plan === 'onerun') {
+  if (user.plan === 'free') {
     return res.status(402).json({ error: 'This feature requires a paid plan.', code: 'PLAN_FEATURE_LOCKED' });
   }
   const planFeatures = PLAN_LIMITS[user.plan]?.features || [];
   if (!planFeatures.includes('multirole')) {
-    return res.status(403).json({ error: 'Multi-role testing requires Pro or Agency plan', code: 'PLAN_FEATURE_LOCKED' });
+    return res.status(403).json({ error: 'Multi-role testing requires a paid plan', code: 'PLAN_FEATURE_LOCKED' });
   }
 
   const { appId, roles, apiKey, freeRun, userEmail } = req.body || {};
@@ -7492,6 +9006,11 @@ app.post('/api/test/multirole', async (req, res) => {
   const appKnowledge = platformMaps.get(appId);
   if (!appKnowledge) return res.status(404).json({ error: 'App not found. Learn it first.' });
   if (!ownsApp(appId, user.email)) return res.status(403).json({ error: 'This app belongs to another account.', code: 'OWNERSHIP_MISMATCH' });
+
+  // OneRun: this multirole run consumes the single credit (refunded below unless
+  // it produced a verdict). onerun.features includes 'multirole' so it passed the gate.
+  const _mrCredit = await reserveRunCreditOrDeny(res, user.plan, user.email, user.plan === 'onerun' ? await getUserByEmail(user.email) : null);
+  if (!_mrCredit.ok) return;
 
   const testId = randomUUID();
   res.json({ testId, status: 'started', roleCount: roles.length });
@@ -7566,6 +9085,7 @@ app.post('/api/test/multirole', async (req, res) => {
       ? (allDone ? 'completed_with_bugs' : 'partial_with_bugs')
       : (allDone ? 'completed' : (blockedRoles.length ? 'blocked' : 'incomplete'));
     aggregate.completedAt = new Date().toISOString();
+    if (_mrCredit.reserved && !['completed', 'completed_with_bugs', 'partial_with_bugs'].includes(aggregate.status)) refundRunCredit(user.email);
     aggregate.summary = {
       roles: roleResults.length,
       bugs: aggregate.bugs.length,
@@ -7577,6 +9097,7 @@ app.post('/api/test/multirole', async (req, res) => {
     saveTestResult(testId, aggregate);
     emitStep(testId, { type: 'summary', message: `Multi-role complete: ${aggregate.summary.passed_roles}/${roleResults.length} roles passed, ${aggregate.bugs.length} confirmed bug${aggregate.bugs.length === 1 ? '' : 's'}${blockedRoles.length ? `, ${blockedRoles.length} role(s) couldn't be tested` : ''}`, summary: aggregate.summary });
   }).catch(err => {
+    if (_mrCredit.reserved) refundRunCredit(user.email);
     aggregate.status = 'error';
     aggregate.error = err.message;
     aggregate.completedAt = new Date().toISOString();
@@ -8539,6 +10060,16 @@ app.post('/api/billing/checkout', async (req, res) => {
       payment_method_types: ['card'],
       line_items: [{ price: PRICE_IDS[plan], quantity: 1 }],
       mode: isOneTime ? 'payment' : 'subscription',
+      // Collect buyer billing address + tax ID (NIF/VAT) so invoices are valid
+      // Spanish facturas (business customers can deduct IVA). customer_update lets
+      // Stripe persist these onto the existing customer object.
+      billing_address_collection: 'required',
+      tax_id_collection: { enabled: true },
+      customer_update: { name: 'auto', address: 'auto' },
+      // Subscriptions auto-generate an invoice each cycle; a one-time payment
+      // does NOT unless we ask for it. Enable invoice creation on one-time so
+      // onerun buyers also get a proper downloadable invoice (not just a receipt).
+      ...(isOneTime ? { invoice_creation: { enabled: true } } : {}),
       success_url: `${APP_URL}/api/billing/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${APP_URL}/app`,
       metadata: { userId: user.id, plan, email: session.email }
@@ -8550,6 +10081,44 @@ app.post('/api/billing/checkout', async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+// Customer Portal — Stripe-hosted page where a paying user views/downloads all
+// invoices + receipts (PDF), updates their card, and changes/cancels their plan.
+// Needs an existing Stripe customer (created at first checkout) + a one-time
+// portal activation in the Stripe Dashboard (Settings → Billing → Customer portal).
+app.post('/api/billing/portal', async (req, res) => {
+  const user = requireUser(req, res);
+  if (!user) return;
+  try {
+    const rows = await supabase('GET', 'users', null, `?email=eq.${encodeURIComponent((user.email || '').toLowerCase())}&select=stripe_customer_id`);
+    const customerId = rows && rows[0] && rows[0].stripe_customer_id;
+    if (!customerId) return res.status(400).json({ error: 'No billing account yet — your invoices appear here after your first purchase.' });
+    const portal = await stripe.billingPortal.sessions.create({ customer: customerId, return_url: `${APP_URL}/app` });
+    res.json({ url: portal.url });
+  } catch (e) {
+    console.error('Portal error:', e.message);
+    const msg = /configuration|No configuration|portal/i.test(e.message)
+      ? 'Billing portal isn’t activated yet — enable it once in Stripe (Settings → Billing → Customer portal).'
+      : e.message;
+    res.status(500).json({ error: msg });
+  }
+});
+
+// OneRun credit grant — idempotent per Stripe checkout session (the success
+// redirect AND the webhook both fire for one purchase, and Stripe may retry the
+// webhook). Each €5 purchase adds exactly 1 run credit to users.credits.
+const processedOnerunGrants = new Set();
+async function grantOneRunCredit({ email, userId, sessionId }) {
+  if (sessionId) { if (processedOnerunGrants.has(sessionId)) return; processedOnerunGrants.add(sessionId); }
+  let row = null;
+  if (email) row = (await supabase('GET', 'users', null, `?email=eq.${encodeURIComponent(email)}&select=email,credits`).catch(() => []))?.[0];
+  if (!row && userId) row = (await supabase('GET', 'users', null, `?id=eq.${userId}&select=email,credits`).catch(() => []))?.[0];
+  if (!row) return;
+  const cur = Number(row.credits || 0);
+  await supabase('PATCH', 'users', { credits: cur + 1 }, `?email=eq.${encodeURIComponent(row.email)}`).catch(() => {});
+  for (const [, s] of sessions) { if (s.email === row.email) s.credits = cur + 1; }
+  console.log('[BILLING] +1 onerun credit', { email: row.email, credits: cur + 1, sessionId: sessionId || null });
+}
 
 // Shared helper: write the new plan to DB + propagate to all live in-memory
 // sessions for that email so the user doesn't have to log out/in to see it.
@@ -8586,6 +10155,7 @@ app.get('/api/billing/success', async (req, res) => {
       const { userId, plan, email } = checkoutSession.metadata || {};
       if (plan && PRICE_IDS[plan]) {
         await applyPlanChange({ email, userId, plan, source: 'success-redirect' });
+        if (plan === 'onerun') await grantOneRunCredit({ email, userId, sessionId: checkoutSession.id });
       }
       return res.redirect('/app?upgraded=1');
     }
@@ -8624,6 +10194,7 @@ app.post('/api/billing/webhook', express.raw({ type: 'application/json' }), asyn
         const { userId, plan, email } = cs.metadata || {};
         if (plan && PRICE_IDS[plan]) {
           await applyPlanChange({ email, userId, plan, source: 'webhook:checkout.completed' });
+          if (plan === 'onerun') await grantOneRunCredit({ email, userId, sessionId: cs.id });
         }
         break;
       }
@@ -8773,7 +10344,7 @@ Respond in plain text, no markdown.` }]
 app.post('/api/capture-session', async (req, res) => {
   // Operator-only browser-driver — gated behind admin auth (was unauthenticated).
   if (!requireAdmin(req, res)) return;
-  const { url, email, password } = req.body;
+  const { url, email, password } = req.body || {};
   if (!url) return res.status(400).json({ error: 'URL required' });
   const safe = await assertPublicUrl(url);
   if (!safe.ok) return res.status(400).json({ error: safe.error, code: 'URL_BLOCKED' });
@@ -8790,7 +10361,7 @@ app.post('/api/capture-session', async (req, res) => {
     const page = await ctx.newPage();
     await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
     await page.waitForTimeout(1500);
-    send({ phase: 'login', message: 'Logging in…' });
+    if (credentials?.email) send({ phase: 'login', message: 'Logging in…' });
     // 2FA bridge is live here: a code step emits awaiting_2fa(runId) and pauses.
     const result = await visionLogin(page, { email, password }, null, { runId, emit: send });
     if (!result.success) {
@@ -8811,15 +10382,41 @@ app.post('/api/capture-session', async (req, res) => {
   }
 });
 
+// One free security scan per account (identity-canonicalized). Persisted to disk
+// so it survives restarts; no new DB column needed.
+const FREE_SECURITY_FILE = './free-security-used.json';
+const freeSecurityUsed = new Set();
+async function loadFreeSecurityUsed() {
+  try { for (const e of JSON.parse(await fs.readFile(FREE_SECURITY_FILE, 'utf-8'))) freeSecurityUsed.add(e); }
+  catch (e) { if (e.code !== 'ENOENT') console.warn('[freesec] load failed:', e.message); }
+}
+function saveFreeSecurityUsed() { fs.writeFile(FREE_SECURITY_FILE, JSON.stringify([...freeSecurityUsed])).catch(() => {}); }
+loadFreeSecurityUsed();
+
 app.post('/api/security/api-intercept', async (req, res) => {
   // Use the shared requirePaidUser helper instead of an inline cookie check.
   // requirePaidUser → requireUser, which now accepts X-Base44-Auth header
   // + userEmail body as an alternative auth path (Base44 service auth).
   // The old inline check would 402 every Base44 call because Base44 functions
   // don't carry the tpsession cookie.
-  const sessionUser = requirePaidUser(req, res);
-  if (!sessionUser) return; // requirePaidUser already wrote 401/402
-  const { appId, userA, userB, apiKey, mode } = req.body;
+  const sessionUser = requireUser(req, res);
+  if (!sessionUser) return;
+  let { appId, userA, userB, apiKey, mode } = req.body;
+  // Free tier gets ONE security scan on the house — support-key funded, owner-scoped,
+  // forced read-only (destructive probes stay paid). Shows off the differentiator.
+  let freeScan = false;
+  if (sessionUser.plan === 'free') {
+    const _ce = canonicalEmail(sessionUser.email);
+    if (freeSecurityUsed.has(_ce) || sessionUser.free_security_used) {
+      return res.status(402).json({ error: 'You have used your free security scan — choose a plan for unlimited scans.', code: 'FREE_SECURITY_USED' });
+    }
+    if (isFreeBudgetExceeded()) {
+      return res.status(429).json({ error: 'Free scans are paused for today — sign up to continue.', code: 'FREE_DAILY_BUDGET_EXCEEDED' });
+    }
+    freeScan = true;
+    apiKey = process.env.ANTHROPIC_SUPPORT_KEY;   // free scan runs on the support key
+    mode = 'read-only';                            // never destructive on a free scan
+  }
   if (!apiKey) return res.status(400).json({ error: 'API key required' });
   const appKnowledge = platformMaps.get(appId);
   if (!appKnowledge) return res.status(404).json({ error: 'App not found' });
@@ -8836,6 +10433,15 @@ app.post('/api/security/api-intercept', async (req, res) => {
   if (!ssBParsed.ok) return res.status(400).json({ error: `User B session: ${ssBParsed.error}` });
   const ssA = ssAParsed.sessionState;
   const ssB = ssBParsed.sessionState;
+
+  // OneRun: a security scan consumes the single credit (refunded in catch if the
+  // scan itself errors out — TestPilot's failure, not the customer's app).
+  const _secCredit = await reserveRunCreditOrDeny(res, sessionUser.plan, sessionUser.email, sessionUser.plan === 'onerun' ? await getUserByEmail(sessionUser.email) : null);
+  if (!_secCredit.ok) return;
+  if (freeScan) {  // optimistic burn — one free scan per identity
+    freeSecurityUsed.add(canonicalEmail(sessionUser.email)); saveFreeSecurityUsed();
+    for (const [, s] of sessions) { if (s.email === sessionUser.email) s.free_security_used = true; }
+  }
 
   // Mutation tests (PUT/DELETE on User A's records) are DESTRUCTIVE — if the
   // app is vulnerable, the probe actually mutates or deletes real data. Default
@@ -8854,6 +10460,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
     const pageA = await ctxA.newPage();
 
     const capturedRequests = [];
+    const bundleTexts = []; let bundleBytes = 0; // client JS/HTML for the exposed-secrets scan
     const capturedResponses = new Map(); // url → response data
     const brokenResources = []; // TP-PERF-04: 4xx on page assets during nav
 
@@ -8878,7 +10485,9 @@ app.post('/api/security/api-intercept', async (req, res) => {
       const st = resp.status();
       // Broken-resource tracking (TP-PERF-04): any 4xx on a real page asset.
       // Skip third-party analytics/ads (their 4xx aren't the app's bug).
-      if (st >= 400 && st < 500 && ['image', 'script', 'stylesheet', 'font', 'media', 'xhr', 'fetch'].includes(type)
+      // 401/403 are AUTHZ CONTROLS (a scoped/locked endpoint denying access), NOT
+      // broken resources — excluded so RLS/auth locks aren't mis-flagged as breakage.
+      if (st >= 400 && st < 500 && st !== 401 && st !== 403 && ['image', 'script', 'stylesheet', 'font', 'media', 'xhr', 'fetch'].includes(type)
           && !/google|analytics|sentry|facebook|hotjar|doubleclick|mixpanel|segment|stripe\.com\/6/i.test(url)) {
         brokenResources.push({ url, type, status: st });
       }
@@ -8888,6 +10497,10 @@ app.post('/api/security/api-intercept', async (req, res) => {
           capturedResponses.set(url, { status: st, body: body.substring(0, 2000) });
         } catch {}
       }
+      // Collect client JS + the HTML doc for the exposed-secrets scan (capped).
+      if ((type === 'script' || type === 'document') && st < 400 && bundleBytes < 5000000) {
+        try { const t = await resp.text().catch(() => ''); if (t) { bundleTexts.push({ url, text: t }); bundleBytes += t.length; } } catch {}
+      }
     });
 
     // Login User A — OR skip when a captured session was provided (the context
@@ -8895,6 +10508,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
     // (not aborted) so a dead session can't be silently read as "safe".
     await pageA.goto(appKnowledge.url, { waitUntil: 'networkidle', timeout: 30000 });
     await pageA.waitForTimeout(1500);
+    const preCookiesA = await ctxA.cookies().catch(() => []);
     if (ssA) {
       const staleA = /\/(login|signin|sign-?in|auth)\b/i.test(pageA.url()) || await pageA.locator('input[type="password"]').first().isVisible({ timeout: 1500 }).catch(() => false);
       if (staleA) results.push({ type: 'session', level: 0, test: 'User A session', verdict: 'INCONCLUSIVE', severity: 'none', note: 'User A session looks expired/invalid (still at login) — recapture it; User A findings may be unreliable.' });
@@ -8946,6 +10560,80 @@ app.post('/api/security/api-intercept', async (req, res) => {
       .map(s => String(s).trim())
       .filter(s => s.length >= 4 && !/^(user|test|admin|demo)$/i.test(s));
 
+    // ── Level 10: EXPOSED SECRETS IN CLIENT BUNDLE ──────────────────────
+    // Vibe-coded apps routinely ship live keys / service-role secrets in frontend
+    // JS. Cheap, high-signal, fires without login — real findings on real apps.
+    try {
+      const inlineJs = await pageA.evaluate(() => Array.from(document.querySelectorAll('script:not([src])')).map(s => s.textContent || '').join('\n')).catch(() => '');
+      const secretHits = scanForSecrets([...bundleTexts, { url: 'inline', text: inlineJs }]);
+      for (const s of secretHits) results.push({ type: 'secret_exposure', level: 10, test: s.name, verdict: 'VULNERABLE', severity: s.sev, note: s.note + ` (found: ${s.redacted})` });
+      if (secretHits.length === 0) results.push({ type: 'secret_exposure', level: 10, test: 'Exposed secrets in client bundle', verdict: 'SAFE', severity: 'none', note: `Scanned ${bundleTexts.length} script file(s) — no live keys or service-role secrets exposed in the client bundle.` });
+    } catch {}
+
+    // ── Level 11: SUPABASE ANON-KEY / RLS EXPOSURE ──────────────────────
+    // The anon/publishable key is PUBLIC by design — flagging it would be a
+    // false alarm. The real question is whether the tables behind it are
+    // protected by Row-Level Security. We read the target's OWN public key from
+    // its bundle, then READ-ONLY probe its tables with that key. Rows coming
+    // back = RLS missing/permissive. Table discovery: the app's own runtime
+    // /rest/v1/<table> calls + (legacy) OpenAPI spec + a small dictionary of
+    // common names (modern Supabase blocks introspection for public keys and a
+    // no-login scan never fires the app's authed queries, so the dictionary is
+    // what lets it fire without credentials). Only rows that actually come back
+    // are ever flagged — an RLS-protected table returns 200 [] and is SAFE, so
+    // secured apps never false-positive.
+    try {
+      const sb = extractSupabaseConfig(bundleTexts);
+      if (!sb) {
+        results.push({ type: 'rls_exposure', level: 11, verdict: 'SAFE', severity: 'none', note: 'No Supabase project detected in the client bundle — anon-key/RLS probe not applicable.' });
+      } else {
+        const H = { apikey: sb.anonKey, Authorization: `Bearer ${sb.anonKey}` };
+        const sbFetch = async (u, opts = {}) => {
+          const ac = new AbortController(); const tid = setTimeout(() => ac.abort(), 8000);
+          try { return await fetch(u, { ...opts, headers: H, signal: ac.signal }); }
+          finally { clearTimeout(tid); }
+        };
+        const sources = [...capturedRequests.map(r => r.url), ...bundleTexts.map(b => b.text)];
+        let discovered = supabaseTablesFromTraffic(sources);
+        try {
+          const specRes = await sbFetch(`${sb.url}/rest/v1/`);
+          if (specRes.ok) { const spec = await specRes.json().catch(() => null); discovered = [...new Set([...discovered, ...supabaseTablesFromSpec(spec)])]; }
+        } catch {}
+        const COMMON = ['users', 'user', 'profiles', 'profile', 'accounts', 'account', 'posts', 'comments', 'messages', 'chats', 'orders', 'products', 'items', 'subscriptions', 'subscribers', 'waitlist', 'contacts', 'leads', 'customers', 'todos', 'tasks', 'notes', 'events', 'bookings', 'payments', 'feedback', 'submissions', 'reviews', 'favorites', 'notifications', 'settings', 'emails', 'signups'];
+        const probeList = [...new Set([...discovered, ...COMMON])].slice(0, 40);
+        const SENS = /^(password|passwd|pwd|password_hash|hashed_password|secret|client_secret|private_key|priv_key|api_?key|access_key|secret_key|encryption_key|refresh_token|access_token|ssn|social_security|tax_id|credit_card|card_number|cardnumber|cvv|cvc|iban|routing_number|bank_account|account_number|email|phone|phone_number|address|dob|date_of_birth|full_name|first_name|last_name)$/i;
+        const openTables = [];
+        for (const t of probeList) {
+          try {
+            const r = await sbFetch(`${sb.url}/rest/v1/${encodeURIComponent(t)}?select=*&limit=1`);
+            const status = r.status;
+            let rowCount = 0, sensitiveFields = [];
+            if (status === 200) {
+              const body = await r.text().catch(() => '');
+              try { const j = JSON.parse(body); if (Array.isArray(j)) { rowCount = j.length; if (rowCount > 0 && j[0] && typeof j[0] === 'object') sensitiveFields = Object.keys(j[0]).filter(k => SENS.test(k)); } } catch {}
+            }
+            const v = rlsReadVerdict({ status, rowCount, sensitiveFields });
+            if (v.verdict !== 'SAFE') openTables.push({ t, status, rowCount, sensitiveFields, ...v });
+          } catch {}
+        }
+        if (openTables.length) {
+          const crit = openTables.filter(o => o.severity === 'critical');
+          const sens = [...new Set(openTables.flatMap(o => o.sensitiveFields))];
+          if (crit.length) {
+            results.push({ type: 'rls_exposure', level: 11, verdict: 'VULNERABLE', severity: 'critical', tables: crit.map(o => o.t), note: `${crit.length} Supabase table(s) are readable with the PUBLIC key AND return rows containing sensitive data — Row-Level Security is missing or permissive: ${crit.map(o => o.t).slice(0, 8).join(', ')}. Sensitive field(s): ${sens.slice(0, 10).join(', ')}. The public key ships in your client JS, so anyone can read these rows. Enable RLS with per-user policies now.` });
+          } else {
+            results.push({ type: 'rls_exposure', level: 11, verdict: 'SUSPICIOUS', severity: 'medium', tables: openTables.map(o => o.t), note: `${openTables.length} Supabase table(s) are readable with the public key and returned rows, but no obvious PII/secret columns: ${openTables.map(o => o.t).slice(0, 8).join(', ')}. If any hold private or per-user data, RLS is missing — confirm they are meant to be world-readable (e.g. a public catalog is fine).` });
+          }
+        } else if (discovered.length) {
+          results.push({ type: 'rls_exposure', level: 11, verdict: 'SAFE', severity: 'none', note: `Probed ${probeList.length} Supabase table(s) (incl. the ${discovered.length} the app itself uses) with the public key — every read was blocked or returned no rows (RLS enforced). No anon-readable data.` });
+        } else {
+          results.push({ type: 'rls_exposure', level: 11, verdict: 'SAFE', severity: 'none', note: `Supabase project ${sb.url} detected; the app fired no table queries on its public surface, so ${probeList.length} common table names were probed with the public key — none were anon-readable. No exposure found (a full audit of every table needs valid credentials).` });
+        }
+      }
+    } catch (e) {
+      results.push({ type: 'rls_exposure', level: 11, verdict: 'INCONCLUSIVE', severity: 'none', note: `Supabase RLS probe could not complete: ${e.message}` });
+    }
+
     await browserA.close();
     browserA = null;
 
@@ -8978,6 +10666,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
     const uniqueApis = [];
     const seenUrls = new Set();
     for (const req of capturedRequests) {
+      if (isStaticAsset(req.url)) continue; // .wasm/.pck/.js/.css/images/fonts — public by architecture, not API endpoints (sec-classify.js, tested)
       const normalized = req.url.replace(/[a-f0-9]{20,}/gi, 'ID');
       if (!seenUrls.has(normalized)) {
         seenUrls.add(normalized);
@@ -9168,16 +10857,43 @@ app.post('/api/security/api-intercept', async (req, res) => {
     // Check if stolen session gives access
     const cleanPageContent = await pageClean.evaluate(() => ({
       url: window.location.href,
-      bodyText: document.body?.textContent?.substring(0, 500) || '',
+      bodyText: document.body?.textContent?.substring(0, 3000) || '',
       bodyLength: document.body?.textContent?.length || 0,
       headings: [...document.querySelectorAll('h1, h2, h3')].map(h => h.textContent.trim()).filter(Boolean)
     }));
 
-    const stolenSessionWorks = !cleanPageContent.url.includes('login') && 
+    // A "stolen session" only means something if User A HAD a real authenticated
+    // session to steal. With empty credentials (read-only content scans) or a
+    // failed login, cookiesA/localStorageA are just anonymous state — many apps
+    // (Supabase, Base44) persist an anon token under sb-*-auth-token even when
+    // logged out — so injecting them into a fresh browser and seeing a public
+    // page render is NOT a vulnerability. Gate the verdict on (a) a genuine
+    // session having existed, and (b) positive proof the injected creds
+    // reproduce User A's identity — mirroring the level-2 IDOR verdict tiers.
+    const hadRealAuthA = !!ssA || !!(userA?.email && userA?.password);
+    const cleanShowsUserAData = userAMarkers.length > 0 &&
+      userAMarkers.some(m => cleanPageContent.bodyText.toLowerCase().includes(m.toLowerCase()));
+    const cleanRendersApp = !cleanPageContent.url.includes('login') &&
       cleanPageContent.bodyLength > 200 &&
       !cleanPageContent.bodyText.includes('Sign in') &&
       !cleanPageContent.bodyText.includes('Log in') &&
       !cleanPageContent.bodyText.includes('Iniciar sesión');
+
+    let stolenVerdict, stolenSeverity, stolenNote;
+    if (!hadRealAuthA) {
+      stolenVerdict = 'INCONCLUSIVE'; stolenSeverity = 'none';
+      stolenNote = 'No authenticated User A session was established (no credentials / captured session provided) — nothing to steal, so stolen-session access cannot be assessed.';
+    } else if (cleanShowsUserAData) {
+      stolenVerdict = 'VULNERABLE'; stolenSeverity = 'critical';
+      stolenNote = "Injected User A's cookies/tokens into a fresh browser and User A's identifying data rendered without login — stolen session grants full access.";
+    } else if (cleanRendersApp) {
+      stolenVerdict = 'POTENTIAL_VULNERABILITY'; stolenSeverity = 'medium';
+      stolenNote = "Injected session rendered app content without a login wall, but User A's identity was not confirmed — manual verification needed.";
+    } else {
+      stolenVerdict = 'SAFE'; stolenSeverity = 'none';
+      stolenNote = 'Stolen session rejected — injected session landed on login or an empty page.';
+    }
+    const stolenSessionWorks = stolenVerdict === 'VULNERABLE';
 
     results.push({
       type: 'token_swap',
@@ -9188,9 +10904,11 @@ app.post('/api/security/api-intercept', async (req, res) => {
       landedOn: cleanPageContent.url,
       headings: cleanPageContent.headings.slice(0, 3),
       bodyLength: cleanPageContent.bodyLength,
-      verdict: stolenSessionWorks ? 'VULNERABLE' : 'SAFE',
-      severity: stolenSessionWorks ? 'critical' : 'none',
-      note: stolenSessionWorks ? 'Stolen cookies/tokens grant full access without login' : 'Stolen session rejected'
+      hadRealAuth: hadRealAuthA,
+      showsUserAData: cleanShowsUserAData,
+      verdict: stolenVerdict,
+      severity: stolenSeverity,
+      note: stolenNote
     });
 
     // Test 3b: Navigate to protected pages with stolen session
@@ -9885,6 +11603,153 @@ app.post('/api/security/api-intercept', async (req, res) => {
     // Stamp each finding with its OWASP WSTG-v4.2 ID + a trustworthiness rating
     // (★★★★★ binary / ★★★★☆ high / ★★★☆☆ indicative+caveat). Logic lives in
     // routes/sec-classify.js (stampFinding) and is unit-tested.
+
+    // ── EXCESSIVE DATA EXPOSURE (OWASP API3) — level 7 ──
+    // Scan User A's OWN authenticated API responses for sensitive fields the
+    // client never needs — credentials/secrets/PII the API over-returns. Base44/
+    // Supabase-style entity APIs commonly return every column, so a legitimately
+    // authorized user can still exfiltrate secrets the UI never shows.
+    try {
+      const SENSITIVE = /"(password|passwd|pwd|password_hash|pass_hash|hashed_password|encrypted_password|secret|client_secret|private_key|priv_key|api_key|apikey|access_key|secret_key|aws_secret_access_key|encryption_key|refresh_token|ssn|social_security|tax_id|credit_card|card_number|cardnumber|cvv|cvc|card_cvc|iban|routing_number|bank_account|account_number)"\s*:\s*("(?!\s*"|null|\[REDACTED\])[^"]{2,}"|\d{3,})/gi;
+      const exposures = [];
+      for (const [u, resp] of capturedResponses) {
+        // Auth/login/token endpoints legitimately carry tokens — exclude them.
+        if (/\/(login|sign-?in|signin|auth|token|oauth|session|refresh)\b/i.test(u)) continue;
+        if (!resp || !resp.body) continue;
+        const found = new Set();
+        let m; SENSITIVE.lastIndex = 0;
+        while ((m = SENSITIVE.exec(resp.body))) found.add(m[1].toLowerCase());
+        if (found.size) exposures.push({ url: u, fields: [...found] });
+      }
+      if (exposures.length) {
+        const uniqFields = [...new Set(exposures.flatMap(e => e.fields))];
+        results.push({
+          type: 'data_exposure', level: 7, verdict: 'VULNERABLE', severity: 'high',
+          note: `API responses expose sensitive field(s) the client should never receive: ${uniqFields.slice(0, 8).join(', ')}${uniqFields.length > 8 ? ` …+${uniqFields.length - 8}` : ''}. e.g. ${(exposures[0].url || '').slice(0, 80)}. An authorized user can still steal these (OWASP API3: Excessive Data Exposure).`,
+        });
+      } else {
+        results.push({ type: 'data_exposure', level: 7, verdict: 'SAFE', severity: 'none', note: `No credential/secret/PII fields found in ${capturedResponses.size} captured API response(s).` });
+      }
+    } catch (e) {
+      results.push({ type: 'data_exposure', level: 7, verdict: 'INCONCLUSIVE', severity: 'none', note: `Could not run data-exposure check: ${e.message}` });
+    }
+
+    // ── REFLECTED XSS (WSTG-v42-INPV-01) — level 8 ──
+    // Inject a unique benign marker into query params; flag it VULNERABLE only if
+    // the marker comes back UNESCAPED inside an HTML response (would execute).
+    // Escaped reflection = safe. NOTE: this catches SERVER-reflected XSS; pure
+    // client/DOM XSS in SPAs is a separate (harder) check — see disclosure.
+    try {
+      const tag = 'tpx' + Math.random().toString(36).slice(2, 8);
+      const payload = `"'><${tag}>`;
+      const rawMarker = `<${tag}>`;
+      const escMarker = `&lt;${tag}&gt;`;
+      const targets = new Set([
+        `${baseUrl}/?q=${encodeURIComponent(payload)}`,
+        `${baseUrl}/?search=${encodeURIComponent(payload)}`,
+        `${baseUrl}/?s=${encodeURIComponent(payload)}`,
+      ]);
+      // Also fuzz the first query param of a few captured GET requests.
+      for (const req of capturedRequests) {
+        if (targets.size >= 8) break;
+        if (req.method !== 'GET' || !/[?&][^=]+=/.test(req.url || '')) continue;
+        try { const uo = new URL(req.url); const k = [...uo.searchParams.keys()][0]; if (k) { uo.searchParams.set(k, payload); targets.add(uo.toString()); } } catch {}
+      }
+      let xssHit = null, tested = 0;
+      for (const t of targets) {
+        try {
+          const r = await fetchWithTimeout(t, { method: 'GET', redirect: 'manual' });
+          const ct = (r.headers.get('content-type') || '');
+          if (!/html/i.test(ct)) continue; // only HTML rendering contexts can execute
+          tested++;
+          const body = await r.text();
+          if (body.includes(rawMarker) && !body.includes(escMarker)) { xssHit = t; break; }
+        } catch {}
+      }
+      if (xssHit) {
+        results.push({
+          type: 'xss_reflected', level: 8, verdict: 'VULNERABLE', severity: 'high',
+          note: `Reflected input returned UNESCAPED in an HTML response — reflected XSS. The injected marker survived raw at: ${xssHit.slice(0, 90)}. An attacker can run script in a victim's session (session/data theft).`,
+        });
+      } else {
+        results.push({ type: 'xss_reflected', level: 8, verdict: 'SAFE', severity: 'none', note: `No unescaped reflection of injected markers in HTML responses (${tested} HTML vector(s) tested). (Server-reflected XSS only; DOM XSS not covered.)` });
+      }
+    } catch (e) {
+      results.push({ type: 'xss_reflected', level: 8, verdict: 'INCONCLUSIVE', severity: 'none', note: `Could not run reflected-XSS check: ${e.message}` });
+    }
+
+
+    // ── SESSION FIXATION (WSTG-v42-SESS-03) — level 9 ──
+    // Did login issue a NEW session identifier? If a pre-login session cookie
+    // survives login UNCHANGED, an attacker who fixes a victim's pre-login
+    // session can ride it once the victim authenticates.
+    try {
+      if (ssA) {
+        results.push({ type: 'session_fixation', level: 9, verdict: 'INCONCLUSIVE', severity: 'none', note: 'Session fixation not tested — a captured session was supplied (no login observed). Re-scan with email+password to test.' });
+      } else {
+        const sessRe = /sess|auth|token|sid|jwt|connect\.sid|login/i;
+        const skipRe = /stripe|mixpanel|_ga|_gid|hotjar|amplitude|intercom|segment|_fbp/i;
+        const preSess = (preCookiesA || []).filter(c => sessRe.test(c.name) && !skipRe.test(c.name) && c.value && c.value.length > 6);
+        const survived = preSess.filter(pc => (cookiesA || []).some(c => c.name === pc.name && c.value === pc.value));
+        if (survived.length) {
+          results.push({ type: 'session_fixation', level: 9, verdict: 'VULNERABLE', severity: 'high', note: `Session cookie(s) [${survived.map(c => c.name).join(', ')}] did NOT change on login — session fixation. An attacker can pre-set a victim's session ID and hijack the session once they authenticate.` });
+        } else {
+          results.push({ type: 'session_fixation', level: 9, verdict: 'SAFE', severity: 'none', note: `Session identifier rotated on login (or no persistent pre-login session cookie) — no fixation.` });
+        }
+      }
+    } catch (e) {
+      results.push({ type: 'session_fixation', level: 9, verdict: 'INCONCLUSIVE', severity: 'none', note: `Could not run session-fixation check: ${e.message}` });
+    }
+
+    // ── LOGOUT INVALIDATION (WSTG-v42-SESS-06) — level 9 ──
+    // After logout, does User A's OLD credential still authenticate? If yes, a
+    // stolen cookie/token stays valid — logout didn't revoke it server-side.
+    try {
+      const authGet = capturedRequests.find(r => r.method === 'GET'
+        && /\/(api|rest|graphql|entities|v1|users?|me|account|profile)\b/i.test(r.url)
+        && (capturedResponses.get(r.url) || {}).status === 200
+        && !/\/(login|sign-?in|auth\/|token|oauth)\b/i.test(r.url));
+      const authHeader = authGet && authGet.headers && (authGet.headers.authorization || authGet.headers.Authorization);
+      const cookieHeader = (cookiesA || []).filter(c => /sess|auth|token|sid|jwt|connect|login/i.test(c.name)).map(c => `${c.name}=${c.value}`).join('; ');
+      if (!authGet || (!authHeader && !cookieHeader)) {
+        results.push({ type: 'logout_invalidation', level: 9, verdict: 'INCONCLUSIVE', severity: 'none', note: 'Logout invalidation not tested — no authenticated data endpoint or captured credential found.' });
+      } else {
+        // Log out on pageA (click a logout affordance; else hit common endpoints).
+        let loggedOut = false;
+        try {
+          const btn = await pageA.$('button:has-text("Log out"), button:has-text("Logout"), button:has-text("Sign out"), button:has-text("Salir"), a:has-text("Cerrar sesión"), a:has-text("Log out"), [aria-label*="logout" i], [aria-label*="log out" i]');
+          if (btn) { await btn.click({ timeout: 4000 }).catch(() => {}); await pageA.waitForTimeout(2500); loggedOut = true; }
+        } catch {}
+        if (!loggedOut) {
+          for (const p of ['/api/auth/logout', '/auth/logout', '/logout', '/api/logout', '/users/sign_out']) {
+            try { const u = new URL(p, baseUrl).toString(); await pageA.evaluate(async (uu) => { await fetch(uu, { method: 'POST', credentials: 'include' }).catch(() => {}); await fetch(uu, { credentials: 'include' }).catch(() => {}); }, u); } catch {}
+          }
+          await pageA.waitForTimeout(1000);
+        }
+        // Replay the authenticated GET with the OLD credential (stolen-credential sim).
+        const headers = {};
+        if (authHeader) headers['authorization'] = authHeader;
+        if (cookieHeader) headers['cookie'] = cookieHeader;
+        let replay = { status: 0, len: 0, empty: true };
+        try {
+          const rr = await fetchWithTimeout(authGet.url, { method: 'GET', headers, redirect: 'manual' });
+          const body = await rr.text().catch(() => '');
+          replay = { status: rr.status, len: body.length, empty: /"(data|results|items)"\s*:\s*\[\s*\]/.test(body) || body.length < 30 };
+        } catch (e) { replay.err = e.message; }
+        if (replay.status === 200 && !replay.empty && replay.len > 30) {
+          if (cookieHeader && !authHeader) {
+            results.push({ type: 'logout_invalidation', level: 9, verdict: 'VULNERABLE', severity: 'high', note: `After logout, User A's old SESSION COOKIE still returned authenticated data from ${authGet.url.slice(0, 70)} (HTTP 200, ${replay.len}b). Logout didn't invalidate the server session — a stolen cookie stays valid.` });
+          } else {
+            results.push({ type: 'logout_invalidation', level: 9, verdict: 'SUSPICIOUS', severity: 'medium', note: `After logout, a captured bearer token still returned data from ${authGet.url.slice(0, 70)} (HTTP 200). Common for STATELESS JWTs (can't revoke without a server-side denylist) — a stolen token stays valid until it expires. Confirm whether logout should revoke it.` });
+          }
+        } else {
+          results.push({ type: 'logout_invalidation', level: 9, verdict: 'SAFE', severity: 'none', note: `Old credential rejected after logout (replay → HTTP ${replay.status}${replay.empty ? '/empty' : ''}) — session invalidated server-side.` });
+        }
+      }
+    } catch (e) {
+      results.push({ type: 'logout_invalidation', level: 9, verdict: 'INCONCLUSIVE', severity: 'none', note: `Could not run logout-invalidation check: ${e.message}` });
+    }
+
     for (const r of results) stampFinding(r);
     // Headline = only confirmed (★★★★☆+) VULNERABLE findings. Lower-confidence
     // ones are surfaced separately so the report never over-claims.
@@ -9894,6 +11759,12 @@ app.post('/api/security/api-intercept', async (req, res) => {
     // ── Summary ──
     const vulns = results.filter(r => r.verdict === 'VULNERABLE');
     const suspicious = results.filter(r => r.verdict === 'SUSPICIOUS' || r.verdict === 'POTENTIAL_VULNERABILITY');
+    // Count SAFE explicitly. Deriving it by subtraction put every INCONCLUSIVE
+    // and SKIPPED check into the safe bucket — a security report must never
+    // present a check it could not complete as one that passed.
+    const safeResults = results.filter(r => r.verdict === 'SAFE');
+    const inconclusiveResults = results.filter(r => r.verdict === 'INCONCLUSIVE');
+    const skippedResults = results.filter(r => r.verdict === 'SKIPPED');
     
     res.json({
       mode: destructive ? 'destructive' : 'read-only',
@@ -9902,7 +11773,9 @@ app.post('/api/security/api-intercept', async (req, res) => {
       confirmedVulnerabilities: confirmedVulns.length, // ★★★★☆+ — safe to headline
       indicativeVulnerabilities: indicativeVulns.length, // ★★★☆☆ — caveat required
       suspicious: suspicious.length,
-      safe: results.length - vulns.length - suspicious.length,
+      safe: safeResults.length,
+      inconclusive: inconclusiveResults.length,
+      skipped: skippedResults.length,
       capturedApiCalls: capturedRequests.length,
       uniqueApisTested: uniqueApis.length,
       idorUrlsTested: idorUrls.length,
@@ -9920,12 +11793,17 @@ app.post('/api/security/api-intercept', async (req, res) => {
         level3: { name: 'Token Swap', tests: results.filter(r => r.level === 3).length, vulns: results.filter(r => r.level === 3 && r.verdict === 'VULNERABLE').length },
         level4: { name: 'Mutation + No-Auth', tests: results.filter(r => r.level === 4).length, vulns: results.filter(r => r.level === 4 && r.verdict === 'VULNERABLE').length },
         level5: { name: 'Headers + CORS + Disclosure + Redirect + JWT + RateLimit', tests: results.filter(r => r.level === 5).length, vulns: results.filter(r => r.level === 5 && r.verdict === 'VULNERABLE').length },
-        level6: { name: 'Mass Assignment (destructive)', tests: results.filter(r => r.level === 6).length, vulns: results.filter(r => r.level === 6 && r.verdict === 'VULNERABLE').length }
+        level6: { name: 'Mass Assignment (destructive)', tests: results.filter(r => r.level === 6).length, vulns: results.filter(r => r.level === 6 && r.verdict === 'VULNERABLE').length },
+        level7: { name: 'Excessive Data Exposure', tests: results.filter(r => r.level === 7).length, vulns: results.filter(r => r.level === 7 && r.verdict === 'VULNERABLE').length },
+        level8: { name: 'Reflected XSS', tests: results.filter(r => r.level === 8).length, vulns: results.filter(r => r.level === 8 && r.verdict === 'VULNERABLE').length },
+        level9: { name: 'Session Lifecycle (fixation + logout)', tests: results.filter(r => r.level === 9).length, vulns: results.filter(r => r.level === 9 && r.verdict === 'VULNERABLE').length },
+        level10: { name: 'Exposed Secrets in Client Bundle', tests: results.filter(r => r.level === 10).length, vulns: results.filter(r => r.level === 10 && r.verdict === 'VULNERABLE').length }
       }
     });
 
   } catch (e) {
     console.error('Deep security scan error:', e.message);
+    if (_secCredit.reserved) refundRunCredit(sessionUser.email);
     res.status(500).json({ error: e.message, results });
   } finally {
     // Always close browsers
@@ -9943,6 +11821,9 @@ await loadGlobalBrain();
 await loadTestResults();
 await loadFreeSpendToday();
 await loadSessions();
+await loadEmbedTokens();
+await loadSweepDecisions();
+await loadFreeSweepUsed();
 console.log(`[freeSpend] daily ceiling: ${FREE_DAILY_TOKEN_BUDGET} weighted tokens (~€${FREE_DAILY_BUDGET_EUR} at $${SONNET_INPUT_USD_PER_MTOK}/MTok input, ${USD_PER_EUR} USD/EUR)`);
 // Funnel rework: one-time backfill of apps table from platform-maps.
 // Idempotent (skips rows already present). Awaited so any subsequent
@@ -9978,6 +11859,227 @@ app.post('/api/v1/apps/upsert', async (req, res) => {
 });
 app.use('/api/v1', netlifyRoutes);
 
+
+// ═══════════════════════════════════════════════════════════════
+// SCHEDULED REGRESSION RUNS (gap #8/14)
+// ───────────────────────────────────────────────────────────────
+// A saved (app, scenario) re-runs on an interval and emails the owner when a
+// run NEWLY fails (was passing → now blocked/bugs, more bugs, or materially more
+// first-party runtime errors). This is the "did my change / the platform's
+// silent update break my app" safety net the no-code forums keep asking for.
+// Reuses the existing engine (runAgentTest + recipe replay), the scan-slot cap,
+// AES-GCM secret storage, and the Resend mailer. Schedules persist to disk.
+const SCHEDULES_FILE = './schedules.json';
+const schedules = new Map();           // id -> schedule record
+let scheduleRunInFlight = false;       // serialize the ticker's own runs (calm on the 2-vCPU box)
+
+async function loadSchedules() {
+  try {
+    const raw = await fs.readFile(SCHEDULES_FILE, 'utf-8');
+    for (const s of JSON.parse(raw)) schedules.set(s.id, s);
+    console.log(`[schedules] loaded ${schedules.size} schedule(s)`);
+  } catch (e) { if (e.code !== 'ENOENT') console.warn('[schedules] load failed:', e.message); }
+}
+function saveSchedules() {
+  fs.writeFile(SCHEDULES_FILE, JSON.stringify([...schedules.values()], null, 2))
+    .catch(err => console.warn('[schedules] save failed:', err.message));
+}
+loadSchedules();
+
+// Strip secrets before returning a schedule over the API.
+function publicSchedule(s) {
+  const { keyEnc, sessionStateEnc, ...rest } = s;
+  return { ...rest, hasKey: !!keyEnc, hasSession: !!sessionStateEnc };
+}
+
+// Collapse a result into a pass/fail signature used for regression comparison.
+function outcomeSignature(r) {
+  if (!r) return { ok: false, status: 'missing', bugs: 0, fpErrors: 0 };
+  const bugs = (r.bugs || []).length;
+  const ds = r.diagnosticsSummary || {};
+  const fpErrors = (ds.firstPartyPageErrors || 0) + (ds.firstPartyHttpErrors || 0) + (ds.firstPartyConsoleErrors || 0);
+  const ok = (r.status === 'completed' || (r.summary && r.summary.completed === true)) && bugs === 0;
+  return { ok, status: r.status, bugs, fpErrors };
+}
+
+// Is `curr` a regression vs the stored baseline `prev`?
+function isRegression(prev, curr) {
+  if (!prev) return false;                                        // first run only sets the baseline
+  if (prev.ok && !curr.ok) return true;                          // was passing, now not
+  if (curr.bugs > (prev.bugs || 0)) return true;                 // more confirmed bugs
+  if ((curr.fpErrors || 0) > (prev.fpErrors || 0) + 2) return true; // materially more app-side runtime errors
+  return false;
+}
+
+async function runSchedule(s) {
+  const finish = (errMsg) => {
+    s.lastRunAt = new Date().toISOString();
+    s.nextRunAt = new Date(Date.now() + s.intervalHours * 3600000).toISOString();
+    if (errMsg) s.lastError = errMsg;
+    saveSchedules();
+  };
+  const appKnowledge = platformMaps.get(s.appId);
+  if (!appKnowledge) return finish('App not learned (map missing) — re-learn it.');
+
+  let apiKey = null;
+  try { if (s.keyEnc) apiKey = decryptSecret(s.keyEnc); } catch {}
+  if (!apiKey && s.useSupportKey) apiKey = process.env.ANTHROPIC_SUPPORT_KEY;
+  if (!apiKey) return finish('No usable API key on schedule.');
+
+  let sessionState = null;
+  try { if (s.sessionStateEnc) sessionState = JSON.parse(decryptSecret(s.sessionStateEnc)); } catch {}
+
+  const testId = randomUUID();
+  testResults.set(testId, { testId, appId: s.appId, scenario: s.scenario, status: 'starting', userEmail: s.ownerEmail, userId: s.ownerUserId || null, startedAt: new Date().toISOString(), steps: [], bugs: [], scheduleId: s.id });
+  await acquireScanSlot();
+  try {
+    await runAgentTest(testId, appKnowledge, s.scenario, { ownerEmail: s.ownerEmail, ownerUserId: s.ownerUserId || null, sessionState, allowReplay: true }, apiKey);
+  } catch (e) {
+    const r = testResults.get(testId);
+    if (r) { r.status = 'error'; r.error = e.message; }
+  } finally {
+    releaseScanSlot();
+    recordScanOutcome(testResults.get(testId)?.status);
+  }
+
+  const result = testResults.get(testId);
+  const curr = outcomeSignature(result);
+  const prev = s.baseline || null;
+  const regressed = isRegression(prev, curr);
+
+  s.lastRunAt = new Date().toISOString();
+  s.lastTestId = testId;
+  s.lastStatus = curr.status;
+  s.lastBugs = curr.bugs;
+  s.lastError = null;
+  s.runCount = (s.runCount || 0) + 1;
+  s.baseline = curr;                                             // becomes next run's comparison point
+  s.nextRunAt = new Date(Date.now() + s.intervalHours * 3600000).toISOString();
+  if (regressed) { s.lastRegressionAt = s.lastRunAt; s.lastRegressionTestId = testId; }
+  saveSchedules();
+
+  if (regressed) await sendRegressionAlert(s, prev, curr, result);
+}
+
+async function sendRegressionAlert(s, prev, curr, result) {
+  const to = s.alertEmail || s.ownerEmail;
+  if (!to) return;
+  const fails = (result?.steps || []).filter(x => x.status === 'fail' || x.status === 'retry').slice(0, 5)
+    .map(x => `• step ${x.step}: ${x.action} — ${(x.outcome || '').slice(0, 140)}`).join('\n');
+  const errLines = [
+    ...((result?.diagnostics?.pageErrors) || []).slice(0, 3).map(e => `• JS error: ${e.message}`),
+    ...((result?.diagnostics?.httpErrors) || []).filter(e => e.firstParty).slice(0, 3).map(e => `• HTTP ${e.status} ${e.method} ${e.url}`),
+    ...((result?.diagnostics?.consoleErrors) || []).filter(e => e.firstParty).slice(0, 3).map(e => `• console: ${e.text}`),
+  ].join('\n');
+  const wasNow = prev
+    ? `Was: ${prev.ok ? 'PASSING' : prev.status} (${prev.bugs} bugs) → Now: ${curr.ok ? 'passing' : curr.status} (${curr.bugs} bugs)`
+    : `Now: ${curr.status} (${curr.bugs} bugs)`;
+  const text = `TestPilot found a regression on a scheduled run.\n\nApp: ${s.appId}\nScenario: ${s.scenario}\n${wasNow}\n\n${fails ? 'Failing steps:\n' + fails + '\n' : ''}${errLines ? '\nRuntime errors:\n' + errLines + '\n' : ''}\nTest ID: ${s.lastTestId}\nAutomated alert from your TestPilot schedule (every ${s.intervalHours}h). Delete the schedule in the app to stop these.`;
+  try {
+    await mailer({ to, subject: `⚠ TestPilot regression: ${s.appId}`, text });
+    s.lastNotifiedAt = new Date().toISOString();
+    saveSchedules();
+  } catch (e) { console.warn('[schedules] alert email failed:', e.message); }
+}
+
+// Ticker: every 5 min run at most one due schedule (serialized). Extra due
+// schedules wait for the next tick.
+async function scheduleTick() {
+  if (scheduleRunInFlight) return;
+  const now = Date.now();
+  const due = [...schedules.values()]
+    .filter(s => s.active && s.nextRunAt && new Date(s.nextRunAt).getTime() <= now)
+    .sort((a, b) => new Date(a.nextRunAt) - new Date(b.nextRunAt));
+  if (!due.length) return;
+  scheduleRunInFlight = true;
+  try { await runSchedule(due[0]); }
+  catch (e) { console.warn('[schedules] tick run failed:', e.message); }
+  finally { scheduleRunInFlight = false; }
+}
+setInterval(scheduleTick, 5 * 60000);
+
+// ── Schedule CRUD ────────────────────────────────────────────
+app.post('/api/schedules', async (req, res) => {
+  const user = requireUser(req, res);
+  if (!user) return;
+  const ownerEmail = (user.email || '').trim().toLowerCase();
+  const { appId, scenario, intervalHours, apiKey, sessionState: rawSessionState, alertEmail, useSupportKey } = req.body || {};
+  if (!appId || !scenario) return res.status(400).json({ error: 'appId and scenario are required' });
+  const interval = Math.max(1, Math.min(24 * 30, Number(intervalHours) || 24)); // 1h..30d, default daily
+  const appKnowledge = platformMaps.get(appId);
+  if (!appKnowledge) return res.status(404).json({ error: 'App not found. Learn it first.' });
+
+  // Ownership: caller must own the app (super admin bypasses).
+  if (appKnowledge.url) {
+    const norm = normalizeAppUrl(appKnowledge.url);
+    if (norm.ok) {
+      const ownerOfApp = await getAppByNormalized(norm.normalized);
+      if (ownerOfApp && ownerOfApp.owner_email && ownerOfApp.owner_email !== ownerEmail && !isSuperAdmin(ownerEmail))
+        return res.status(403).json({ error: 'This app belongs to another account.', code: 'APP_OWNED_BY_OTHER' });
+    }
+  }
+
+  // Keys: BYOK required; only the super admin may lean on the shared support key.
+  let keyEnc = null, wantSupport = false;
+  if (apiKey) { try { keyEnc = encryptSecret(apiKey); } catch { return res.status(500).json({ error: 'Secret store unavailable' }); } }
+  else if (useSupportKey && isSuperAdmin(ownerEmail)) wantSupport = true;
+  else return res.status(400).json({ error: 'An Anthropic apiKey is required for scheduled runs.' });
+
+  let sessionStateEnc = null;
+  if (rawSessionState) {
+    const ss = parseSessionState(rawSessionState);
+    if (!ss.ok) return res.status(400).json({ error: ss.error, code: 'SESSION_STATE_INVALID' });
+    if (ss.sessionState) { try { sessionStateEnc = encryptSecret(JSON.stringify(ss.sessionState)); } catch {} }
+  }
+
+  const id = 'sch_' + randomBytes(9).toString('hex');
+  const rec = {
+    id, appId, scenario: String(scenario).slice(0, 2000),
+    ownerEmail, ownerUserId: user.userId || null,
+    keyEnc, useSupportKey: wantSupport, sessionStateEnc,
+    intervalHours: interval,
+    alertEmail: (alertEmail || ownerEmail || '').trim().toLowerCase() || null,
+    active: true, createdAt: new Date().toISOString(),
+    nextRunAt: new Date(Date.now() + interval * 3600000).toISOString(),
+    baseline: null, runCount: 0,
+  };
+  schedules.set(id, rec);
+  saveSchedules();
+  res.json({ ok: true, schedule: publicSchedule(rec) });
+});
+
+app.get('/api/schedules', (req, res) => {
+  const user = requireUser(req, res);
+  if (!user) return;
+  const me = (user.email || '').trim().toLowerCase();
+  const mine = [...schedules.values()].filter(s => isSuperAdmin(me) || s.ownerEmail === me).map(publicSchedule);
+  res.json({ schedules: mine });
+});
+
+app.delete('/api/schedules/:id', (req, res) => {
+  const user = requireUser(req, res);
+  if (!user) return;
+  const me = (user.email || '').trim().toLowerCase();
+  const s = schedules.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'Not found' });
+  if (s.ownerEmail !== me && !isSuperAdmin(me)) return res.status(403).json({ error: 'Not yours' });
+  schedules.delete(req.params.id);
+  saveSchedules();
+  res.json({ ok: true });
+});
+
+app.post('/api/schedules/:id/run-now', (req, res) => {
+  const user = requireUser(req, res);
+  if (!user) return;
+  const me = (user.email || '').trim().toLowerCase();
+  const s = schedules.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'Not found' });
+  if (s.ownerEmail !== me && !isSuperAdmin(me)) return res.status(403).json({ error: 'Not yours' });
+  if (scheduleRunInFlight) return res.status(409).json({ error: 'A scheduled run is already in progress; try again shortly.' });
+  res.json({ ok: true, message: 'Run started', appId: s.appId });
+  scheduleRunInFlight = true;                                    // fire-and-forget; result lands under lastTestId
+  runSchedule(s).catch(e => console.warn('[schedules] run-now failed:', e.message)).finally(() => { scheduleRunInFlight = false; });
+});
 
 // ── STAGING SAFE EXPORTS ─────────────────────────────────────
 export {

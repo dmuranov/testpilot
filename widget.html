@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>TestPilot</title>
+<style>
+  :root { --bg:#080808; --panel:#0f0f0f; --line:#1f1f1f; --ink:#f0f0f0; --dim:#888; --amber:#f5a623; --lime:#c8f040; --red:#ff5a5a; --blue:#5aa0ff; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html,body { height:100%; }
+  body { background:var(--bg); color:var(--ink); font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; font-size:13px; display:flex; flex-direction:column; }
+  header { display:flex; align-items:center; justify-content:space-between; padding:12px 14px; border-bottom:1px solid var(--line); flex-shrink:0; }
+  .brand { display:flex; align-items:center; gap:8px; font-weight:800; letter-spacing:.2px; }
+  .brand .mark { width:20px; height:20px; border-radius:5px; background:var(--amber); color:#080808; display:grid; place-items:center; font-size:12px; }
+  .x { background:none; border:none; color:var(--dim); cursor:pointer; font-size:16px; padding:4px; }
+  .x:hover { color:var(--ink); }
+  main { flex:1; overflow-y:auto; padding:14px; }
+  .target { font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:11px; color:var(--dim); background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin-bottom:14px; word-break:break-all; }
+  .target b { color:var(--amber); font-weight:600; }
+  h2 { font-size:11px; text-transform:uppercase; letter-spacing:.8px; color:var(--dim); margin:0 0 8px; font-weight:700; }
+  .tests { display:flex; flex-direction:column; gap:8px; }
+  .test { text-align:left; background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:11px 12px; cursor:pointer; color:var(--ink); transition:border-color .12s, background .12s; }
+  .test:hover { border-color:var(--amber); }
+  .test.sel { border-color:var(--amber); background:rgba(245,166,35,.08); }
+  .test .t { font-weight:700; display:flex; align-items:center; gap:7px; }
+  .test .d { color:var(--dim); font-size:11.5px; margin-top:3px; }
+  .test .ico { font-size:14px; }
+  .authrow { display:flex; align-items:center; gap:9px; margin:14px 0 4px; padding:10px 12px; background:var(--panel); border:1px solid var(--line); border-radius:10px; }
+  .authrow label { flex:1; font-size:12px; }
+  .authrow .sub { color:var(--dim); font-size:11px; margin-top:2px; }
+  .sw { position:relative; width:36px; height:20px; flex-shrink:0; }
+  .sw input { opacity:0; width:0; height:0; }
+  .sw .track { position:absolute; inset:0; background:#333; border-radius:999px; transition:.15s; }
+  .sw .track:before { content:""; position:absolute; width:14px; height:14px; left:3px; top:3px; background:#fff; border-radius:50%; transition:.15s; }
+  .sw input:checked + .track { background:var(--amber); }
+  .sw input:checked + .track:before { transform:translateX(16px); }
+  textarea { width:100%; margin-top:8px; background:var(--panel); border:1px solid var(--line); color:var(--ink); border-radius:8px; padding:9px; font:inherit; font-size:12px; resize:vertical; min-height:58px; display:none; }
+  footer { padding:12px 14px; border-top:1px solid var(--line); flex-shrink:0; }
+  .run { width:100%; padding:11px; border:none; border-radius:10px; background:var(--amber); color:#080808; font-weight:800; font-size:13px; cursor:pointer; }
+  .run:disabled { opacity:.5; cursor:default; }
+  .log { display:none; flex-direction:column; gap:6px; font-family:ui-monospace,Menlo,monospace; font-size:11.5px; }
+  .log .ln { display:flex; gap:8px; padding:6px 8px; background:var(--panel); border-radius:6px; border-left:2px solid var(--line); }
+  .log .ln.pass { border-left-color:var(--lime); }
+  .log .ln.fail { border-left-color:var(--red); }
+  .log .ln.info { border-left-color:var(--blue); }
+  .log .ln .n { color:var(--dim); flex-shrink:0; }
+  .verdict { text-align:center; padding:14px; border-radius:10px; font-weight:800; margin-bottom:12px; }
+  .verdict.pass { background:rgba(200,240,64,.1); color:var(--lime); }
+  .verdict.fail { background:rgba(255,90,90,.1); color:var(--red); }
+  .back { background:none; border:1px solid var(--line); color:var(--dim); border-radius:8px; padding:7px 12px; cursor:pointer; font-size:12px; }
+  .foot-note { text-align:center; color:var(--dim); font-size:10px; margin-top:9px; }
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand"><span class="mark">✈</span><span>TestPilot</span></div>
+    <button class="x" id="close" aria-label="Close">✕</button>
+  </header>
+
+  <main>
+    <div class="target">Testing: <b id="target">this page</b></div>
+
+    <div id="picker">
+      <h2>Tests available for this app</h2>
+      <div class="tests" id="tests"></div>
+
+      <div class="authrow">
+        <div>
+          <label for="authtog">Test as the logged-in user</label>
+          <div class="sub">Uses this app's own session so TestPilot tests behind the login. Nothing is stored.</div>
+        </div>
+        <span class="sw"><input type="checkbox" id="authtog"><span class="track"></span></span>
+      </div>
+
+      <textarea id="desc" placeholder="Describe the test in plain language…"></textarea>
+    </div>
+
+    <div class="log" id="log"></div>
+  </main>
+
+  <footer>
+    <button class="run" id="run" disabled>Pick a test</button>
+    <div class="foot-note" id="foot">Powered by TestPilot · your app, tested in one click</div>
+  </footer>
+
+<script>
+(function () {
+  'use strict';
+  var PARENT = null;               // set from init message origin
+  var ctx = { token:'', target:'', title:'' };
+  var auth = null;                 // captured only if user opts in
+  var selected = null;
+  var els = {
+    tests: document.getElementById('tests'), target: document.getElementById('target'),
+    run: document.getElementById('run'), log: document.getElementById('log'),
+    picker: document.getElementById('picker'), desc: document.getElementById('desc'),
+    authtog: document.getElementById('authtog'), foot: document.getElementById('foot'),
+    close: document.getElementById('close')
+  };
+
+  var TESTS = [
+    { id:'lifecycle', ico:'🔄', t:'Full lifecycle', d:'Walk the primary end-to-end flow and report any breakage.' },
+    { id:'security',  ico:'🔒', t:'Security scan', d:'Check cross-account data access (BOLA/IDOR) and auth gaps.' },
+    { id:'thispage',  ico:'📄', t:'Test this page', d:'Exercise the buttons, forms, and states on the current page.' },
+    { id:'describe',  ico:'✎', t:'Describe a new test', d:'Tell TestPilot what to check in plain language.' }
+  ];
+
+  function send(type, extra) {
+    if (!PARENT) return;
+    var m = Object.assign({ tp:1, type:type }, extra || {});
+    parent.postMessage(m, PARENT);
+  }
+
+  TESTS.forEach(function (test) {
+    var b = document.createElement('button');
+    b.className = 'test'; b.dataset.id = test.id;
+    b.innerHTML = '<div class="t"><span class="ico">' + test.ico + '</span>' + test.t + '</div><div class="d">' + test.d + '</div>';
+    b.onclick = function () {
+      selected = test.id;
+      [].forEach.call(els.tests.children, function (c) { c.classList.remove('sel'); });
+      b.classList.add('sel');
+      els.desc.style.display = test.id === 'describe' ? 'block' : 'none';
+      els.run.disabled = false;
+      els.run.textContent = 'Run ' + test.t;
+    };
+    els.tests.appendChild(b);
+  });
+
+  els.authtog.addEventListener('change', function () {
+    if (els.authtog.checked) send('requestAuth');
+    else auth = null;
+  });
+  els.close.addEventListener('click', function () { send('close'); });
+
+  window.addEventListener('message', function (ev) {
+    if (!ev.data || ev.data.tp !== 1) return;
+    var m = ev.data;
+    if (m.type === 'init') {
+      PARENT = ev.origin;
+      ctx.token = m.token || ''; ctx.target = m.target || ''; ctx.title = m.title || '';
+      els.target.textContent = ctx.title || ctx.target || 'this page';
+    } else if (m.type === 'auth') {
+      auth = m.auth || null;
+      if (!auth || (!auth.bearer && !Object.keys(auth.storage || {}).length)) {
+        els.authtog.checked = false; auth = null;
+        els.foot.textContent = "Couldn't read a session token from this app — running logged-out.";
+      }
+    }
+  });
+
+  function line(cls, n, text) {
+    var d = document.createElement('div');
+    d.className = 'ln ' + (cls || '');
+    d.innerHTML = '<span class="n">' + (n != null ? n : '·') + '</span><span>' + String(text).replace(/</g, '&lt;') + '</span>';
+    els.log.appendChild(d);
+    els.log.scrollTop = els.log.scrollHeight;
+  }
+
+  els.run.addEventListener('click', function () {
+    if (!selected) return;
+    els.picker.style.display = 'none';
+    els.log.style.display = 'flex';
+    els.run.disabled = true;
+    els.run.textContent = 'Running…';
+    line('info', null, 'Starting ' + selected + ' test on ' + (ctx.target || 'this page') + '…');
+
+    fetch('/api/embed/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: ctx.token,
+        target: ctx.target,
+        kind: selected,
+        description: selected === 'describe' ? els.desc.value : '',
+        auth: auth || null
+      })
+    }).then(function (r) { return r.json(); }).then(function (res) {
+      if (res.error) { line('fail', null, res.error); finish(null); return; }
+      stream(res.testId);
+    }).catch(function (e) { line('fail', null, 'Network error: ' + e.message); finish(null); });
+  });
+
+  function stream(testId) {
+    var es = new EventSource('/api/test/' + testId + '/stream');
+    var n = 0;
+    es.onmessage = function (ev) {
+      var d; try { d = JSON.parse(ev.data); } catch (e) { return; }
+      if (d.type === 'summary' || d.type === 'done') { es.close(); finish(d); return; }
+      if (d.type === 'error') { line('fail', ++n, d.message || 'error'); return; }
+      var cls = d.status === 'pass' ? 'pass' : d.status === 'fail' ? 'fail' : 'info';
+      line(cls, ++n, d.message || d.action || d.type || '…');
+    };
+    es.onerror = function () { es.close(); finish({ type:'done' }); };
+  }
+
+  function finish(summary) {
+    els.run.style.display = 'none';
+    var v = document.createElement('div');
+    var bugs = summary && (summary.summary ? summary.summary.bugs : summary.bugs);
+    var pass = !bugs;
+    v.className = 'verdict ' + (pass ? 'pass' : 'fail');
+    v.textContent = pass ? '✅ Test complete — no issues found' : '⚠ ' + bugs + ' issue' + (bugs === 1 ? '' : 's') + ' found';
+    els.log.parentNode.insertBefore(v, els.log);
+    var back = document.createElement('button');
+    back.className = 'back'; back.textContent = '← Run another test';
+    back.style.marginTop = '12px';
+    back.onclick = function () { location.reload(); };
+    els.log.appendChild(back);
+  }
+
+  // Tell the host we're ready to receive init (token + target URL).
+  send('ready');
+})();
+</script>
+</body>
+</html>

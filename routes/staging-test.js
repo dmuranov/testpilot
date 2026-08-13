@@ -111,7 +111,7 @@ export async function runStagingSafeTests(
 
     // ── 5. Run each scenario ──
     const testRunResults = [];
-    const reportId = `rpt_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
+    const reportId = `rpt_${randomUUID().replace(/-/g, '')}`;
     let regressions = 0;
     let fixes = 0;
     let unchanged = 0;
@@ -120,7 +120,7 @@ export async function runStagingSafeTests(
     let totalFailed = 0;
 
     for (const scenario of scenarios) {
-      const testId = `tst_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
+      const testId = `tst_${randomUUID().replace(/-/g, '')}`;
 
       // Build scenario description string for runAgentTest
       const scenarioText = scenario.description ||
@@ -147,7 +147,7 @@ export async function runStagingSafeTests(
         // retried either; only "couldn't test" gets a second chance.
         if (decision.outcome === 'inconclusive') {
           console.log(`[Staging Safe] ${scenario.name}: inconclusive (${decision.reason}) — auto-retrying once`);
-          const retryId = `tst_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
+          const retryId = `tst_${randomUUID().replace(/-/g, '')}`;
           testResult = await runAgentTest(
             retryId, appKnowledge, scenarioText, credentials,
             app.anthropic_api_key || process.env.ANTHROPIC_SUPPORT_KEY
@@ -316,7 +316,7 @@ export async function runStagingSafeTests(
       await mailer({
         from: 'TestPilot Staging Safe <hello@testpilotapp.dev>',
         to: app.user_email,
-        subject: `${statusEmoji} ${app.name}: ${statusLine} — ${commitMessage.slice(0, 50)}`,
+        subject: `${statusEmoji} ${app.name}: ${statusLine} — ${commitMessage.slice(0, 50)}`.replace(/\s+/g, " ").trim(),
         html: `
           <div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:32px 20px">
             <h2 style="font-size:20px;font-weight:800;margin-bottom:4px">

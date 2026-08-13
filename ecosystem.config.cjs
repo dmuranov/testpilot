@@ -5,7 +5,11 @@
 //
 // Phase-1 [P0] Auto-Restart Policy:
 //   - autorestart: restart on any crash (default, made explicit).
-//   - max_memory_restart '500M': cap RSS so a memory leak can't take down the VM.
+//   - max_memory_restart '1800M': cap RSS so a real leak can't take down the VM,
+//     but high enough to fit MAX_CONCURRENT_SCANS (3) headless Chromium instances
+//     on this 3.8 GB box. The old 500M cap OOM-killed the process mid-scan whenever
+//     2-3 scans ran at once (each Chromium ~200-350M) — restarting killed every
+//     in-flight scan. 1800M leaves ~2 GB for the OS + page cache.
 //   - instances 1 + fork mode: REQUIRED, not cluster. The engine holds in-memory
 //     state (sessions Map, activeScans counter, platformMaps, globalBrain). Cluster
 //     mode with >1 worker would fragment that state across processes. Single fork only.
@@ -21,7 +25,7 @@ module.exports = {
       instances: 1,
       exec_mode: 'fork',
       autorestart: true,
-      max_memory_restart: '500M',
+      max_memory_restart: '1800M',
       env: {
         NODE_ENV: 'production',
       },

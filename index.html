@@ -587,7 +587,7 @@ async function ssStartLearn() {
   const password = document.getElementById('ss-cred-password')?.value?.trim();
 
   if (!email || !password) {
-    alert('Please enter test credentials first');
+    tpToast('Please enter test credentials first');
     return;
   }
 
@@ -639,14 +639,14 @@ async function ssSuggestScenarios() {
     });
     if (!res.ok) {
       const errText = await res.text().catch(() => '');
-      alert(`Couldn't suggest scenarios (${res.status}): ${errText.slice(0, 200) || "Make sure you've learned the app first."}`);
+      tpToast(`Couldn't suggest scenarios (${res.status}): ${errText.slice(0, 200) || "Make sure you've learned the app first."}`);
       return;
     }
     const data = await res.json();
     const scenarios = data.scenarios || [];
     if (scenarios.length === 0) {
       const skipped = data.skipped_existing || 0;
-      alert(skipped > 0
+      tpToast(skipped > 0
         ? `All ${skipped} suggested scenarios already exist for this app.`
         : `No scenarios could be generated. Sources used: ${JSON.stringify(data.sources)}.`);
       return;
@@ -656,7 +656,7 @@ async function ssSuggestScenarios() {
     render();
   } catch (e) {
     console.error('ssSuggestScenarios failed:', e);
-    alert(`Network error: ${e.message}`);
+    tpToast(`Network error: ${e.message}`);
   } finally {
     if (btn) { btn.disabled = false; if (originalText) btn.textContent = originalText; }
   }
@@ -670,7 +670,7 @@ function ssAddScenarioManual() {
 async function ssSaveNewScenario() {
   const name = document.getElementById('ss-new-name')?.value?.trim();
   const desc = document.getElementById('ss-new-desc')?.value?.trim();
-  if (!name || !desc) { alert('Name and description required'); return; }
+  if (!name || !desc) { tpToast('Name and description required'); return; }
 
   const app = state.stagingSafe.app;
   const sc = {
@@ -1918,13 +1918,14 @@ function hasFeature(feature) {
   const plan = currentUser?.plan || 'free';
   // Funnel rework: free + onerun get scenario only; everything else is paywalled.
   const features = {
-    free:    ['scenario'],
-    onerun:  ['scenario'],
-    starter: ['scenario', 'interactive', 'stagingsafe'],
-    pro:     ['scenario', 'interactive', 'multirole', 'stagingsafe'],
-    agency:  ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe'],
-    admin:   ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe'],
-    tester:  ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe']
+    free:    ['scenario', 'security', 'sweep'],
+    onerun:  ['scenario', 'multirole', 'security', 'sweep'],
+    solo:    ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe', 'sweep'],
+    starter: ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe', 'sweep'],
+    pro:     ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe', 'sweep'],
+    agency:  ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe', 'sweep'],
+    admin:   ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe', 'sweep'],
+    tester:  ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe', 'sweep']
   };
   return (features[plan] || features.free).includes(feature);
 }
@@ -1932,7 +1933,7 @@ function hasFeature(feature) {
 function gatedLearn() {
   const plan = currentUser?.plan || 'free';
   // Funnel rework: free + onerun cap at 1 app, starter at 3.
-  const limits = { free: 1, onerun: 1, starter: 3, pro: 10, agency: 999, admin: 999, tester: 999 };
+  const limits = { free: 1, onerun: 1, solo: 1, starter: 3, pro: 10, agency: 999, admin: 999, tester: 999 };
   const limit = limits[plan] ?? 999;
   if (state.apps.length >= limit) {
     showFunnelPaywall('app_slot');
@@ -1956,24 +1957,29 @@ function showFunnelPaywall(reason) {
         <div id="fp-sub" style="font-size:13px;color:#8a8a8a;margin-bottom:24px;font-family:monospace"></div>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:20px">
           <div onclick="funnelCheckout('onerun')" style="background:#080808;border:1px solid #2a2a2a;border-radius:5px;padding:18px 16px;cursor:pointer">
-            <div style="font-size:11px;font-family:monospace;color:#c8f040;letter-spacing:1px;margin-bottom:6px">ONE TIME RUN</div>
+            <div style="font-size:11px;font-family:monospace;color:#c8f040;letter-spacing:1px;margin-bottom:6px">ONE RUN</div>
             <div style="font-size:24px;font-weight:800">€5</div>
-            <div style="font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace">1 app · unlimited scenario tests</div>
+            <div style="font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace">1 app · 1 run · every feature · repeatable</div>
           </div>
-          <div onclick="funnelCheckout('starter')" style="background:#080808;border:1px solid rgba(200,240,64,0.5);border-radius:5px;padding:18px 16px;cursor:pointer">
+          <div onclick="funnelCheckout('solo')" style="background:#080808;border:1px solid rgba(200,240,64,0.5);border-radius:5px;padding:18px 16px;cursor:pointer">
+            <div style="font-size:11px;font-family:monospace;color:#c8f040;letter-spacing:1px;margin-bottom:6px">SOLO</div>
+            <div style="font-size:24px;font-weight:800">€10<span style="font-size:11px;color:#8a8a8a;font-weight:400">/mo</span></div>
+            <div style="font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace">1 app · unlimited runs · every feature</div>
+          </div>
+          <div onclick="funnelCheckout('starter')" style="background:#080808;border:1px solid #2a2a2a;border-radius:5px;padding:18px 16px;cursor:pointer">
             <div style="font-size:11px;font-family:monospace;color:#c8f040;letter-spacing:1px;margin-bottom:6px">STARTER</div>
             <div style="font-size:24px;font-weight:800">€29<span style="font-size:11px;color:#8a8a8a;font-weight:400">/mo</span></div>
-            <div style="font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace">3 apps · all scenario + interactive</div>
+            <div style="font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace">3 apps · unlimited runs · every feature</div>
           </div>
           <div onclick="funnelCheckout('pro')" style="background:#080808;border:1px solid #2a2a2a;border-radius:5px;padding:18px 16px;cursor:pointer">
             <div style="font-size:11px;font-family:monospace;color:#c8f040;letter-spacing:1px;margin-bottom:6px">PRO</div>
             <div style="font-size:24px;font-weight:800">€149<span style="font-size:11px;color:#8a8a8a;font-weight:400">/mo</span></div>
-            <div style="font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace">10 apps · + multi-role</div>
+            <div style="font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace">10 apps · unlimited runs · every feature</div>
           </div>
           <div onclick="funnelCheckout('agency')" style="background:#080808;border:1px solid #2a2a2a;border-radius:5px;padding:18px 16px;cursor:pointer">
             <div style="font-size:11px;font-family:monospace;color:#c8f040;letter-spacing:1px;margin-bottom:6px">AGENCY</div>
             <div style="font-size:24px;font-weight:800">€249<span style="font-size:11px;color:#8a8a8a;font-weight:400">/mo</span></div>
-            <div style="font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace">unlimited · + security</div>
+            <div style="font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace">unlimited apps · every feature</div>
           </div>
         </div>
         <button onclick="closeFunnelPaywall()" style="background:transparent;color:#8a8a8a;border:1px solid #333;font-weight:400;font-size:13px;padding:10px;border-radius:3px;width:100%;cursor:pointer;font-family:inherit">Maybe later</button>
@@ -1984,11 +1990,13 @@ function showFunnelPaywall(reason) {
     free_run: 'That was your free run.',
     app_slot: 'You\'ve used your app slot.',
     feature: 'This feature requires a paid plan.',
+    onerun_exhausted: 'That run\'s used up.',
   };
   const subs = {
     free_run: '// to run more tests or learn another app, choose a plan',
     app_slot: '// upgrade to add more apps',
-    feature: '// scenario testing is included on every paid plan',
+    feature: '// flow testing is included on every paid plan',
+    onerun_exhausted: '// €5 for another single run, or go Solo — unlimited runs for €10/mo',
   };
   document.getElementById('fp-title').textContent = titles[reason] || titles.feature;
   document.getElementById('fp-sub').textContent = subs[reason] || subs.feature;
@@ -2007,8 +2015,8 @@ async function funnelCheckout(plan) {
     });
     const data = await res.json();
     if (data.url) window.location.href = data.url;
-    else alert(data.error || 'Could not start checkout');
-  } catch { alert('Network error — try again'); }
+    else tpToast(data.error || 'Could not start checkout');
+  } catch { tpToast('Network error — try again'); }
 }
 
 function gatedNavigate(view, feature) {
@@ -2221,11 +2229,19 @@ function render() {
           Learned Apps
         </button>
       </div>
-      <div class="nav-section">
+      <div class="nav-section" id="nav-testing">
         <label>Testing</label>
-        <button class="nav-btn ${state.view === 'test-run' || (state.view === 'apps' && state.selectedApp) ? 'active' : ''}" onclick="navigateToScenario()" data-tooltip="Run an AI-powered test described in plain English. TestPilot logs in, clicks through your app step by step, and reports bugs with screenshots.">
+        <button class="nav-btn ${state.view === 'security' ? 'active' : ''}" onclick="gatedNavigate('security', 'security')" data-tooltip="Multi-tenant security testing. Logs in as two different users and checks that User A's data is invisible to User B. Tests IDOR, URL manipulation, session leakage and API access.">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          Security Test ${!hasFeature('security') ? '<span style="font-size:9px;font-weight:700;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.3);border-radius:2px;padding:1px 5px;margin-left:4px">🔒 Agency</span>' : ''}
+        </button>
+        <button class="nav-btn ${state.view === 'test-run' || (state.view === 'apps' && state.selectedApp) ? 'active' : ''}" onclick="navigateToScenario()" data-tooltip="Test one flow through your app, described in plain English. TestPilot logs in, clicks through your app step by step, and reports bugs with screenshots.">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-          Scenario Test
+          Flow Test
+        </button>
+        <button class="nav-btn ${state.view === 'sweep' ? 'active' : ''}" onclick="gatedNavigate('sweep', 'sweep')" data-tooltip="Clicks every button, link and toggle on your app and reports what is dead or erroring. No scenario needed — it asks before touching anything destructive.">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+          Check Everything
         </button>
         <button class="nav-btn ${state.view === 'chat' ? 'active' : ''}" onclick="gatedNavigate('chat', 'interactive')" data-tooltip="Control your app live through natural language. Type commands like 'Go to Clients, create Ivan Fernandez' and watch TestPilot execute them in real time.">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
@@ -2234,10 +2250,6 @@ function render() {
         <button class="nav-btn ${state.view === 'multirole' ? 'active' : ''}" onclick="gatedNavigate('multirole', 'multirole')" data-tooltip="Run the same app with multiple user roles sequentially. E.g. Admin creates a job, Contractor sees and accepts it — all in one automated test run.">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
           Multi-Role <span style="font-size:9px;font-weight:700;background:${hasFeature('multirole') ? 'rgba(251,191,36,0.15)' : 'rgba(239,68,68,0.1)'};color:${hasFeature('multirole') ? '#f59e0b' : '#ef4444'};border:1px solid ${hasFeature('multirole') ? 'rgba(251,191,36,0.3)' : 'rgba(239,68,68,0.3)'};border-radius:2px;padding:1px 5px;margin-left:4px">${hasFeature('multirole') ? 'BETA' : '🔒 Pro'}</span>
-        </button>
-        <button class="nav-btn ${state.view === 'security' ? 'active' : ''}" onclick="gatedNavigate('security', 'security')" data-tooltip="Multi-tenant security testing. Logs in as two different users and checks that User A's data is invisible to User B. Tests IDOR, URL manipulation, session leakage and API access.">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-          Security ${!hasFeature('security') ? '<span style="font-size:9px;font-weight:700;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.3);border-radius:2px;padding:1px 5px;margin-left:4px">🔒 Agency</span>' : ''}
         </button>
         <button class="nav-btn ${state.view === 'staging-safe' ? 'active' : ''}"
           onclick="gatedNavigate('staging-safe', 'stagingsafe')"
@@ -2249,9 +2261,21 @@ function render() {
           </svg>
           Staging Safe <span style="font-size:9px;font-weight:700;background:${hasFeature('stagingsafe') ? 'rgba(251,191,36,0.15)' : 'rgba(239,68,68,0.1)'};color:${hasFeature('stagingsafe') ? '#f59e0b' : '#ef4444'};border:1px solid ${hasFeature('stagingsafe') ? 'rgba(251,191,36,0.3)' : 'rgba(239,68,68,0.3)'};border-radius:2px;padding:1px 5px;margin-left:4px">${hasFeature('stagingsafe') ? 'BETA' : '🔒 Starter'}</span>
         </button>
+        <button class="nav-btn ${state.view === 'widget' ? 'active' : ''}" onclick="navigate('widget')" data-tooltip="Embed a one-line 'Test' button in your own app. You or your team members can run TestPilot on the live page. Runs on your own Anthropic key — your secret key never touches the browser.">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 17l6-6-6-6"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+          Widget <span style="font-size:9px;font-weight:700;background:rgba(251,191,36,0.15);color:#f59e0b;border:1px solid rgba(251,191,36,0.3);border-radius:2px;padding:1px 5px;margin-left:4px">BETA</span>
+        </button>
+        <button class="nav-btn ${state.view === 'schedules' ? 'active' : ''}" onclick="navigate('schedules')" data-tooltip="Re-run a scenario on a schedule (daily/weekly). TestPilot emails you the moment something that used to pass starts failing — catching regressions from your own changes AND silent platform updates before your users do.">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><polyline points="9 15 11 17 15 13"/></svg>
+          Scheduled Runs <span style="font-size:9px;font-weight:700;background:rgba(251,191,36,0.15);color:#f59e0b;border:1px solid rgba(251,191,36,0.3);border-radius:2px;padding:1px 5px;margin-left:4px">BETA</span>
+        </button>
         <button class="nav-btn ${state.view === 'history' ? 'active' : ''}" onclick="navigate('history')" data-tooltip="Full history of all test runs — status, bugs found, steps completed. Click any test to see the full step-by-step log with screenshots.">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
           Test History
+        </button>
+        <button class="nav-btn" onclick="openGuide()" data-tooltip="Step-by-step walkthrough. Highlights each control and tells you what to do next — start it again any time.">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+          Guide Me
         </button>
         <button class="nav-btn" onclick="showSupportModal()" data-tooltip="Report an issue or ask a question. Claude will pre-diagnose your problem and we'll get back to you directly.">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
@@ -2276,7 +2300,8 @@ function render() {
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
           <span style="font-family:'DM Mono',monospace;font-size:10px;color:var(--text-muted)">Plan: <strong style="color:var(--accent)">${(currentUser.plan || 'free').toUpperCase()}</strong></span>
           ${(!currentUser.plan || currentUser.plan === 'free' || currentUser.plan === 'onerun') ? `<button class="btn btn-primary" style="font-size:10px;padding:3px 10px" onclick="showUpgradeModal()">Upgrade ↑</button>` : ''}
-        </div>` : ''}
+        </div>
+        ${currentUser.plan && currentUser.plan !== 'free' ? `<button class="btn btn-ghost btn-sm" style="width:100%;font-size:10px;padding:6px;margin-bottom:6px" onclick="openBillingPortal()">📄 Billing &amp; invoices</button>` : ''}` : ''}
         <label style="font-size:10px;text-transform:uppercase;letter-spacing:1.2px;color:#f59e0b;display:block;margin-bottom:6px">Claude API Key</label>
         ${hasApiKey() ? `
           <div style="display:flex;align-items:center;gap:6px">
@@ -2314,8 +2339,11 @@ function renderView() {
     case 'history': return renderHistory();
     case 'chat': return renderChat();
     case 'multirole': return renderMultiRole();
+    case 'sweep': return renderSweep();
     case 'security': return renderSecurity();
     case 'staging-safe': return renderStagingSafe();
+    case 'widget': return renderWidget();
+    case 'schedules': return renderSchedules();
     default: return renderApps();
   }
 }
@@ -2360,11 +2388,302 @@ function renderApps() {
           ${a.summary?.language ? `<span>🌐 ${a.summary.language}</span>` : ''}
         </div>
         <div style="margin-top:14px;display:flex;gap:8px">
-          <button class="btn btn-primary" style="font-size:12px;padding:7px 16px" onclick="event.stopPropagation();startTestForApp('${a.appId || ''}')">▶ Run Scenario Test</button>
+          <button class="btn btn-primary" style="font-size:12px;padding:7px 16px" onclick="event.stopPropagation();startTestForApp('${a.appId || ''}')">▶ Run Flow Test</button>
           <button class="btn btn-ghost" style="font-size:12px;padding:7px 14px" onclick="event.stopPropagation();viewApp('${a.appId || ''}')">View Details</button>
         </div>
       </div>
     `).join('')}`;
+}
+
+function tpEsc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+function renderWidget() {
+  // Lazy-load the caller's existing tokens once when the view opens.
+  if (state.widgetTokens === undefined && !state.widgetTokensLoading) { state.widgetTokensLoading = true; loadWidgetTokens(); }
+  const r = state.widgetResult;
+  const toks = Array.isArray(state.widgetTokens) ? state.widgetTokens : [];
+  return `
+    <div class="page-header"><h2>Embeddable Widget <span style="font-size:11px;font-weight:700;background:rgba(251,191,36,0.15);color:#f59e0b;border:1px solid rgba(251,191,36,0.3);border-radius:3px;padding:2px 7px;vertical-align:middle">BETA</span></h2></div>
+    <p style="color:var(--text-dim);max-width:620px;margin:-6px 0 20px;font-size:13px;line-height:1.6">
+      Drop a single line of code into your app and a floating <strong>“Test”</strong> button appears — so you or your team members can run
+      TestPilot on the live page, powered by <strong>your own Anthropic key</strong>. Connect an app below to get your snippet.
+    </p>
+
+    <!-- ── DATA-SAFETY / TRUST PANEL ── -->
+    <div class="card" style="max-width:620px;border:1px solid rgba(74,222,128,0.28);background:rgba(74,222,128,0.05)">
+      <div class="card-title" style="margin-bottom:14px;display:flex;align-items:center;gap:8px">🔐 Your data stays yours — here's exactly how</div>
+      <ul style="list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:12px;font-size:12.5px;line-height:1.55;color:var(--text-dim)">
+        <li>🔑 <strong style="color:var(--text)">Your secret key never touches the browser.</strong> You connect your Anthropic key once, here. We validate it, then store it <strong>encrypted (AES-256-GCM)</strong> on our server. The embed only ever carries a public <code>pk_</code> token — never your secret key. Revoke it anytime.</li>
+        <li>💳 <strong style="color:var(--text)">Bring your own key — you pay Anthropic directly.</strong> Every test runs on <em>your</em> key. We don't resell or mark up AI usage, and Anthropic's API doesn't train on your data.</li>
+        <li>🤫 <strong style="color:var(--text)">Nothing is captured silently.</strong> The widget reads your app's login token <em>only</em> if a user switches on “Test as logged-in user.” It's read first-party, sent over HTTPS, and used only to run that one test. The page URL and token pass in-memory (postMessage) — never in the iframe URL, referrer, or browser history.</li>
+        <li>👁️ <strong style="color:var(--text)">We test your app — we don't harvest it.</strong> TestPilot loads and clicks through your app the way a QA tester would, and stores only what's needed to show you the report (the learned page map + run screenshots), scoped to your account. We never sell or share it, and you can delete it.</li>
+      </ul>
+    </div>
+
+    <!-- ── CONNECT FORM ── -->
+    <div class="card" style="max-width:620px;margin-top:18px">
+      <div class="card-title" style="margin-bottom:16px">Connect an app</div>
+      <div class="form-group">
+        <label>Your Anthropic API key *</label>
+        <input class="form-input" id="widget-key" type="password" placeholder="sk-ant-..." autocomplete="off" />
+        <div style="font-size:11px;color:var(--text-muted);margin-top:4px;font-family:'DM Mono',monospace">// stored encrypted, never shown in the browser · get one at console.anthropic.com</div>
+      </div>
+      <div class="form-group">
+        <label>App URL *</label>
+        <input class="form-input" id="widget-url" placeholder="https://your-app.com" />
+      </div>
+      <div class="form-group" style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+        <input type="checkbox" id="widget-no-login" onchange="toggleWidgetLogin()" style="width:16px;height:16px;accent-color:var(--accent);cursor:pointer" />
+        <label for="widget-no-login" style="cursor:pointer;font-size:13px;color:var(--text-dim);margin:0">No login required — app is publicly accessible</label>
+      </div>
+      <div id="widget-login-fields">
+        <div class="form-group">
+          <label>Test login email *</label>
+          <input class="form-input" id="widget-email" placeholder="testuser@your-app.com" autocomplete="off" />
+        </div>
+        <div class="form-group">
+          <label>Test login password *</label>
+          <input class="form-input" id="widget-password" type="password" placeholder="••••••••" autocomplete="off" />
+        </div>
+      </div>
+      <button class="btn btn-primary" onclick="connectWidget()" id="widget-btn" ${state.widgetConnecting ? 'disabled' : ''}>
+        ${state.widgetConnecting ? '<span class="loader"></span> Connecting…' : '✈ Generate my widget'}
+      </button>
+      ${state.widgetError ? `<div style="margin-top:12px;color:#ef4444;font-size:12px">${tpEsc(state.widgetError)}</div>` : ''}
+
+      ${r ? `
+        <div style="margin-top:20px;padding-top:18px;border-top:1px solid var(--border)">
+          <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">${r.learning ? '⏳ <strong>Learning your app now</strong> (a minute or two). Your widget works the moment it finishes — you can paste it already.' : '✅ <strong>Your widget is ready.</strong>'} Paste this one line into your app's HTML, just before <code>&lt;/body&gt;</code>:</div>
+          <div style="position:relative;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;font-family:'DM Mono',monospace;font-size:11.5px;color:var(--text);overflow-x:auto;white-space:pre-wrap;word-break:break-all">${tpEsc(r.snippet)}</div>
+          <button class="btn btn-ghost" style="margin-top:10px;font-size:12px" onclick="copyWidgetSnippet()">📋 Copy snippet</button>
+          <div style="margin-top:14px;padding:12px 14px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);font-size:11.5px;color:var(--text-dim);line-height:1.6">
+            🔒 <strong style="color:var(--text)">The button is hidden from your end users by default.</strong> It only appears when your app tells TestPilot a team member is present. Where your app knows an admin/teammate is logged in, call:
+            <div style="margin:8px 0;font-family:'DM Mono',monospace;color:var(--accent);font-size:11px">window.TestPilot?.show()&nbsp;&nbsp;<span style="color:var(--text-muted)">// and .hide() on logout</span></div>
+            Prefer no code? Add <code>data-tp-gate="always"</code> for a staff-only/internal app, or <code>data-tp-gate="query"</code> to reveal it with <code>?tptest=1</code>. Runs are rate-limited per widget to protect your Anthropic budget.
+          </div>
+        </div>
+      ` : ''}
+    </div>
+
+    <!-- ── EXISTING WIDGETS ── -->
+    <div class="card" style="max-width:620px;margin-top:18px">
+      <div class="card-title" style="margin-bottom:14px">Your connected apps ${toks.length ? `<span style="color:var(--text-muted);font-weight:400">(${toks.length})</span>` : ''}</div>
+      ${!toks.length ? `<div style="font-size:12.5px;color:var(--text-muted)">No widgets yet. Connect an app above to create one.</div>` : toks.map(t => `
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--border)">
+          <div style="min-width:0">
+            <div style="font-size:13px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${tpEsc(t.appUrl)}</div>
+            <div style="font-size:11px;color:var(--text-muted);font-family:'DM Mono',monospace">${tpEsc((t.token || '').slice(0, 16))}… · ${t.learning ? '⏳ learning' : t.learnError ? '⚠️ ' + tpEsc(t.learnError.slice(0, 40)) : '✅ ready'}</div>
+          </div>
+          <button class="btn btn-danger btn-sm" style="font-size:11px" onclick="revokeWidgetToken('${tpEsc(t.token)}')">Revoke</button>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function toggleWidgetLogin() {
+  const noLogin = document.getElementById('widget-no-login')?.checked;
+  const f = document.getElementById('widget-login-fields');
+  if (f) f.style.display = noLogin ? 'none' : 'block';
+}
+
+async function loadWidgetTokens() {
+  try {
+    const res = await fetch(API + '/api/embed/tokens');
+    if (res.ok) { const data = await res.json(); state.widgetTokens = data.tokens || []; }
+    else state.widgetTokens = [];
+  } catch { state.widgetTokens = []; }
+  state.widgetTokensLoading = false;
+  render();
+}
+
+async function connectWidget() {
+  state.widgetError = null;
+  const anthropicKey = document.getElementById('widget-key')?.value?.trim();
+  const appUrl = document.getElementById('widget-url')?.value?.trim();
+  const noLogin = document.getElementById('widget-no-login')?.checked;
+  const email = noLogin ? '' : document.getElementById('widget-email')?.value?.trim();
+  const password = noLogin ? '' : document.getElementById('widget-password')?.value;
+  if (!anthropicKey || !/^sk-ant-/.test(anthropicKey)) { state.widgetError = 'Enter a valid Anthropic API key (sk-ant-…).'; return render(); }
+  if (!appUrl) { state.widgetError = 'Enter the URL of the app you want to embed the widget in.'; return render(); }
+  if (!noLogin && (!email || !password)) { state.widgetError = 'Enter a test login so we can crawl past the sign-in wall — or check “No login required” if it\'s public.'; return render(); }
+
+  state.widgetConnecting = true; render();
+  try {
+    const res = await fetch(API + '/api/embed/connect', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ anthropicKey, appUrl, email, password }),
+    });
+    const data = await res.json();
+    if (!res.ok) { state.widgetError = data.error || 'Could not connect this app.'; }
+    else { state.widgetResult = data; state.widgetError = null; loadWidgetTokens(); }
+  } catch (e) { state.widgetError = 'Network error — try again.'; }
+  state.widgetConnecting = false; render();
+}
+
+async function revokeWidgetToken(token) {
+  try {
+    await fetch(API + '/api/embed/revoke', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) });
+  } catch {}
+  if (state.widgetResult && state.widgetResult.token === token) state.widgetResult = null;
+  loadWidgetTokens();
+}
+
+function copyWidgetSnippet() {
+  const s = state.widgetResult?.snippet;
+  if (!s) return;
+  navigator.clipboard?.writeText(s).then(() => { tpToast('Snippet copied — paste it before </body> in your app.'); }).catch(() => {});
+}
+
+function renderSchedules() {
+  if (state.schedules === undefined && !state.schedulesLoading) { state.schedulesLoading = true; loadSchedules(); }
+  const list = Array.isArray(state.schedules) ? state.schedules : [];
+  const apps = state.apps || [];
+  const freqLabel = (h) => (h % 168 === 0 ? 'Weekly' : h === 24 ? 'Daily' : h === 12 ? 'Every 12h' : h === 6 ? 'Every 6h' : 'Every ' + h + 'h');
+  const rel = (iso) => { if (!iso) return '—'; const d = (Date.now() - new Date(iso)) / 1000; if (d < 60) return 'just now'; if (d < 3600) return Math.floor(d/60) + 'm ago'; if (d < 86400) return Math.floor(d/3600) + 'h ago'; return Math.floor(d/86400) + 'd ago'; };
+  const until = (iso) => { if (!iso) return '—'; const d = (new Date(iso) - Date.now()) / 1000; if (d <= 0) return 'due now'; if (d < 3600) return 'in ' + Math.floor(d/60) + 'm'; if (d < 86400) return 'in ' + Math.floor(d/3600) + 'h'; return 'in ' + Math.floor(d/86400) + 'd'; };
+
+  return `
+    <div class="page-header"><h2>Scheduled Runs <span style="font-size:11px;font-weight:700;background:rgba(251,191,36,0.15);color:#f59e0b;border:1px solid rgba(251,191,36,0.3);border-radius:3px;padding:2px 7px;vertical-align:middle">BETA</span></h2></div>
+    <p style="color:var(--text-dim);max-width:640px;margin:-6px 0 20px;font-size:13px;line-height:1.6">
+      Pick an app and describe a flow in plain English. TestPilot re-runs it on a schedule and <strong>emails you the moment something that used to pass starts failing</strong> — so you catch a break from your own change <em>or</em> a silent platform update <strong>before your users do</strong>. Runs on your own Anthropic key; fast recipe-replay reuses a known-good run.
+    </p>
+
+    ${apps.length === 0 ? `
+      <div class="empty-state">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+        <h3>Learn an app first</h3>
+        <p>You can only schedule a flow on an app TestPilot has already learned.</p>
+        <button class="btn btn-primary" onclick="navigate('learn')">Learn an App</button>
+      </div>
+    ` : `
+    <!-- ── CREATE FORM ── -->
+    <div class="card" style="max-width:640px">
+      <div class="card-title" style="margin-bottom:16px">New schedule</div>
+      <div class="form-group">
+        <label>App</label>
+        <select class="form-input" id="sched-app">
+          ${apps.map(a => `<option value="${tpEsc(a.appId || '')}">${tpEsc(a.summary?.appName || a.url || a.appId)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="form-group">
+        <label>What to test (plain English)</label>
+        <textarea class="form-input" id="sched-scenario" rows="3" placeholder="e.g. Log in, create a new project, and confirm it appears in the projects list."></textarea>
+      </div>
+      <div class="form-group">
+        <label>How often</label>
+        <select class="form-input" id="sched-freq">
+          <option value="24" selected>Daily</option>
+          <option value="12">Every 12 hours</option>
+          <option value="6">Every 6 hours</option>
+          <option value="168">Weekly</option>
+        </select>
+      </div>
+      <div class="form-group" style="display:flex;align-items:flex-start;gap:10px;margin-bottom:12px">
+        <input type="checkbox" id="sched-repeatable" checked style="width:16px;height:16px;margin-top:2px;accent-color:var(--accent);cursor:pointer" />
+        <label for="sched-repeatable" style="cursor:pointer;font-size:12.5px;color:var(--text-dim);margin:0;line-height:1.5">Make this repeatable — if the flow needs starting data, TestPilot creates it (tagged <code>TP-TEST</code>) and deletes what it created afterward, so every run is comparable. <strong>Only removes data it created this run.</strong> Uncheck for a strict read-only run.</label>
+      </div>
+      <div class="form-group">
+        <label>Alert email <span style="color:var(--text-muted);font-weight:400">(optional — defaults to your account)</span></label>
+        <input class="form-input" id="sched-alert" placeholder="you@example.com" autocomplete="off" />
+      </div>
+      <details style="margin:2px 0 14px">
+        <summary style="cursor:pointer;font-size:12.5px;color:var(--text-dim)">App needs a login? (advanced)</summary>
+        <div class="form-group" style="margin-top:12px">
+          <label>Paste a session (Playwright storageState or a cookies array)</label>
+          <textarea class="form-input" id="sched-session" rows="3" placeholder='{"cookies":[...],"origins":[...]}' style="font-family:'DM Mono',monospace;font-size:11px"></textarea>
+          <div style="font-size:11px;color:var(--text-muted);margin-top:4px;line-height:1.5">Stored <strong>encrypted</strong>, used only to run your scan. We don't persist target passwords. Note: sessions expire — if your app logs the session out, re-paste a fresh one. Leave blank for public apps.</div>
+        </div>
+      </details>
+      <button class="btn btn-primary" onclick="createSchedule()" id="sched-btn" ${state.scheduleCreating ? 'disabled' : ''}>
+        ${state.scheduleCreating ? '<span class="loader"></span> Creating…' : '＋ Create schedule'}
+      </button>
+      ${state.scheduleError ? `<div style="margin-top:12px;color:#ef4444;font-size:12px">${tpEsc(state.scheduleError)}</div>` : ''}
+    </div>
+
+    <!-- ── EXISTING SCHEDULES ── -->
+    <div class="card" style="max-width:640px;margin-top:18px">
+      <div class="card-title" style="margin-bottom:14px">Your schedules ${list.length ? `<span style="color:var(--text-muted);font-weight:400">(${list.length})</span>` : ''}</div>
+      ${!list.length ? `<div style="font-size:12.5px;color:var(--text-muted)">No schedules yet. Create one above.</div>` : list.map(s => {
+        const app = apps.find(a => a.appId === s.appId);
+        const name = app ? (app.summary?.appName || app.url || s.appId) : s.appId;
+        const st = s.lastStatus || 'pending';
+        const regressed = !!s.lastRegressionAt && s.lastRegressionAt === s.lastRunAt;
+        const color = regressed ? '#ef4444' : (st === 'completed' ? '#4ade80' : (st === 'pending' ? 'var(--text-muted)' : '#f59e0b'));
+        const badge = regressed ? '⚠ regressed' : (st === 'pending' ? 'not run yet' : st);
+        return `
+        <div style="padding:12px 0;border-bottom:1px solid var(--border)">
+          <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
+            <div style="min-width:0;flex:1">
+              <div style="font-size:13px;color:var(--text);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${tpEsc(name)}</div>
+              <div style="font-size:12px;color:var(--text-dim);margin:3px 0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${tpEsc(s.scenario || '')}</div>
+              <div style="font-size:11px;color:var(--text-muted);font-family:'DM Mono',monospace">
+                ${freqLabel(s.intervalHours)} · <span style="color:${color}">${tpEsc(badge)}</span>${s.lastBugs ? ` · ${s.lastBugs} bug${s.lastBugs > 1 ? 's' : ''}` : ''} · last ${rel(s.lastRunAt)} · next ${until(s.nextRunAt)} · ${s.runCount || 0} run${(s.runCount || 0) === 1 ? '' : 's'}
+              </div>
+              ${s.lastError ? `<div style="font-size:11px;color:#f59e0b;margin-top:3px">${tpEsc(s.lastError)}</div>` : ''}
+            </div>
+            <div style="display:flex;gap:6px;flex-shrink:0">
+              ${s.lastTestId ? `<button class="btn btn-ghost btn-sm" style="font-size:11px" onclick="viewTest('${tpEsc(s.lastTestId)}')">Last report</button>` : ''}
+              <button class="btn btn-ghost btn-sm" style="font-size:11px" onclick="runScheduleNow('${tpEsc(s.id)}')">Run now</button>
+              <button class="btn btn-danger btn-sm" style="font-size:11px" onclick="deleteSchedule('${tpEsc(s.id)}')">Delete</button>
+            </div>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>
+    `}
+  `;
+}
+
+async function loadSchedules() {
+  try {
+    const res = await fetch(API + '/api/schedules');
+    if (res.ok) { const d = await res.json(); state.schedules = d.schedules || []; }
+    else state.schedules = [];
+  } catch { state.schedules = []; }
+  state.schedulesLoading = false;
+  render();
+}
+
+async function createSchedule() {
+  state.scheduleError = null;
+  const appId = document.getElementById('sched-app')?.value;
+  const scenario = document.getElementById('sched-scenario')?.value?.trim();
+  const intervalHours = Number(document.getElementById('sched-freq')?.value) || 24;
+  const alertEmail = document.getElementById('sched-alert')?.value?.trim();
+  const sessionState = document.getElementById('sched-session')?.value?.trim();
+  if (!appId) { state.scheduleError = 'Pick an app.'; return render(); }
+  if (!scenario) { state.scheduleError = 'Describe what to test in plain English.'; return render(); }
+  const apiKey = getApiKey();
+  if (!apiKey) { state.scheduleError = 'Add your Anthropic API key in the sidebar first — scheduled runs use your own key.'; return render(); }
+  state.scheduleCreating = true; render();
+  try {
+    const _schedRepeatable = document.getElementById('sched-repeatable') ? document.getElementById('sched-repeatable').checked : true;
+    const res = await fetch(API + '/api/schedules', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appId, scenario: scenario + repeatableClause(_schedRepeatable), intervalHours, apiKey, alertEmail: alertEmail || undefined, sessionState: sessionState || undefined }),
+    });
+    const data = await res.json();
+    if (!res.ok) { state.scheduleError = data.error || 'Could not create the schedule.'; }
+    else { state.scheduleError = null; state.schedules = undefined; loadSchedules(); }
+  } catch (e) { state.scheduleError = 'Network error — try again.'; }
+  state.scheduleCreating = false; render();
+}
+
+async function deleteSchedule(id) {
+  if (!(await tpConfirm('Delete this schedule? It will stop running.'))) return;
+  try { await fetch(API + '/api/schedules/' + encodeURIComponent(id), { method: 'DELETE' }); } catch {}
+  state.schedules = undefined; loadSchedules();
+}
+
+async function runScheduleNow(id) {
+  try {
+    const res = await fetch(API + '/api/schedules/' + encodeURIComponent(id) + '/run-now', { method: 'POST' });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) tpToast(d.error || 'Could not start the run.');
+    else tpToast('Run started. Results land under this schedule; you\'ll be emailed only if it regresses.');
+  } catch { tpToast('Network error — try again.'); }
+  setTimeout(() => { state.schedules = undefined; loadSchedules(); }, 2000);
 }
 
 function renderLearn() {
@@ -2426,6 +2745,30 @@ function renderLearn() {
     </div>`;
 }
 
+async function loadCleanupConfig(appId) {
+  try { const r = await fetch(API + '/api/apps/' + encodeURIComponent(appId) + '/cleanup'); const d = await r.json(); state.cleanupConfig = d.cleanup || null; }
+  catch { state.cleanupConfig = null; }
+  state.cleanupConfigFor = appId; state._cleanupLoading = false; render();
+}
+async function saveCleanupConfig(appId) {
+  state.cleanupError = null;
+  const cleanupUrl = document.getElementById('cleanup-url') ? document.getElementById('cleanup-url').value.trim() : '';
+  const cleanupToken = document.getElementById('cleanup-token') ? document.getElementById('cleanup-token').value : '';
+  if (!cleanupUrl) { state.cleanupError = 'Enter your cleanup endpoint URL.'; return render(); }
+  try {
+    const r = await fetch(API + '/api/apps/' + encodeURIComponent(appId) + '/cleanup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.assign({ cleanupUrl }, cleanupToken ? { cleanupToken } : {})) });
+    const d = await r.json();
+    if (!r.ok) state.cleanupError = d.error || 'Could not save.';
+    else { state.cleanupConfig = d.cleanup; state.cleanupError = null; }
+  } catch { state.cleanupError = 'Network error — try again.'; }
+  render();
+}
+async function removeCleanupConfig(appId) {
+  if (!(await tpConfirm('Remove the cleanup endpoint? Runs will stop auto-deleting the test data they create.'))) return;
+  try { await fetch(API + '/api/apps/' + encodeURIComponent(appId) + '/cleanup', { method: 'DELETE' }); } catch {}
+  state.cleanupConfig = null; render();
+}
+
 function renderAppDetail() {
   const app = state.selectedApp;
   if (!app) return '<p>App not found</p>';
@@ -2443,6 +2786,7 @@ function renderAppDetail() {
         <div style="font-size:12px;color:var(--text-muted);font-family:'JetBrains Mono',monospace;margin-top:2px">${app.url}</div>
       </div>
       <div style="display:flex;gap:8px">
+        <button class="btn btn-ghost" onclick="showGuideChooser()">🧭 Guide Me</button>
         <button class="btn btn-primary" onclick="startTestForApp('${app.appId}')">▶ Run Test</button>
         <button class="btn btn-ghost" onclick="relearn('${app.appId}')">🔄 Re-learn</button>
         <button class="btn btn-danger btn-sm" onclick="deleteApp('${app.appId}')">Delete</button>
@@ -2467,6 +2811,48 @@ function renderAppDetail() {
         <div class="stat-label">Sections</div>
       </div>
     </div>
+
+    ${(() => {
+      if (state.cleanupConfigFor !== app.appId && !state._cleanupLoading) { state._cleanupLoading = true; loadCleanupConfig(app.appId); }
+      const cfg = (state.cleanupConfigFor === app.appId) ? state.cleanupConfig : null;
+      const on = cfg && cfg.cleanupUrl;
+      return `
+      <div class="card">
+        <div class="card-title" style="margin-bottom:6px">🧹 Test-data cleanup <span style="font-size:9px;font-weight:700;background:rgba(251,191,36,0.15);color:#f59e0b;border:1px solid rgba(251,191,36,0.3);border-radius:2px;padding:1px 5px;margin-left:4px">BETA</span> ${on ? '<span style="font-size:11px;color:var(--green,#4ade80);font-weight:600;margin-left:6px">● active</span>' : ''}</div>
+        <p style="font-size:12.5px;color:var(--text-dim);max-width:640px;margin:0 0 14px;line-height:1.6">
+          After each run, TestPilot POSTs the list of records it created to an endpoint you control, and your endpoint deletes them by id — deterministic, no clicking around. Configure it once; every future run cleans up after itself.
+        </p>
+        <div class="form-group">
+          <label>Your cleanup endpoint URL</label>
+          <input class="form-input" id="cleanup-url" placeholder="https://your-app.com/api/tp-cleanup" value="${on ? tpEsc(cfg.cleanupUrl) : ''}" />
+        </div>
+        <div class="form-group">
+          <label>Shared secret token ${cfg && cfg.hasToken ? '<span style="color:var(--text-muted);font-weight:400">(set — leave blank to keep it)</span>' : ''}</label>
+          <input class="form-input" id="cleanup-token" type="password" placeholder="a secret your endpoint also checks" autocomplete="off" />
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn btn-primary" onclick="saveCleanupConfig('${app.appId}')">${on ? 'Update endpoint' : 'Save endpoint'}</button>
+          ${on ? `<button class="btn btn-danger btn-sm" onclick="removeCleanupConfig('${app.appId}')">Remove</button>` : ''}
+        </div>
+        ${state.cleanupError ? `<div style="margin-top:10px;color:#ef4444;font-size:12px">${tpEsc(state.cleanupError)}</div>` : ''}
+        <details style="margin-top:16px">
+          <summary style="cursor:pointer;font-size:12.5px;color:var(--accent)">How to build the endpoint →</summary>
+          <div style="margin-top:12px;font-size:12.5px;color:var(--text-dim);line-height:1.7;max-width:660px">
+            <p style="margin:0 0 8px">TestPilot POSTs this to your URL after every run:</p>
+            <pre style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:12px;font-family:'DM Mono',monospace;font-size:11px;color:var(--text);overflow-x:auto;white-space:pre">POST &lt;your url&gt;
+{ "token": "…", "testId": "…", "appId": "…",
+  "entities": [ { "id": "…", "label": "TP-TEST-1", "url": "…" }, … ] }</pre>
+            <p style="margin:10px 0 0"><strong style="color:var(--text)">Your endpoint:</strong> verify the token, then delete each entity by <code>id</code>. TestPilot names records it creates <code>TP-TEST-*</code>, so a safe rule is <em>delete only records whose label starts with <code>TP-TEST</code></em>. Reply <code>{ "deleted": ["id1","id2"], "errors": [] }</code> so the report can show what was removed.</p>
+            <ul style="margin:10px 0 0;padding-left:18px">
+              <li><strong style="color:var(--text)">Bubble:</strong> a backend API workflow ("Detect data as JSON") that runs <em>Delete a list of things</em> on the ids.</li>
+              <li><strong style="color:var(--text)">Supabase:</strong> an Edge Function that checks the token and deletes by id.</li>
+              <li><strong style="color:var(--text)">Any stack:</strong> one authenticated REST route.</li>
+            </ul>
+            <p style="margin:10px 0 0;color:var(--text-muted)">Nothing is deleted unless <em>your</em> endpoint does it — you stay in control. No endpoint configured = the report just lists what was created so you can clean up manually.</p>
+          </div>
+        </details>
+      </div>`;
+    })()}
 
     ${sections.length ? `
     <div class="card">
@@ -2558,15 +2944,19 @@ function renderTestRun() {
     <div class="card" style="max-width:600px">
       <div class="form-group">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
-          <label>Test Scenario</label>
+          <label>What should happen?</label>
           ${isFreeUser && !freeRunUsed ? `<span id="scenario-word-counter" style="font-size:11px;font-family:'DM Mono',monospace;color:${wordLimitHit ? 'var(--red)' : wordCount > 80 ? 'var(--yellow)' : 'var(--text-muted)'}">${wordCount}/100 words ${wordLimitHit ? '— too long' : ''}</span>` : ''}
         </div>
         <textarea class="form-textarea" id="test-scenario" 
-          placeholder="Describe what to test in plain language. Example: Navigate to Clients, create a new client named 'Test User' with phone 123456789 and email test@test.com. Verify the client appears in the list." 
+          placeholder="${flowPlaceholder(app)}" 
           style="min-height:120px;${wordLimitHit ? 'border-color:var(--red)' : ''}"
           oninput="updateWordCount(this.value)"
         >${f.scenario || ''}</textarea>
         ${isFreeUser && !freeRunUsed ? `<div style="font-size:11px;font-family:'DM Mono',monospace;color:var(--text-muted);margin-top:4px">// free run limit: 100 words · your own API key required for subsequent tests</div>` : ''}
+      </div>
+      <div class="form-group" style="display:flex;align-items:flex-start;gap:10px;margin-bottom:8px">
+        <input type="checkbox" id="test-repeatable" checked style="width:16px;height:16px;margin-top:2px;accent-color:var(--accent);cursor:pointer" />
+        <label for="test-repeatable" style="cursor:pointer;font-size:12.5px;color:var(--text-dim);margin:0;line-height:1.5">Make this repeatable — if the flow needs starting data, TestPilot creates it (tagged <code>TP-TEST</code>) and deletes what it created afterward, so every run is comparable. <strong>Only removes data it created this run.</strong> Uncheck for a strict read-only run.</label>
       </div>
       <div class="form-group" style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
         <input type="checkbox" id="test-no-login" onchange="state._testNoLogin=this.checked;toggleTestLoginFields()" style="width:16px;height:16px;accent-color:var(--accent);cursor:pointer" ${state._testNoLogin ? 'checked' : ''} />
@@ -2624,6 +3014,51 @@ function renderTestRun() {
     </div>` : ''}`;
 }
 
+function tpShortUrl(u) { try { const x = new URL(u); return x.host + x.pathname.slice(0, 44); } catch { return String(u || '').slice(0, 60); } }
+function tpStepFor(test, n) { return (test.steps || []).find(x => x.step === n); }
+function tpWhere(st) {
+  if (!st) return '';
+  const parts = [];
+  if (st.action) parts.push('<code>' + tpEsc(st.action) + '</code>');
+  if (st.target) parts.push('on “' + tpEsc(String(st.target).slice(0, 60)) + '”');
+  let line = parts.join(' ');
+  if (st.url) line += ' <span style="color:var(--text-muted)">· ' + tpEsc(tpShortUrl(st.url)) + '</span>';
+  return line;
+}
+// First-party runtime errors captured at (or adjacent to) a step.
+function tpErrsNear(test, n) {
+  const d = test.diagnostics || {};
+  const near = (s) => s === n || s === n - 1 || s === n + 1;
+  const out = [];
+  (d.pageErrors || []).filter(e => near(e.step)).slice(0, 3).forEach(e => out.push('Uncaught JS: ' + (e.message || '')));
+  (d.httpErrors || []).filter(e => near(e.step) && e.firstParty).slice(0, 3).forEach(e => out.push('HTTP ' + e.status + ' ' + e.method + ' ' + tpShortUrl(e.url)));
+  (d.consoleErrors || []).filter(e => near(e.step) && e.firstParty).slice(0, 2).forEach(e => out.push('Console: ' + (e.text || '')));
+  return out;
+}
+function issueCard(test, item, kind) {
+  const st = tpStepFor(test, item.step);
+  const shot = item.screenshot || (st && st.screenshot);
+  const styles = {
+    bug:             { c: '#ef4444', label: '🐛 ' + (item.severity ? item.severity.toUpperCase() + ' bug' : 'App bug') },
+    app_bug:         { c: '#f59e0b', label: '⚠️ Possible issue (unconfirmed)' },
+    tool_limitation: { c: 'var(--text-dim)', label: '🔧 TestPilot limitation' },
+    environment:     { c: '#60a5fa', label: '🌐 Environment / login' },
+    uncertain:       { c: 'var(--text-dim)', label: '❔ Couldn’t determine' },
+  };
+  const sty = styles[kind] || styles.uncertain;
+  const what = tpEsc(item.description || item.check || '');
+  const where = tpWhere(st);
+  const errs = tpErrsNear(test, item.step);
+  return `
+    <div style="background:var(--bg-hover,rgba(127,127,127,0.06));border:1px solid var(--border);border-left:3px solid ${sty.c};border-radius:var(--radius);padding:12px 14px;margin-bottom:10px">
+      <div style="font-size:12.5px;font-weight:700;color:${sty.c}">${sty.label}${item.step != null ? ` · Step ${item.step}` : ''}</div>
+      ${what ? `<div style="font-size:13px;color:var(--text);margin-top:6px;line-height:1.5"><strong>What:</strong> ${what}</div>` : ''}
+      ${where ? `<div style="font-size:12px;color:var(--text-dim);margin-top:4px"><strong>Where:</strong> ${where}</div>` : ''}
+      ${errs.length ? `<div style="margin-top:8px;padding:8px 10px;background:rgba(239,68,68,0.1);border-radius:6px;font-family:'DM Mono',monospace;font-size:11px;color:#ef4444;line-height:1.6">${errs.map(e => '🔴 ' + tpEsc(e)).join('<br>')}</div>` : ''}
+      ${shot ? `<div style="margin-top:10px"><img src="${API}${shot}" onclick="showModal('${API}${shot}')" style="max-width:100%;max-height:220px;border-radius:6px;border:1px solid var(--border);cursor:zoom-in" loading="lazy" /><div style="font-size:10px;color:var(--text-muted);margin-top:3px">📸 Screenshot at this step — click to enlarge</div></div>` : ''}
+    </div>`;
+}
+
 function renderTestDetail() {
   const test = state.currentTest;
   if (!test) return '<p>Test not found</p>';
@@ -2667,16 +3102,28 @@ function renderTestDetail() {
     ${test.bugs?.length ? `
     <div class="card">
       <div class="card-title" style="margin-bottom:12px">🐛 App Bugs</div>
-      ${test.bugs.map(b => `
-        <div style="padding:10px;background:var(--yellow-dim);border-radius:var(--radius);margin-bottom:8px;display:flex;justify-content:space-between;align-items:start">
-          <div>
-            <div style="font-size:13px;font-weight:600;color:var(--yellow)">Step ${b.step}: ${b.severity?.toUpperCase()}</div>
-            <div style="font-size:12px;color:var(--text-dim);margin-top:4px">${b.description}</div>
-          </div>
-          ${b.screenshot ? `<button class="step-screenshot-btn" onclick="showModal('${API}${b.screenshot}')">📸</button>` : ''}
-        </div>
-      `).join('')}
+      ${test.bugs.map(b => issueCard(test, b, 'bug')).join('')}
     </div>` : ''}
+
+    ${(() => {
+      // Objective, first-party runtime errors captured during the run — the
+      // strongest "where's the real problem" signal, independent of the agent.
+      const d = test.diagnostics || {};
+      const pe = d.pageErrors || [];
+      const he = (d.httpErrors || []).filter(e => e.firstParty);
+      const ce = (d.consoleErrors || []).filter(e => e.firstParty);
+      const total = pe.length + he.length + ce.length;
+      if (!total) return '';
+      const row = (icon, text, step) => `<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-family:'DM Mono',monospace;font-size:11.5px"><span>${icon}</span><span style="color:var(--text-muted);flex-shrink:0">step ${step == null ? '—' : step}</span><span style="color:var(--text);word-break:break-all">${text}</span></div>`;
+      return `
+      <div class="card" style="border-left:3px solid #ef4444">
+        <div class="card-title" style="margin-bottom:4px">🔴 Runtime errors your app produced (${total})</div>
+        <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">Objective, first-party errors captured from your app during the run — independent of the agent’s interpretation. Third-party / analytics noise is excluded.</div>
+        ${pe.map(e => row('💥', tpEsc('Uncaught JS: ' + (e.message || '')), e.step)).join('')}
+        ${he.map(e => row('🌐', tpEsc('HTTP ' + e.status + ' ' + e.method + ' ' + tpShortUrl(e.url)), e.step)).join('')}
+        ${ce.map(e => row('⚠️', tpEsc('Console: ' + (e.text || '')), e.step)).join('')}
+      </div>`;
+    })()}
 
     ${(() => {
       // "Couldn't verify" — everything that is NOT a confirmed app bug.
@@ -2693,14 +3140,28 @@ function renderTestDetail() {
       <div class="card" style="border-left:3px solid var(--text-dim)">
         <div class="card-title" style="margin-bottom:6px">🔍 Couldn’t verify (${others.length}) — not counted as app bugs</div>
         <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px">Things TestPilot couldn’t confirm as the app’s fault. Listed for transparency only — they do not affect the bug count or status.</div>
-        ${others.map(f => `
-          <div style="padding:8px 10px;background:var(--bg-elev,rgba(127,127,127,0.08));border-radius:var(--radius);margin-bottom:6px;display:flex;justify-content:space-between;align-items:start;opacity:0.85">
-            <div>
-              <div style="font-size:12px;font-weight:600;color:var(--text-dim)">${labelFor(f)}${f.step ? ` · Step ${f.step}` : ''}</div>
-              <div style="font-size:12px;color:var(--text-dim);margin-top:3px">${f.description || f.check || ''}</div>
-            </div>
-            ${f.screenshot ? `<button class="step-screenshot-btn" onclick="showModal('${API}${f.screenshot}')">📸</button>` : ''}
-          </div>`).join('')}
+        ${others.map(f => issueCard(test, f, f.category)).join('')}
+      </div>`;
+    })()}
+
+    ${(() => {
+      const ce = test.createdEntities || []; const cl = test.cleanup;
+      if (!ce.length && !cl) return '';
+      const created = (cl && cl.created != null) ? cl.created : ce.length;
+      const deleted = (cl && cl.deleted != null) ? cl.deleted : 0;
+      const orphans = (cl && cl.orphans != null) ? cl.orphans : ((cl && cl.configured) ? Math.max(0, created - deleted) : created);
+      const good = orphans === 0 && (!cl || !cl.error);
+      const color = good ? 'var(--green,#4ade80)' : '#f59e0b';
+      return `
+      <div class="card" style="border-left:3px solid ${color}">
+        <div class="card-title" style="margin-bottom:6px">🧹 Test data</div>
+        <div style="font-size:13px;color:var(--text);line-height:1.6">
+          Created <strong>${created}</strong> record${created === 1 ? '' : 's'}${(cl && cl.configured)
+            ? ` · cleaned up <strong>${deleted}</strong> via your endpoint · <span style="color:${color}">${orphans} orphan${orphans === 1 ? '' : 's'}</span>`
+            : ` · <span style="color:var(--text-muted)">no cleanup endpoint configured — set one on the app to auto-delete test data</span>`}
+        </div>
+        ${cl && cl.error ? `<div style="font-size:11px;color:#f59e0b;margin-top:6px">Cleanup endpoint: ${tpEsc(cl.error)}</div>` : ''}
+        ${ce.length ? `<div style="margin-top:10px;font-family:'DM Mono',monospace;font-size:11px;color:var(--text-dim);line-height:1.7">${ce.slice(0, 12).map(e => '• ' + tpEsc(e.label || e.id || 'record') + (e.id ? ' <span style="color:var(--text-muted)">[' + tpEsc(e.id) + ']</span>' : '')).join('<br>')}${ce.length > 12 ? '<br>…' + (ce.length - 12) + ' more' : ''}</div>` : ''}
       </div>`;
     })()}
 
@@ -2966,11 +3427,11 @@ async function runMultiRole() {
   if (state.multiRoleLoading) return;
 
   const cfg = state.multiRoleConfig;
-  if (!cfg?.appId) { alert('Select an app first'); return; }
-  if (!hasApiKey()) { alert('Add your Claude API key in the sidebar first'); return; }
+  if (!cfg?.appId) { tpToast('Select an app first'); return; }
+  if (!hasApiKey()) { tpToast('Add your Claude API key in the sidebar first'); return; }
 
   const validRoles = cfg.roles.filter(r => r.email && r.password && r.scenario.trim());
-  if (validRoles.length < 2) { alert('At least 2 roles need email, password and scenario'); return; }
+  if (validRoles.length < 2) { tpToast('At least 2 roles need email, password and scenario'); return; }
 
   // Run lifecycle. runId lets the loop detect cancellation (cancelMultiRole
   // bumps the id) without relying on a mutable boolean that the loop body
@@ -3147,6 +3608,178 @@ function cancelMultiRole() {
   render();
 }
 
+
+function renderSweep() {
+  const apps = state.apps || [];
+  const s = state.sweep || {};
+  const running = s.status === 'running';
+  if (!apps.length) {
+    return `<div class="page-header"><h2>Check Everything</h2></div>
+      <div class="card"><p style="color:var(--text-muted);font-size:13px">Learn an app first — then this clicks through every control on it.</p>
+      <button class="btn btn-primary" onclick="navigate('learn')">Learn an App</button></div>`;
+  }
+  const items = s.items || [];
+  const counts = items.reduce((a, i) => { a[i.verdict] = (a[i.verdict] || 0) + 1; return a; }, {});
+  const badge = (v) => v === 'works' ? '<span style="color:var(--green)">✅ works</span>'
+    : v === 'broken' ? '<span style="color:var(--red);font-weight:700">❌ broken</span>'
+    : v === 'no_effect' ? '<span style="color:#f97316">⚠️ nothing happened</span>'
+    : v === 'skipped' ? '<span style="color:var(--text-muted)">⏭ skipped</span>'
+    : '<span style="color:var(--text-muted)">— unreachable</span>';
+
+  return `
+    <div class="page-header">
+      <div>
+        <h2>Check Everything</h2>
+        <div style="font-size:12px;color:var(--text-muted);margin-top:2px">// clicks every button, link and toggle — no scenario needed</div>
+      </div>
+    </div>
+
+    <div class="card" style="max-width:720px">
+      <div class="form-group">
+        <label>App</label>
+        <select class="form-input" id="sweep-app" ${running ? 'disabled' : ''}>
+          ${apps.map(a => `<option value="${a.appId}" ${s.appId === a.appId ? 'selected' : ''}>${escapeHtml(a.summary?.appName || a.url)}</option>`).join('')}
+        </select>
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;margin:10px 0">
+        <input type="checkbox" id="sweep-no-login" ${s.noLogin !== false ? 'checked' : ''} onchange="state.sweep = Object.assign({}, state.sweep, { noLogin: this.checked }); render()" />
+        <span style="font-size:13px">No login required — app is publicly accessible</span>
+      </label>
+      ${s.noLogin === false ? `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div class="form-group"><label>Login email</label><input class="form-input" id="sweep-email" placeholder="user@app.com" /></div>
+        <div class="form-group"><label>Password</label><input class="form-input" type="password" id="sweep-password" /></div>
+      </div>` : ''}
+      <div style="background:rgba(200,240,64,0.05);border:1px solid rgba(200,240,64,0.15);padding:12px 14px;border-radius:2px;margin:14px 0;font-size:12px;color:#a8a8a8;line-height:1.6">
+        Anything that looks destructive — Delete, Remove, Reset — is <strong style="color:#c8f040">never clicked without asking you first</strong>. Your answer is remembered for that control.
+      </div>
+      <button class="btn btn-primary" onclick="startSweep()" ${running ? 'disabled' : ''}>
+        ${running ? '<span class="loader"></span> Checking…' : '▶ Check Everything'}
+      </button>
+    </div>
+
+    ${(s.log || []).length ? `
+    <div class="card" style="margin-top:14px">
+      <div class="card-header"><div class="card-title">Progress</div></div>
+      <div class="test-stream" style="max-height:280px" id="sweep-stream">
+        ${(s.log || []).filter(e => e.message).map(e => `<div class="step-line ${e.type === 'fail' ? 'fail' : ''}" style="font-size:12px">${escapeHtml(e.message)}</div>`).join('')}
+      </div>
+    </div>` : ''}
+
+    ${items.length ? `
+    <div class="stats-row" style="max-width:720px;margin-top:14px">
+      <div class="stat-card"><div class="stat-value">${items.length}</div><div class="stat-label">Checked</div></div>
+      <div class="stat-card"><div class="stat-value" style="color:var(--green)">${counts.works || 0}</div><div class="stat-label">Working</div></div>
+      <div class="stat-card"><div class="stat-value" style="color:var(--red)">${counts.broken || 0}</div><div class="stat-label">Broken</div></div>
+      <div class="stat-card" title="Clicked twice and nothing changed. Often fine — a link to the page you are already on looks identical."><div class="stat-value" style="color:#f97316">${counts.no_effect || 0}</div><div class="stat-label">Nothing Happened</div></div>
+      ${counts.skipped ? `<div class="stat-card"><div class="stat-value" style="color:var(--text-muted)">${counts.skipped}</div><div class="stat-label">Skipped</div></div>` : ''}
+    </div>
+    <div class="card" style="margin-top:14px">
+      <div class="card-header"><div class="card-title">Every control it touched</div></div>
+      <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+        <thead><tr style="text-align:left;color:var(--text-muted);font-size:11px">
+          <th style="padding:6px 8px">Control</th><th style="padding:6px 8px">Kind</th><th style="padding:6px 8px">Page</th><th style="padding:6px 8px">Result</th><th style="padding:6px 8px">Detail</th>
+        </tr></thead>
+        <tbody>
+        ${items.map(i => `<tr style="border-top:1px solid var(--border)">
+          <td style="padding:7px 8px;font-weight:600">${escapeHtml(i.label)}</td>
+          <td style="padding:7px 8px;color:var(--text-muted)">${i.kind}</td>
+          <td style="padding:7px 8px;color:var(--text-muted);font-family:monospace;font-size:11px">${escapeHtml(i.page)}</td>
+          <td style="padding:7px 8px;white-space:nowrap">${badge(i.verdict)}</td>
+          <td style="padding:7px 8px;color:#999">${escapeHtml(i.detail || '')}</td>
+        </tr>`).join('')}
+        </tbody>
+      </table>
+      </div>
+    </div>` : ''}
+  `;
+}
+
+async function startSweep() {
+  const appId = document.getElementById('sweep-app')?.value;
+  if (!appId) { tpToast('Pick an app first'); return; }
+  const noLogin = document.getElementById('sweep-no-login')?.checked;
+  const email = noLogin ? '' : (document.getElementById('sweep-email')?.value || '').trim();
+  const password = noLogin ? '' : (document.getElementById('sweep-password')?.value || '');
+  if (!noLogin && (!email || !password)) { tpToast('Enter a test login, or tick "No login required"'); return; }
+
+  state.sweep = { status: 'running', appId, noLogin, log: [], items: [] };
+  render();
+  try {
+    const res = await fetch(`${API}/api/sweep`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appId, email, password, apiKey: getApiKey() }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.sweepId) {
+      state.sweep.status = 'error';
+      render();
+      tpToast(data.error || 'Could not start the check', 'error');
+      return;
+    }
+    state.sweep.sweepId = data.sweepId;
+    streamSweep(data.sweepId);
+  } catch (e) {
+    state.sweep.status = 'error';
+    render();
+    tpToast('Network error — try again', 'error');
+  }
+}
+
+function streamSweep(sweepId) {
+  const es = new EventSource(`${API}/api/sweep/${sweepId}/stream`);
+  es.onmessage = async (ev) => {
+    let d; try { d = JSON.parse(ev.data); } catch { return; }
+    if (d.type === 'awaiting_confirm') { showSweepConfirm(sweepId, d); return; }
+    state.sweep.log = state.sweep.log || [];
+    if (d.message) state.sweep.log.push(d);
+    if (d.type === 'done' || d.type === 'summary') {
+      const rep = await fetch(`${API}/api/sweep/${sweepId}`).then(r => r.json()).catch(() => null);
+      if (rep) { state.sweep.items = rep.items || []; state.sweep.status = rep.status; }
+      if (d.type === 'done') es.close();
+    }
+    render();
+    const st = document.getElementById('sweep-stream');
+    if (st) st.scrollTop = st.scrollHeight;
+  };
+  es.onerror = () => { es.close(); if (state.sweep) { state.sweep.status = 'completed'; render(); } };
+}
+
+// The destructive-click question. Self-contained DOM (like the 2FA prompt) so a
+// re-render cannot wipe it while the run is parked waiting for an answer.
+function showSweepConfirm(sweepId, d) {
+  if (document.getElementById('sweep-confirm')) return;
+  const box = document.createElement('div');
+  box.id = 'sweep-confirm';
+  box.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:10070;display:flex;align-items:center;justify-content:center;padding:20px';
+  box.innerHTML = `
+    <div style="background:#111;border:1px solid rgba(239,68,68,0.4);max-width:480px;width:100%;border-radius:4px;overflow:hidden">
+      <div style="background:#0f0f0f;border-bottom:1px solid rgba(239,68,68,0.25);padding:16px 22px;font-family:'Syne',sans-serif;font-size:15px;font-weight:800;color:#f4f2ee">⚠ This one can destroy data</div>
+      <div style="padding:22px;display:flex;flex-direction:column;gap:14px">
+        <div style="font-family:'DM Mono',monospace;font-size:12.5px;color:#cfcfcf;line-height:1.7">${escapeHtml(d.question || '')}</div>
+        <label style="display:flex;align-items:center;gap:8px;font-family:'DM Mono',monospace;font-size:11.5px;color:#999">
+          <input type="checkbox" id="sweep-remember" checked /> Remember my answer for "${escapeHtml(d.label || '')}" on this app
+        </label>
+        <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:4px">
+          <button id="sweep-no" style="background:#c8f040;border:none;color:#080808;font-family:'Syne',sans-serif;font-weight:700;font-size:12.5px;padding:10px 18px;border-radius:2px;cursor:pointer">Skip it</button>
+          <button id="sweep-yes" style="background:transparent;border:1px solid rgba(239,68,68,0.5);color:#ef4444;font-family:'DM Mono',monospace;font-size:12px;padding:10px 16px;border-radius:2px;cursor:pointer">Click it anyway</button>
+        </div>
+      </div>
+    </div>`;
+  document.body.appendChild(box);
+  const answer = async (allow) => {
+    const remember = document.getElementById('sweep-remember')?.checked;
+    box.remove();
+    await fetch(`${API}/api/sweep/${sweepId}/confirm`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ allow, remember }),
+    }).catch(() => {});
+  };
+  document.getElementById('sweep-no').onclick = () => answer(false);
+  document.getElementById('sweep-yes').onclick = () => answer(true);
+}
+
 function renderSecurity() {
   if (state.secPhase === 'setup') return renderSecSetup();
   if (state.secPhase === 'matrix') return renderSecMatrix();
@@ -3176,6 +3809,10 @@ function renderSecSetup() {
         Covers authorization, multi-tenancy, IDOR, session theft, mass assignment, security headers, CORS, info disclosure, open redirects, JWT hygiene, and login rate limiting. Strong indicative scan — <strong style="color:var(--text-dim)">not a substitute for a full penetration test</strong>. Before launch or for compliance audits, engage a specialty pen-test firm.
       </p>
     </div>
+    ${(currentUser && currentUser.plan === 'free') ? `<div style="max-width:600px;margin-bottom:20px;padding:10px 12px;background:rgba(74,222,128,0.06);border-left:3px solid var(--green,#4ade80);border-radius:0 4px 4px 0">
+      <div style="font-size:12px;font-weight:700;color:var(--green,#4ade80);margin-bottom:4px">🎁 One free scan</div>
+      <p style="font-size:11px;color:var(--text-muted);margin:0;line-height:1.55">Your free plan includes <strong style="color:var(--text-dim)">one read-only security scan</strong> on an app you own — no API key needed. User B is optional (add it for the full cross-tenant IDOR suite). Upgrade for unlimited scans + destructive probes.</p>
+    </div>` : ''}
     <div class="card" style="max-width:600px">
       <div class="card-title" style="margin-bottom:14px">Target App</div>
       <div class="form-group">
@@ -3251,22 +3888,36 @@ function renderSecSetup() {
     <button class="btn btn-primary" style="margin-top:16px;font-size:14px;padding:10px 24px" onclick="secRunScan()" ${state.secDeepLoading ? 'disabled' : ''}>
       ${state.secDeepLoading ? '<span class="loader"></span> Scanning...' : '▶ Run Security Scan'}
     </button>
-    <p style="font-size:11px;color:var(--text-muted);margin-top:8px;font-family:'DM Mono',monospace;max-width:600px">
-      One click. Scans authorization, IDOR, session theft, mass assignment, security headers, CORS, info disclosure, open redirects, JWT, and login rate limiting. Typical run: 2–5 min depending on app size.
-    </p>`;
+        <div style="font-size:11px;color:var(--text-muted);margin-top:12px;font-family:'DM Mono',monospace;max-width:660px;line-height:1.6">
+      <p style="margin:0 0 8px">
+        <strong style="color:var(--text)">Two real users, one boundary.</strong> The scan logs in as User&nbsp;A and User&nbsp;B, then actively tries to cross the wall between them — the data-isolation failure that ships in AI-built apps every day and that browser testing can't see. One click, ~2–5&nbsp;min. Every finding is mapped to <strong>OWASP&nbsp;WSTG</strong> and confidence-rated (★), so nothing is over-claimed.
+      </p>
+      <p style="margin:10px 0 4px;color:var(--text)"><strong>What it checks — 9 levels:</strong></p>
+      <ul style="margin:0 0 10px;padding-left:16px">
+        <li>Authorization / IDOR (BOLA) — replays User&nbsp;A's API calls with User&nbsp;B's session; direct object-reference access</li>
+        <li>Excessive data exposure — credentials / secrets / PII the API over-returns (even to an authorized user)</li>
+        <li>Session security — cross-user isolation, cookie flags (HttpOnly · Secure · SameSite), session fixation &amp; logout invalidation</li>
+        <li>Reflected XSS · Mass assignment (destructive mode) · Unauthenticated access</li>
+        <li>Security headers (CSP · HSTS · X-Frame-Options · X-Content-Type · Referrer-Policy) · CORS</li>
+        <li>Info disclosure · Open redirects · JWT hygiene · Login rate-limiting · Pre-consent cookies (GDPR)</li>
+      </ul>
+      <p style="margin:0;color:var(--text-muted)">
+        <strong style="color:#f59e0b">This is not a penetration test.</strong> It's an automated, scoped scan — it does <em>not</em> do manual exploit-chaining, business-logic abuse beyond its probe set, social engineering, network/infrastructure testing, or source-code (SAST) review. XSS coverage is server-reflected only (not DOM or stored). It reliably catches the authorization and data-exposure bugs that leak customer data and that pentests are expensive to find — run it on every change; use a real pentest for depth. Read-only by default; enabling destructive tests fires real write/delete probes (staging only).
+      </p>
+    </div>`;
 }
 
 async function secRunScan() {
-  if (!hasApiKey()) { alert('Add your Claude API key first'); return; }
+  if (!hasApiKey()) { tpToast('Add your Claude API key first'); return; }
   const cfg = state.secConfig;
-  if (!cfg.appId) { alert('Select an app'); return; }
+  if (!cfg.appId) { tpToast('Select an app'); return; }
   if ((!cfg.userA.email && !cfg.userA.sessionState) || (!cfg.userB.email && !cfg.userB.sessionState)) {
-    alert('Each user needs an email + password, OR a captured session (use Capture for 2FA/SSO apps).');
+    tpToast('Each user needs an email + password, OR a captured session (use Capture for 2FA/SSO apps).');
     return;
   }
   const normEmail = (s) => String(s || '').trim().toLowerCase();
   if (cfg.userA.email && cfg.userB.email && normEmail(cfg.userA.email) === normEmail(cfg.userB.email)) {
-    alert('User A and User B must be different accounts. Same-user tests pass trivially and give a false sense of security.');
+    tpToast('User A and User B must be different accounts. Same-user tests pass trivially and give a false sense of security.');
     return;
   }
   // Switch to results view immediately so the stream renders as the scan runs.
@@ -3288,6 +3939,10 @@ function renderSecMatrix() {
 
   const totalVulns = state.secResults.filter(r => r.result === 'vuln').length;
   const totalSus = state.secResults.filter(r => r.result === 'suspicious').length;
+  // Anything that is not a clean pass/fail/suspicious verdict — inconclusive,
+  // skipped, unknown. Derived so the tiles always add up to Total Checks
+  // regardless of what new verdict labels the scanner grows later.
+  const notConclusiveCount = state.secResults.length - passCount - failCount - suspiciousCount;
   const headerStatus = state.secDeepLoading
     ? `<span style="color:var(--accent)">⏳ Scanning…</span>`
     : totalVulns > 0
@@ -3331,6 +3986,11 @@ function renderSecMatrix() {
         <div class="stat-value" style="color:#f97316">${suspiciousCount}</div>
         <div class="stat-label">Suspicious</div>
       </div>
+      ${notConclusiveCount > 0 ? `
+      <div class="stat-card" title="Checks that could not be completed — neither passed nor failed. Not counted as safe.">
+        <div class="stat-value" style="color:var(--text-muted)">${notConclusiveCount}</div>
+        <div class="stat-label">Not Conclusive</div>
+      </div>` : ''}
     </div>` : ''}
 
     ${(state.secStream.length > 0 || state.secDeepLoading) ? `
@@ -3430,10 +4090,11 @@ function renderModal() {
         </div>
         <div style="padding:24px;display:grid;grid-template-columns:repeat(2,1fr);gap:12px">
           ${[
-            { plan:'starter', name:'Starter', price:'€29/mo', desc:'Up to 2 apps', features:['Scenario Testing','Interactive Test','Test History'] },
-            { plan:'pro', name:'Pro', price:'€149/mo', desc:'Up to 10 apps', features:['Everything in Starter','Multi-Role Testing'] },
-            { plan:'agency', name:'Agency', price:'€249/mo', desc:'Unlimited apps', features:['Everything in Pro','Security Scanning','Cross-App Testing','Priority Support'] },
-            { plan:'onerun', name:'One Run', price:'€5', desc:'Single test run', features:['One full test run','Bug report + screenshots','No commitment'] }
+            { plan:'onerun', name:'One Run', price:'€5', desc:'1 app · 1 run', features:['One full run — any feature','Bug report + screenshots','Repeatable — buy again to re-verify'] },
+            { plan:'solo', name:'Solo', price:'€10/mo', desc:'1 app · unlimited runs', features:['Unlimited runs','Every feature included','Full test history'] },
+            { plan:'starter', name:'Starter', price:'€29/mo', desc:'Up to 3 apps', features:['Unlimited runs','Every feature included','Full test history'] },
+            { plan:'pro', name:'Pro', price:'€149/mo', desc:'Up to 10 apps', features:['Unlimited runs','Every feature included','Full test history'] },
+            { plan:'agency', name:'Agency', price:'€249/mo', desc:'Unlimited apps', features:['Unlimited runs','Every feature included','Priority support'] }
           ].map(p => `
             <div style="background:var(--bg-hover);border:1px solid var(--border);padding:20px;border-radius:2px;display:flex;flex-direction:column;gap:10px">
               <div>
@@ -3573,8 +4234,8 @@ async function submitFileUpload() {
   // Use state.fileUploadSelected (captured at onchange time) instead of
   // input.files (which gets wiped on any re-render).
   const files = state.fileUploadSelected || [];
-  if (files.length === 0) { alert('Pick at least one file, or click Skip.'); return; }
-  if (files.length > 5) { alert('Max 5 files per upload.'); return; }
+  if (files.length === 0) { tpToast('Pick at least one file, or click Skip.'); return; }
+  if (files.length > 5) { tpToast('Max 5 files per upload.'); return; }
 
   state.fileUploadBusy = true;
   render();
@@ -3601,7 +4262,7 @@ async function submitFileUpload() {
     render();
   } catch (e) {
     state.fileUploadBusy = false;
-    alert(`Upload failed: ${e.message}`);
+    tpToast(`Upload failed: ${e.message}`);
     render();
   }
 }
@@ -3623,11 +4284,11 @@ async function skipFileUpload() {
   render();
 }
 
-function cancelFileUpload() {
+async function cancelFileUpload() {
   // "Cancel test" — treat as skip for now (V1). The test will continue
   // with no file, hit the loop detector if it keeps trying, and abort
   // with a clear blocked reason. Future: add a dedicated /abort endpoint.
-  if (!confirm('Cancel the test? It will continue without files and may abort if it loops.')) return;
+  if (!(await tpConfirm('Cancel the test? It will continue without files and may abort if it loops.'))) return;
   skipFileUpload();
 }
 
@@ -3656,7 +4317,7 @@ async function viewApp(appId) {
   const res = await fetch(`${API}/api/apps/${appId}?email=${encodeURIComponent(email)}`);
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    alert(`Could not load app: ${err.error || res.statusText}`);
+    tpToast(`Could not load app: ${err.error || res.statusText}`);
     return;
   }
   state.selectedApp = await res.json();
@@ -3665,7 +4326,7 @@ async function viewApp(appId) {
 }
 
 async function deleteApp(appId) {
-  if (!confirm('Delete this app and its platform map?')) return;
+  if (!(await tpConfirm('Delete this app and its platform map?'))) return;
   if (!appId) {
     await fetch(`${API}/api/apps/cleanup`, { method: 'POST' }).catch(() => {});
     await loadApps();
@@ -3733,14 +4394,14 @@ async function startLearn() {
   const desc = document.getElementById('learn-desc')?.value?.trim();
   const learnSessionRaw = document.getElementById('learn-session-state')?.value?.trim();
 
-  if (!url) { alert('App URL is required'); return; }
-  if (!noLogin && !learnSessionRaw && (!email || !password)) { alert('Login email and password are required — or check "No login required", or paste a session under Advanced'); return; }
+  if (!url) { tpToast('App URL is required'); return; }
+  if (!noLogin && !learnSessionRaw && (!email || !password)) { tpToast('Login email and password are required — or check "No login required", or paste a session under Advanced'); return; }
 
   const isFreeUser = currentUser?.plan === 'free';
   const freeRunUsed = currentUser?.free_run_used === true;
   const canLearnFree = isFreeUser && !freeRunUsed;
 
-  if (!canLearnFree && !hasApiKey()) { alert('Add your Claude API key in the sidebar first'); return; }
+  if (!canLearnFree && !hasApiKey()) { tpToast('Add your Claude API key in the sidebar first'); return; }
 
   state.loading = true;
   state.learnProgress = [];
@@ -3792,6 +4453,9 @@ async function startLearn() {
               if (data.appId) {
                 await viewApp(data.appId);
               }
+              // Say so out loud. This used to land the user on the platform
+              // map with no confirmation the crawl had succeeded.
+              showAppReady(data.message || '');
             }
 
             render();
@@ -3856,6 +4520,12 @@ function show2faPrompt(runId, message) {
   input.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
 }
 
+function repeatableClause(on) {
+  return on
+    ? ' \n\n(Repeatable run: if this flow needs specific starting data that is not already present, create it first and tag anything you create with a "TP-TEST" prefix; at the very end, delete ONLY the records you created during this run so the app returns to its starting state. Never delete or change anything you did not create this run.)'
+    : ' \n\n(Read-only run: do not create, edit, or delete any data - navigate and verify only.)';
+}
+
 async function runTest() {
   const scenario = document.getElementById('test-scenario')?.value?.trim();
   const noLogin = document.getElementById('test-no-login')?.checked;
@@ -3866,8 +4536,8 @@ async function runTest() {
   const sessionStateRaw = noLogin ? '' : document.getElementById('test-session-state')?.value?.trim();
   const hasSession = !!sessionStateRaw;
 
-  if (!scenario) { alert('Describe what to test'); return; }
-  if (!noLogin && !hasSession && (!email || !password)) { alert('Provide login credentials, paste a session under "Advanced", or check "No login required"'); return; }
+  if (!scenario) { tpToast('Describe what to test'); return; }
+  if (!noLogin && !hasSession && (!email || !password)) { tpToast('Provide login credentials, paste a session under "Advanced", or check "No login required"'); return; }
 
   const isFreeUser = currentUser?.plan === 'free';
   const freeRunUsed = currentUser?.free_run_used === true;
@@ -3876,19 +4546,21 @@ async function runTest() {
   // Word count check for free run
   if (isFreeRun) {
     const words = scenario.split(/\s+/).filter(w => w).length;
-    if (words > 100) { alert('Free test run is limited to 100 words. Please shorten your scenario.'); return; }
+    if (words > 100) { tpToast('Free test run is limited to 100 words. Please shorten your scenario.'); return; }
   }
 
-  if (!isFreeRun && !hasApiKey()) { alert('Add your Claude API key in the sidebar first'); return; }
+  if (!isFreeRun && !hasApiKey()) { tpToast('Add your Claude API key in the sidebar first'); return; }
 
   const appId = state.selectedApp?.appId;
-  if (!appId) { alert('No app selected'); return; }
+  if (!appId) { tpToast('No app selected'); return; }
 
   const remember = document.getElementById('test-remember')?.checked;
   if (remember) { saveCredentials(appId, email, password); }
 
+  const _repeatable = document.getElementById('test-repeatable') ? document.getElementById('test-repeatable').checked : true;
+  const scenarioToRun = scenario + repeatableClause(_repeatable);
   state._savedForm = { scenario, email, password };
-  state.testStream = [{ type: 'info', message: isFreeRun ? '🎁 Starting your free test run...' : 'Starting test...' }];
+  state.testStream = [{ type: 'info', message: isFreeRun ? '🎁 Connecting your free test run…' : 'Connecting to test runner…' }];
   state.currentTest = { status: 'running' };
   render();
 
@@ -3896,11 +4568,21 @@ async function runTest() {
     const res = await fetch(`${API}/api/test`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ appId, scenario, email, password, apiKey: getApiKey(), freeRun: isFreeRun, userEmail: currentUser?.email, ...(hasSession ? { sessionState: sessionStateRaw } : {}) })
+      body: JSON.stringify({ appId, scenario: scenarioToRun, email, password, apiKey: getApiKey(), freeRun: isFreeRun, userEmail: currentUser?.email, ...(hasSession ? { sessionState: sessionStateRaw } : {}) })
     });
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: res.statusText }));
+      // The scenario cannot be tested — show the reason AND the rewrite,
+      // and leave the form untouched so they can edit what they typed.
+      if (res.status === 422 && err.code === 'SCENARIO_NOT_TESTABLE') {
+        state.loading = false;
+        state.currentTest = null;
+        state.testStream = [];
+        render();
+        tpToast(err.error + (err.hint ? '\n\n' + err.hint : ''), 'error');
+        return;
+      }
       // Funnel rework: 402 from /api/test means free user tried a second
       // run, or starter+ tried a feature their plan doesn't include.
       // Pop the unified paywall instead of just printing the error.
@@ -3909,6 +4591,7 @@ async function runTest() {
         render();
         const reason = err.code === 'FREE_RUN_USED' ? 'free_run'
                      : err.code === 'APP_SLOT_LIMIT' ? 'app_slot'
+                     : err.code === 'ONERUN_EXHAUSTED' ? 'onerun_exhausted'
                      : 'feature';
         showFunnelPaywall(reason);
         return;
@@ -3967,8 +4650,15 @@ async function runTest() {
             state.currentTest = await r.json();
             // Mark free run as used and update local state
             if (isFreeRun) {
-              currentUser.free_run_used = true;
-              document.getElementById('free-run-nudge')?.style && (document.getElementById('free-run-nudge').style.display = 'flex');
+              // The server refunds the run when it ended without a verdict
+              // about the app, so trust the fetched result rather than
+              // assuming the run was spent.
+              const _spent = ['completed', 'completed_with_bugs', 'completed_with_unverified']
+                .includes(state.currentTest?.status);
+              currentUser.free_run_used = _spent;
+              // Never cover the report with a paywall — let them read what
+              // they paid nothing for first.
+              if (_spent) showFreeRunBar();
             }
             state.view = 'test-detail';
             await loadTests();
@@ -4052,9 +4742,9 @@ async function startChat() {
   const email = noLogin ? '' : document.getElementById('chat-email')?.value?.trim();
   const password = noLogin ? '' : document.getElementById('chat-password')?.value;
 
-  if (!appId) { alert('Select an app first'); return; }
-  if (!noLogin && (!email || !password)) { alert('Credentials required, or check "No login required"'); return; }
-  if (!hasApiKey()) { alert('Add your Claude API key in the sidebar first'); return; }
+  if (!appId) { tpToast('Select an app first'); return; }
+  if (!noLogin && (!email || !password)) { tpToast('Credentials required, or check "No login required"'); return; }
+  if (!hasApiKey()) { tpToast('Add your Claude API key in the sidebar first'); return; }
 
   const remember = document.getElementById('chat-remember')?.checked;
   if (remember) { saveCredentials(appId, email, password); }
@@ -4071,7 +4761,7 @@ async function startChat() {
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      alert(`Failed to start session: ${err.error || res.statusText}`);
+      tpToast(`Failed to start session: ${err.error || res.statusText}`);
       state.chatLoading = false;
       render();
       return;
@@ -4080,7 +4770,9 @@ async function startChat() {
     const data = await res.json();
     state.chatSession = data;
     state.chatMessages = [
-      { role: 'assistant', content: data.loginSuccess ? `Logged in and ready. I'm on ${data.url}. What would you like to test?` : 'Login may have failed — I might be on the login page still. What should I do?', screenshot: data.screenshot }
+      // Field is `loggedIn` on the response — reading `loginSuccess` made this
+      // undefined every time, so every session opened by claiming login failed.
+      { role: 'assistant', content: data.loggedIn ? `Logged in and ready. I'm on ${data.url}. What would you like to test?` : `I could not confirm a login — I may still be on the sign-in page${data.url ? ` (currently at ${data.url})` : ''}. Tell me what to do, or end the session and check the credentials.`, screenshot: data.screenshot }
     ];
     state.chatLoading = false;
     state._chatCredentials = { email, password };
@@ -4093,7 +4785,7 @@ async function startChat() {
     }, 100);
 
   } catch (e) {
-    alert(`Connection error: ${e.message}`);
+    tpToast(`Connection error: ${e.message}`);
     state.chatLoading = false;
     render();
   }
@@ -4180,7 +4872,7 @@ async function refreshScreenshot() {
 
 async function endChat() {
   if (!state.chatSession?.sessionId) return;
-  if (!confirm('End this chat session? The browser will close.')) return;
+  if (!(await tpConfirm('End this chat session? The browser will close.'))) return;
 
   try {
     await fetch(`${API}/api/chat/${state.chatSession.sessionId}/end`, { method: 'POST' });
@@ -4211,20 +4903,20 @@ function handleImageUpload(event) {
 
 async function secGenerate() {
   const cfg = state.secConfig;
-  if (!cfg.appId) { alert('Select an app'); return; }
-  if (!cfg.userA.email || !cfg.userA.password || !cfg.userB.email || !cfg.userB.password) { alert('Fill in both user credentials'); return; }
-  if (!hasApiKey()) { alert('Add your Claude API key in the sidebar first'); return; }
+  if (!cfg.appId) { tpToast('Select an app'); return; }
+  if (!cfg.userA.email || !cfg.userA.password || !cfg.userB.email || !cfg.userB.password) { tpToast('Fill in both user credentials'); return; }
+  if (!hasApiKey()) { tpToast('Add your Claude API key in the sidebar first'); return; }
 
   // Same-user guard. If A and B are the same account every "isolation"
   // test passes trivially and the user thinks they ran a real scan.
   const normEmail = (s) => String(s || '').trim().toLowerCase();
   if (normEmail(cfg.userA.email) === normEmail(cfg.userB.email)) {
-    alert('User A and User B must be different accounts. Same-user tests pass trivially and give a false sense of security.');
+    tpToast('User A and User B must be different accounts. Same-user tests pass trivially and give a false sense of security.');
     return;
   }
 
   const map = state.apps.find(a => a.appId === cfg.appId);
-  if (!map) { alert('App not found'); return; }
+  if (!map) { tpToast('App not found'); return; }
 
   state.secLoading = true;
   render();
@@ -4235,7 +4927,7 @@ async function secGenerate() {
     const res = await fetch(`${API}/api/apps/${cfg.appId}`);
     fullMap = await res.json();
   } catch (e) {
-    alert('Failed to load app map');
+    tpToast('Failed to load app map');
     state.secLoading = false;
     render();
     return;
@@ -4537,10 +5229,10 @@ async function secSendChatStep(role, instruction, cfg, _retried = false) {
 }
 
 async function secRunAll() {
-  if (!hasApiKey()) { alert('Add your Claude API key first'); return; }
+  if (!hasApiKey()) { tpToast('Add your Claude API key first'); return; }
 
   const enabledTests = state.secTests.filter(t => t.enabled !== false);
-  if (enabledTests.length === 0) { alert('No tests selected'); return; }
+  if (enabledTests.length === 0) { tpToast('No tests selected'); return; }
 
   state.secUiLoading = true;
   state.secStream = [{ type: 'info', message: `Starting ${enabledTests.length} UI security tests...` }];
@@ -4813,9 +5505,12 @@ async function captureSecSession(role) {
 }
 
 async function secDeepScan() {
-  if (!hasApiKey()) { alert('Add your Claude API key first'); return; }
+  const isFree = (currentUser?.plan === 'free');
+  if (!isFree && !hasApiKey()) { tpToast('Add your Claude API key first'); return; }
   const cfg = state.secConfig;
-  if (!cfg.appId || (!cfg.userA.email && !cfg.userA.sessionState) || (!cfg.userB.email && !cfg.userB.sessionState)) { alert('Fill in app and both users (email+password or a captured session)'); return; }
+  if (!cfg.appId) { tpToast('Pick an app to scan'); return; }
+  if (!cfg.userA.email && !cfg.userA.sessionState) { tpToast('Provide User A — a test login (email + password) or a captured session'); return; }
+  if (!isFree && (!cfg.userB.email && !cfg.userB.sessionState)) { tpToast('Provide User B too (email+password or a captured session)'); return; }
 
   state.secDeepLoading = true;
   state.secStream = [{ type: 'info', message: '🔬 Starting Deep Security Scan (API Interception + IDOR)...' }];
@@ -4830,7 +5525,7 @@ async function secDeepScan() {
     // mutating real data.
     let destructive = false;
     if (cfg.destructive) {
-      destructive = confirm(
+      destructive = await tpConfirm(
         '⚠ DESTRUCTIVE MODE\n\n' +
         'This will fire real PUT/DELETE/mass-assignment requests against User A\'s records using User B\'s session. ' +
         'If the app is vulnerable, User A\'s data WILL be modified or deleted.\n\n' +
@@ -4853,6 +5548,11 @@ async function secDeepScan() {
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: 'Unknown error' }));
+      if (err.code === 'FREE_SECURITY_USED' || err.code === 'FREE_DAILY_BUDGET_EXCEEDED') {
+        state.secDeepLoading = false; state.secStream.push({ type: 'error', message: err.error }); render();
+        if (typeof showFunnelPaywall === 'function') showFunnelPaywall('feature');
+        return;
+      }
       throw new Error(err.error || `HTTP ${res.status}`);
     }
 
@@ -4979,9 +5679,11 @@ async function secDeepScan() {
     // Final summary
     const totalVulns = data.vulnerabilities || 0;
     const suspicious = data.suspicious || 0;
+    // Checks that could not be completed are called out, never folded into "safe".
+    const notConclusive = (data.inconclusive || 0) + (data.skipped || 0);
     state.secStream.push({
       type: totalVulns > 0 ? 'fail' : 'pass',
-      message: `🔬 Deep Scan complete: ${data.totalTests} tests | ${totalVulns} vulnerabilities | ${suspicious} suspicious | ${data.safe} safe`
+      message: `🔬 Deep Scan complete: ${data.totalTests} tests | ${totalVulns} vulnerabilities | ${suspicious} suspicious | ${data.safe} safe${notConclusive > 0 ? ` | ${notConclusive} not conclusive` : ''}`
     });
 
   } catch (e) {
@@ -5546,7 +6248,7 @@ function downloadTestReport() {
 <div class="header">
   <div>
     <div class="logo">Test<span>Pilot</span></div>
-    <div style="font-size:12px;color:#666;margin-top:4px">AI-Powered Scenario Test Report</div>
+    <div style="font-size:12px;color:#666;margin-top:4px">AI-Powered Flow Test Report</div>
   </div>
   <div style="text-align:right">
     <div style="font-size:20px;font-weight:800;color:${statusColor}">${test.status?.replace(/_/g,' ').toUpperCase()}</div>
@@ -5657,11 +6359,13 @@ async function acceptTerms() {
   const el = document.getElementById('terms-overlay');
   if (el) el.style.display = 'none';
 
-  // Now show welcome if free user
+  // Now show welcome if free user. A first-ever login always lands here (not
+  // in init(), which returns early while terms are pending), so the free-run
+  // copy has to be applied on this path too.
   if (currentUser?.plan === 'free') {
     const seen = localStorage.getItem('tp_welcome_seen_' + currentUser.email);
     const w = document.getElementById('welcome-overlay');
-    if (!seen && w) w.style.display = 'flex';
+    if (!seen && w) { applyWelcomeCopy(); w.style.display = 'flex'; }
   }
 }
 
@@ -5698,7 +6402,7 @@ function closeSupportOverlay() {
 
 async function submitSupport() {
   const desc = document.getElementById('support-desc')?.value?.trim();
-  if (!desc) { alert('Please describe your issue'); return; }
+  if (!desc) { tpToast('Please describe your issue'); return; }
 
   const fileInput = document.getElementById('support-file');
   const file = fileInput?.files?.[0];
@@ -5723,13 +6427,22 @@ async function submitSupport() {
     } else {
       btn.disabled = false;
       btn.textContent = 'Send to Support →';
-      alert('Failed to send — please email hello@testpilotapp.dev directly');
+      tpToast('Failed to send — please email hello@testpilotapp.dev directly');
     }
   } catch (e) {
     btn.disabled = false;
     btn.textContent = 'Send to Support →';
-    alert('Error: ' + e.message);
+    tpToast('Error: ' + e.message);
   }
+}
+
+async function openBillingPortal() {
+  try {
+    const res = await fetch(API + '/api/billing/portal', { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.url) { window.location.href = data.url; return; }
+    tpToast(data.error || 'Could not open the billing portal.');
+  } catch (e) { tpToast('Network error — try again.'); }
 }
 
 function showUpgradeModal() {
@@ -5746,9 +6459,9 @@ async function checkout(plan) {
     });
     const data = await res.json();
     if (data.url) window.location.href = data.url;
-    else alert('Payment error: ' + (data.error || 'Unknown'));
+    else tpToast('Payment error: ' + (data.error || 'Unknown'));
   } catch (e) {
-    alert('Payment error: ' + e.message);
+    tpToast('Payment error: ' + e.message);
   }
 }
 
@@ -5789,8 +6502,12 @@ async function init() {
   if (currentUser?.plan === 'free') {
     const seen = localStorage.getItem('tp_welcome_seen_' + currentUser.email);
     const el = document.getElementById('welcome-overlay');
-    if (!seen && el) el.style.display = 'flex';
+    if (!seen && el) { applyWelcomeCopy(); el.style.display = 'flex'; }
   }
+
+  // A first-timer has no idea "Learn New App" must come first — walk them in.
+  // (Or, if they just came through /first-run, show the app-ready chooser.)
+  setTimeout(postLoginFlow, 700);
 }
 
 init();
@@ -5824,7 +6541,7 @@ init();
       </ul>
 
       <p style="color:#f4f2ee;font-weight:600;margin-bottom:8px">3. YOUR RESPONSIBILITY</p>
-      <p style="margin-bottom:16px">You are solely responsible for all activities through your account, ensuring legal authorization for each test, and any consequences of your use of the Service. You agree to indemnify Sana Ventures Studio SL against all claims arising from your use or misuse of TestPilot.</p>
+      <p style="margin-bottom:16px">You are solely responsible for all activities through your account, ensuring legal authorization for each test, and any consequences of your use of the Service. You agree to indemnify Danijel Muranovic Vidackovic against all claims arising from your use or misuse of TestPilot.</p>
 
       <p style="color:#f4f2ee;font-weight:600;margin-bottom:8px">4. BYOK — API COSTS</p>
       <p style="margin-bottom:16px">You connect your own Anthropic API key. You are solely responsible for all costs incurred on your Anthropic account. TestPilot stores your key only in your browser and never on our servers.</p>
@@ -5833,7 +6550,7 @@ init();
       <p style="margin-bottom:16px">The Service is provided "as is" without warranties of any kind. We do not guarantee accuracy of test results, detection of all vulnerabilities, or uninterrupted service.</p>
 
       <p style="color:#f4f2ee;font-weight:600;margin-bottom:8px">6. LIMITATION OF LIABILITY</p>
-      <p style="margin-bottom:16px">Sana Ventures Studio SL shall not be liable for any indirect, incidental, or consequential damages. Our total liability shall not exceed the amount you paid in the preceding 12 months or €100, whichever is greater.</p>
+      <p style="margin-bottom:16px">Danijel Muranovic Vidackovic shall not be liable for any indirect, incidental, or consequential damages. Our total liability shall not exceed the amount you paid in the preceding 12 months or €100, whichever is greater.</p>
 
       <p style="color:#f4f2ee;font-weight:600;margin-bottom:8px">7. PRIVACY</p>
       <p style="margin-bottom:16px">We collect your email, plan status, and test history. We comply with GDPR. Your API key is never stored on our servers. Full details: <a href="/privacy.html" target="_blank" style="color:#c8f040">Privacy Policy</a>.</p>
@@ -5857,6 +6574,576 @@ init();
 </div>
 
 <!-- LEARN FIRST OVERLAY -->
+<script>
+// Free-run-first welcome copy. Asking a brand-new visitor for an API key
+// before they have seen anything — while their free run sits unused — argues
+// against our own offer.
+function applyWelcomeCopy() {
+  var body = document.getElementById('welcome-body');
+  if (!body) return;
+  var hasFreeRun = currentUser && currentUser.plan === 'free' && currentUser.free_run_used !== true;
+  if (!hasFreeRun) return;   // already spent it: the original key-first copy is right
+  body.innerHTML =
+    '<div style="background:rgba(200,240,64,0.05);border:1px solid rgba(200,240,64,0.12);padding:16px 18px;border-radius:2px">' +
+      '<div style="font-family:\'DM Mono\',monospace;font-size:11px;color:#c8f040;letter-spacing:1px;margin-bottom:10px">// 01 &mdash; YOUR FIRST TEST IS ON US</div>' +
+      '<div style="font-size:13px;color:#c8c8c4;line-height:1.7">You have <strong style="color:#f4f2ee">one free test run</strong> waiting. No API key, no card, nothing to set up &mdash; describe what to test in plain english and watch the agent do it on your app.</div>' +
+    '</div>' +
+    '<div style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.07);padding:16px 18px;border-radius:2px">' +
+      '<div style="font-family:\'DM Mono\',monospace;font-size:11px;color:#8a8a8a;letter-spacing:1px;margin-bottom:10px">// 02 &mdash; AFTER THAT</div>' +
+      '<div style="font-size:13px;color:#a8a8a8;line-height:1.7">To keep testing you add your own Anthropic API key (about &euro;0.10&ndash;&euro;0.50 per run, paid straight to Anthropic), or pick a plan. We will show you how when you get there.</div>' +
+    '</div>' +
+    '<div style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.07);padding:16px 18px;border-radius:2px">' +
+      '<div style="font-family:\'DM Mono\',monospace;font-size:11px;color:#8a8a8a;letter-spacing:1px;margin-bottom:10px">// 03 &mdash; HELP US IMPROVE</div>' +
+      '<div style="font-size:13px;color:#a8a8a8;line-height:1.7">TestPilot is in early access. If anything breaks or could be better, tell us via <strong style="color:#c8c8c4">Support</strong> in the sidebar.</div>' +
+    '</div>';
+}
+
+// Shown under the report once a free run has actually been spent. A bar, not
+// a modal — the report stays readable.
+function showFreeRunBar() {
+  if (document.getElementById('free-run-bar')) return;
+  var bar = document.createElement('div');
+  bar.id = 'free-run-bar';
+  bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:9990;background:#111;border-top:1px solid rgba(200,240,64,0.3);padding:14px 20px;display:flex;gap:14px;align-items:center;justify-content:center;flex-wrap:wrap;box-shadow:0 -8px 30px rgba(0,0,0,0.5)';
+  bar.innerHTML =
+    '<span style="font-family:\'DM Mono\',monospace;font-size:12px;color:#c8c8c4">That was your free run &mdash; the report above is yours to keep. To run more, add your Claude API key or pick a plan.</span>' +
+    '<button id="free-run-bar-key" class="btn btn-primary" style="font-size:12px;padding:8px 16px">Keep testing &rarr;</button>' +
+    '<button id="free-run-bar-x" style="background:transparent;border:1px solid #3a3a3a;color:#999;font-family:\'DM Mono\',monospace;font-size:11px;padding:8px 14px;border-radius:2px;cursor:pointer">Not now</button>';
+  document.body.appendChild(bar);
+  document.getElementById('free-run-bar-x').onclick = function () { bar.remove(); };
+  document.getElementById('free-run-bar-key').onclick = function () {
+    bar.remove();
+    var m = document.getElementById('free-run-nudge');
+    if (m) m.style.display = 'flex';
+  };
+}
+</script>
+<!-- IN-PAGE DIALOGS — native alert()/confirm() block every timer on the page
+     (including a running test stream) until dismissed, and look nothing like
+     the product. Same call shape; tpConfirm resolves a promise. -->
+<div id="tp-toasts" style="position:fixed;right:18px;bottom:18px;z-index:10050;display:flex;flex-direction:column;gap:8px;align-items:flex-end;pointer-events:none"></div>
+<div id="tp-confirm" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.8);z-index:10060;align-items:center;justify-content:center;padding:20px">
+  <div style="background:#111;border:1px solid rgba(200,240,64,0.25);max-width:460px;width:100%;border-radius:4px;overflow:hidden">
+    <div id="tp-confirm-body" style="padding:24px;font-family:'DM Mono',monospace;font-size:12.5px;color:#cfcfcf;line-height:1.7;white-space:pre-wrap"></div>
+    <div style="display:flex;gap:10px;justify-content:flex-end;padding:0 24px 22px">
+      <button id="tp-confirm-no" style="background:transparent;border:1px solid #3a3a3a;color:#aaa;font-family:'DM Mono',monospace;font-size:12px;padding:9px 18px;border-radius:2px;cursor:pointer">Cancel</button>
+      <button id="tp-confirm-yes" style="background:#c8f040;border:none;color:#080808;font-family:'Syne',sans-serif;font-weight:700;font-size:12.5px;padding:9px 20px;border-radius:2px;cursor:pointer">OK</button>
+    </div>
+  </div>
+</div>
+<script>
+function tpToast(message, kind) {
+  var host = document.getElementById('tp-toasts');
+  var text = String(message == null ? '' : message);
+  if (!host) { console.warn('[toast]', text); return; }
+  var bad = kind === 'error' || /error|failed|could not|cannot|invalid|required|too many|wrong/i.test(text);
+  var el = document.createElement('div');
+  el.style.cssText = 'pointer-events:auto;cursor:pointer;max-width:360px;background:#111;border:1px solid ' +
+    (bad ? 'rgba(239,68,68,0.45)' : 'rgba(200,240,64,0.35)') +
+    ';border-left:3px solid ' + (bad ? '#ef4444' : '#c8f040') +
+    ';border-radius:3px;padding:12px 14px;font-family:\'DM Mono\',monospace;font-size:11.5px;line-height:1.6;color:#e8e8e8;box-shadow:0 10px 30px rgba(0,0,0,0.55);white-space:pre-wrap;opacity:1;transition:opacity .18s ease';
+  el.textContent = text;
+  var kill = function () {
+    el.style.opacity = '0'; el.style.transform = 'translateY(6px)';
+    setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 200);
+  };
+  el.onclick = kill;
+  host.appendChild(el);
+  // Long messages need longer on screen; nothing outlives ~11s.
+  setTimeout(kill, Math.min(11000, 4200 + text.length * 28));
+}
+
+function tpConfirm(message) {
+  return new Promise(function (resolve) {
+    var ov = document.getElementById('tp-confirm');
+    var body = document.getElementById('tp-confirm-body');
+    var yes = document.getElementById('tp-confirm-yes');
+    var no = document.getElementById('tp-confirm-no');
+    if (!ov || !body || !yes || !no) { resolve(true); return; }
+    body.textContent = String(message == null ? '' : message);
+    var done = function (val) {
+      ov.style.display = 'none';
+      document.removeEventListener('keydown', onKey, true);
+      yes.onclick = null; no.onclick = null;
+      resolve(val);
+    };
+    var onKey = function (e) {
+      if (e.key === 'Escape') { e.preventDefault(); done(false); }
+      else if (e.key === 'Enter') { e.preventDefault(); done(true); }
+    };
+    yes.onclick = function () { done(true); };
+    no.onclick = function () { done(false); };
+    document.addEventListener('keydown', onKey, true);
+    ov.style.display = 'flex';
+    try { yes.focus(); } catch (e) {}
+  });
+}
+</script>
+<!-- GUIDED TOUR — spotlight + one instruction at a time, anchored to the real
+     control. Steps self-advance as the user fills each field, so it reads as
+     hand-holding rather than a slideshow. -->
+<div id="tour-layer" style="display:none;position:fixed;inset:0;z-index:9998;pointer-events:none">
+  <div id="tour-ring" style="position:absolute;border:2px solid #c8f040;border-radius:4px;box-shadow:0 0 0 9999px rgba(8,8,8,0.66);transition:top .18s ease,left .18s ease,width .18s ease,height .18s ease"></div>
+  <div id="tour-bubble" style="position:absolute;pointer-events:auto;background:#111;border:1px solid rgba(200,240,64,0.3);border-radius:4px;padding:16px 18px;width:300px;box-shadow:0 14px 44px rgba(0,0,0,0.65)">
+    <div id="tour-count" style="font-family:'DM Mono',monospace;font-size:10px;color:#c8f040;letter-spacing:1px;margin-bottom:7px"></div>
+    <div id="tour-title" style="font-family:'Syne',sans-serif;font-size:14px;font-weight:800;color:#f4f2ee;margin-bottom:6px"></div>
+    <div id="tour-text" style="font-family:'DM Mono',monospace;font-size:11.5px;color:#9a9a9a;line-height:1.65"></div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-top:14px">
+      <button onclick="endTour(true)" style="background:transparent;border:1px solid #3a3a3a;color:#999;font-family:'DM Mono',monospace;font-size:10.5px;padding:6px 12px;border-radius:2px;cursor:pointer" onmouseover="this.style.borderColor='#666';this.style.color='#ddd'" onmouseout="this.style.borderColor='#3a3a3a';this.style.color='#999'">Skip guide</button>
+      <button id="tour-next" onclick="tourNext()" style="background:#c8f040;border:none;color:#080808;font-family:'Syne',sans-serif;font-weight:700;font-size:11.5px;padding:7px 14px;border-radius:2px;cursor:pointer">Next &rarr;</button>
+    </div>
+  </div>
+</div>
+<script>
+// ── GUIDED TOUR ENGINE ─────────────────────────────────────────────────────
+// The dashboard re-renders whole views into innerHTML, so a step can never
+// hold an element reference — every tick re-finds its target by selector and
+// re-anchors. A missing target just parks the tour (hidden) until it appears.
+var _tour = null, _tourTimer = null;
+
+function _tq(sel) { try { return document.querySelector(sel); } catch (e) { return null; } }
+function _tval(sel) { var el = _tq(sel); return el ? String(el.value || '') : ''; }
+function _tchecked(sel) { var el = _tq(sel); return !!(el && el.checked); }
+function _tcard(text) {
+  var cards = document.querySelectorAll('.card');
+  for (var i = 0; i < cards.length; i++) if (cards[i].textContent.indexOf(text) !== -1) return cards[i];
+  return null;
+}
+function _mrCfg() { try { return state.multiRoleConfig || {}; } catch (e) { return {}; } }
+
+function _mrField(i, kind) {
+  var tag = kind === 'scenario' ? 'textarea' : 'input';
+  var els = document.querySelectorAll(tag + '[onchange*="mrSetRole("]');
+  for (var k = 0; k < els.length; k++) {
+    var oc = els[k].getAttribute('onchange') || '';
+    if (oc.indexOf('mrSetRole(' + i + ",'" + kind + "'") === 0) return els[k];
+  }
+  return null;
+}
+
+function _mrCard(i) {
+  var el = _mrField(i, 'name');
+  if (!el) return null;
+  var row = el.parentElement;
+  return (row && row.parentElement) || row || el;
+}
+
+function _mrRole(i) { try { return _mrCfg().roles[i] || null; } catch (e) { return null; } }
+function _mrFilled(i) { var r = _mrRole(i); return !!(r && r.email && r.password); }
+function _mrScenario(i) { var r = _mrRole(i); return !!(r && r.scenario && r.scenario.length > 8); }
+
+function _secUser(which) {
+  try {
+    var u = state.secConfig[which];
+    return !!(u && u.email && (u.password || u.sessionState));
+  } catch (e) { return false; }
+}
+
+var TOURS = {
+  learn: [
+    { sel: 'button[onclick="gatedLearn()"]', title: 'Start by teaching it your app',
+      text: 'TestPilot walks your app before it can test it. Click "Learn New App".',
+      done: function () { return state.view === 'learn'; } },
+    { sel: '#learn-url', title: 'Paste your app\u2019s address',
+      text: 'The full URL of the app you want tested \u2014 e.g. https://myapp.vercel.app',
+      done: function () { return _tval('#learn-url').length > 10; } },
+    { sel: '#learn-no-login', title: 'Does it need a login?',
+      text: 'If anyone can use your app without signing in, tick this. If it has a sign-in, leave it and fill in a test account below.',
+      done: function () { return _tchecked('#learn-no-login') || _tval('#learn-email').indexOf('@') > 0; } },
+    { sel: '#learn-email', title: 'Use a test account',
+      text: 'A throwaway account, not your real admin one \u2014 TestPilot signs in with it and clicks around your app.',
+      skipIf: function () { return _tchecked('#learn-no-login'); },
+      done: function () { return _tval('#learn-email').indexOf('@') > 0; } },
+    { sel: '#learn-password', title: 'And its password',
+      text: 'Used to sign in to your own app during the crawl.',
+      skipIf: function () { return _tchecked('#learn-no-login'); },
+      done: function () { return _tval('#learn-password').length > 0; } },
+    { sel: '#learn-btn', title: 'Now let it learn',
+      text: 'Takes 1\u20133 minutes. It opens every page, form and button and maps them. You get a popup the moment it\u2019s ready.',
+      done: function () { return (state.learnProgress && state.learnProgress.length > 0) || state.view !== 'learn'; } }
+  ],
+
+  security: [
+    { sel: '#sec-app', title: 'Pick the app to scan',
+      text: 'The app you just taught it.',
+      done: function () { return _tval('#sec-app') !== ''; } },
+    { find: function () { return _tcard('User A'); }, title: 'User A \u2014 the owner',
+      text: 'This account creates the data. Name, email and password \u2014 or hit Capture to log in once if your app uses 2FA or SSO.',
+      done: function () { return _secUser('userA'); } },
+    { find: function () { return _tcard('User B'); }, title: 'User B \u2014 the intruder',
+      text: 'A different account. TestPilot signs in as B and checks it cannot reach A\u2019s data \u2014 IDOR, URL tampering, session leakage, raw API calls.',
+      done: function () { return _secUser('userB'); } },
+    { sel: '#sec-destructive', title: 'Leave this off',
+      text: 'Only tick it on staging. It fires real DELETE and PUT probes at User A\u2019s records \u2014 if the app is vulnerable, they will actually be destroyed.' },
+    { sel: 'button[onclick="secRunScan()"]', title: 'Run the scan',
+      text: 'A few minutes. You get a matrix of what B could reach that it never should have.' }
+  ],
+
+  scenario: [
+    { sel: '#test-scenario', title: 'What should happen?',
+      text: 'One flow, in plain english, ending in something checkable. Example: "Log in, create a project called Test, and check it appears in the list."',
+      done: function () { return _tval('#test-scenario').split(/\s+/).filter(Boolean).length >= 5; } },
+    { sel: '#test-no-login', title: 'Login needed?',
+      text: 'Public app \u2014 tick it. Otherwise fill the test account below.',
+      done: function () { return _tchecked('#test-no-login') || _tval('#test-email').indexOf('@') > 0; } },
+    { sel: '#test-email', title: 'Test account',
+      text: 'The same throwaway account is fine.',
+      skipIf: function () { return _tchecked('#test-no-login'); },
+      done: function () { return _tval('#test-email').indexOf('@') > 0; } },
+    { sel: '#test-password', title: 'Password',
+      skipIf: function () { return _tchecked('#test-no-login'); },
+      text: 'Then you are ready to run.',
+      done: function () { return _tval('#test-password').length > 0; } },
+    { sel: 'button[onclick="runTest()"]', title: 'Run the test',
+      text: 'You watch each step live with screenshots, and get a bug list at the end.' }
+  ],
+
+  interactive: [
+    { sel: '#chat-app', title: 'Pick the app',
+      text: 'Choose which app to drive.',
+      done: function () { return _tval('#chat-app') !== ''; } },
+    { sel: '#chat-no-login', title: 'Login needed?',
+      text: 'Tick if public, otherwise fill the test account below.',
+      done: function () { return _tchecked('#chat-no-login') || _tval('#chat-email').indexOf('@') > 0; } },
+    { sel: 'button[onclick="startChat()"]', title: 'Open the session',
+      text: 'TestPilot opens your app in a live browser.' },
+    { sel: '#chat-input', title: 'Now just tell it what to do',
+      text: 'e.g. "Go to Clients and create Ivan Fernandez". It acts on your app and shows you the screen after every command.' }
+  ],
+
+  multirole: [
+    { sel: 'select[onchange="mrSetApp(this.value)"]', title: 'Pick the app',
+      text: 'The app all the roles will act on.',
+      done: function () { return _tval('select[onchange="mrSetApp(this.value)"]') !== ''; } },
+    { find: function () { return _mrCard(0); }, title: 'Role 1 \u2014 who goes first',
+      text: 'Name it after the real role (e.g. Admin) and give that role\u2019s login.',
+      done: function () { return _mrFilled(0); } },
+    { find: function () { return _mrField(0, 'scenario'); }, title: 'What should Role 1 do?',
+      text: 'Plain english \u2014 e.g. "Create a new job for client Ivan Fernandez."',
+      done: function () { return _mrScenario(0); } },
+    { find: function () { return _mrCard(1); }, title: 'Role 2 \u2014 runs next',
+      text: 'A different account. It starts once Role 1 has finished, and sees whatever Role 1 created.',
+      done: function () { return _mrFilled(1); } },
+    { find: function () { return _mrField(1, 'scenario'); }, title: 'What should Role 2 do?',
+      text: 'e.g. "Open Jobs and accept the job Admin just created." That handover is the thing being proved.',
+      done: function () { return _mrScenario(1); } },
+    { sel: 'button[onclick="mrAddRole()"]', title: 'Need a third role?',
+      text: 'Add as many as the flow needs \u2014 they run in the order listed.' },
+    { sel: 'button[onclick="runMultiRole()"]', title: 'Run the sequence',
+      text: 'Each role acts in turn on the same app, so you can prove the handover works end to end.' }
+  ]
+};
+
+function _tourKey(name) {
+  var who = (typeof currentUser !== 'undefined' && currentUser && currentUser.email) || 'anon';
+  return 'tp_tour_done_' + name + '_' + who;
+}
+
+function startTour(name) {
+  var steps = TOURS[name];
+  if (!steps || !steps.length) return;
+  _tour = { name: name, i: 0, steps: steps, shown: -1 };
+  if (_tourTimer) clearInterval(_tourTimer);
+  _tourTimer = setInterval(_tourTick, 320);
+  _tourTick();
+}
+
+function endTour(remember) {
+  if (_tour && remember) { try { localStorage.setItem(_tourKey(_tour.name), '1'); } catch (e) {} }
+  _tour = null;
+  if (_tourTimer) { clearInterval(_tourTimer); _tourTimer = null; }
+  var l = document.getElementById('tour-layer');
+  if (l) l.style.display = 'none';
+}
+
+function tourNext() {
+  if (!_tour) return;
+  _tour.i++;
+  if (_tour.i >= _tour.steps.length) endTour(true); else _tourTick();
+}
+
+function _tourTick() {
+  if (!_tour) return;
+  var layer = document.getElementById('tour-layer');
+  if (!layer) return;
+
+  // A predicate that throws (view not mounted yet, state key missing) must
+  // never kill the tour — treat it as "not done" and try again next tick.
+  var step, guard = 0;
+  while (guard++ < 12) {
+    step = _tour.steps[_tour.i];
+    if (!step) { endTour(true); return; }
+    var skip = false, done = false;
+    try { skip = !!(step.skipIf && step.skipIf()); } catch (e) {}
+    try { done = !!(step.done && step.done()); } catch (e) {}
+    if (skip || done) { _tour.i++; continue; }
+    break;
+  }
+  if (!step) { endTour(true); return; }
+
+  // Another modal owns the screen (terms, welcome, app-ready) — stand down.
+  var blockers = ['terms-overlay', 'welcome-overlay', 'app-ready-overlay', 'learn-first-overlay'];
+  for (var b = 0; b < blockers.length; b++) {
+    var bl = document.getElementById(blockers[b]);
+    if (bl && bl.style.display && bl.style.display !== 'none') { layer.style.display = 'none'; return; }
+  }
+
+  var el = null;
+  try { el = step.find ? step.find() : _tq(step.sel); } catch (e) {}
+  if (!el || !el.getClientRects().length) { layer.style.display = 'none'; return; }
+
+  // A bare checkbox is a 20px square sitting next to the words that explain
+  // it — highlight the whole label so the text is inside the spotlight and the
+  // bubble does not land on top of it.
+  var anchor = el;
+  if (el.tagName === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) {
+    var wrap = (el.closest && el.closest('label')) || el.parentElement;
+    if (wrap && wrap.getClientRects().length) anchor = wrap;
+  }
+
+  if (_tour.shown !== _tour.i) {
+    _tour.shown = _tour.i;
+    try { anchor.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { }
+    // Re-anchor per frame until the smooth scroll settles — otherwise the ring
+    // sits at the target's old position for a few hundred ms. Safe against
+    // recursion: by now shown === i, so this branch cannot re-enter.
+    var _until = Date.now() + 800;
+    (function _follow() {
+      if (!_tour) return;
+      _tourTick();
+      if (Date.now() < _until) requestAnimationFrame(_follow);
+    })();
+  }
+
+  layer.style.display = 'block';
+  var r = anchor.getBoundingClientRect();
+  var ring = document.getElementById('tour-ring');
+  ring.style.left = (r.left - 6) + 'px';
+  ring.style.top = (r.top - 6) + 'px';
+  ring.style.width = (r.width + 12) + 'px';
+  ring.style.height = (r.height + 12) + 'px';
+
+  document.getElementById('tour-count').textContent = '// step ' + (_tour.i + 1) + ' of ' + _tour.steps.length;
+  document.getElementById('tour-title').textContent = step.title || '';
+  document.getElementById('tour-text').textContent = step.text || '';
+
+  var bub = document.getElementById('tour-bubble');
+  var bw = 300, bh = bub.offsetHeight || 150, gap = 16;
+  var left, top;
+  if (r.right + gap + bw < window.innerWidth) left = r.right + gap;        // to the right (sidebar)
+  else if (r.left - gap - bw > 0) left = r.left - gap - bw;                 // to the left
+  else left = Math.max(12, Math.min(r.left, window.innerWidth - bw - 12));  // stacked
+  top = r.top + r.height / 2 - bh / 2;
+  top = Math.max(12, Math.min(top, window.innerHeight - bh - 12));
+  bub.style.left = left + 'px';
+  bub.style.top = top + 'px';
+}
+
+// Reposition instantly on scroll/resize rather than waiting for the next tick.
+window.addEventListener('scroll', function () { if (_tour) _tourTick(); }, true);
+window.addEventListener('resize', function () { if (_tour) _tourTick(); });
+
+// An example about THEIR app beats a generic one — the sections come from
+// the crawl, so it names screens they recognise.
+function flowPlaceholder(app) {
+  var fallback = 'Log in, create a new record called TP-TEST, and check it appears in the list';
+  try {
+    var secs = ((app && app.summary && app.summary.sections) || [])
+      .map(function (s) { return s && s.name; })
+      .filter(Boolean);
+    if (secs.length) {
+      return 'e.g. Go to ' + String(secs[0]).replace(/"/g, '') +
+             ', add a new entry called TP-TEST, and check it appears in the list';
+    }
+  } catch (e) {}
+  return 'e.g. ' + fallback;
+}
+
+function showGuideChooser() { showAppReady('', true); }
+
+// "Guide Me": on a test screen, restart that screen's walkthrough; anywhere
+// else, ask which test to walk through. Always runs — an explicit request
+// ignores the "already seen it" flag.
+function openGuide() {
+  var byView = { 'learn': 'learn', 'security': 'security', 'test-run': 'scenario', 'chat': 'interactive', 'multirole': 'multirole' };
+  var name = byView[state.view];
+  if (name) { endTour(false); startTour(name); return; }
+  if (!state.apps || state.apps.length === 0) { endTour(false); startTour('learn'); return; }
+  showGuideChooser();
+}
+
+// Arriving from /first-run with ?learned=<appId>: open that app and pop the
+// "ready to test" chooser. Returns true when it owns this page load, so the
+// cold-start tour does not fire on top of it.
+var _learnedHandled = false;
+
+function _tpOverlayOpen(id) {
+  var el = document.getElementById(id);
+  return !!(el && el.style.display && el.style.display !== 'none');
+}
+
+function handleLearnedHandoff() {
+  if (_learnedHandled) return false;
+  var appId = '';
+  try { appId = new URLSearchParams(window.location.search).get('learned') || ''; } catch (e) {}
+  if (!appId) return false;
+  // Terms / welcome own the screen first — stay claimed but wait to be
+  // re-driven when they close, so the popup never opens underneath them.
+  if (_tpOverlayOpen('terms-overlay') || _tpOverlayOpen('welcome-overlay')) return true;
+
+  _learnedHandled = true;
+  // Drop the param so a refresh doesn't replay the popup.
+  try { history.replaceState({}, '', window.location.pathname); } catch (e) {}
+
+  var app = (state.apps || []).find(function (a) { return a.appId === appId; });
+  if (app) { try { viewApp(appId); } catch (e) {} }
+  // The analyser returns 'Unknown' for pages it cannot characterise (a bare
+  // placeholder site, say) — fall back to the URL rather than announcing that
+  // 'Unknown' is ready.
+  var rawName = app && app.summary && app.summary.appName;
+  var name = (rawName && !/^(unknown|untitled|n\/?a|none)$/i.test(String(rawName).trim())) ? rawName : (app && app.url);
+  setTimeout(function () {
+    showAppReady(name ? (name + ' is learned and ready to test.') : '');
+  }, 450);
+  return true;
+}
+
+// One entry point for everything that should happen once the user is actually
+// looking at the dashboard: the first-run handoff wins, otherwise a brand-new
+// account gets the walkthrough.
+function postLoginFlow() {
+  if (handleLearnedHandoff()) return;
+  maybeStartLearnTour();
+}
+
+function maybeStartTour(name) {
+  if (_tour) return;
+  try { if (localStorage.getItem(_tourKey(name))) return; } catch (e) {}
+  startTour(name);
+}
+
+// First-timers only: nobody with apps already learned needs the walkthrough.
+function maybeStartLearnTour() {
+  try {
+    if (_tour || !state.apps || state.apps.length > 0) return;
+    var t = document.getElementById('terms-overlay'), w = document.getElementById('welcome-overlay');
+    if ((t && t.style.display === 'flex') || (w && w.style.display === 'flex')) return;
+    maybeStartTour('learn');
+  } catch (e) {}
+}
+
+// The welcome modal is the natural handoff point into the walkthrough.
+(function () {
+  var prev = window.closeWelcome;
+  window.closeWelcome = function () {
+    if (typeof prev === 'function') prev.apply(this, arguments);
+    setTimeout(postLoginFlow, 300);
+  };
+})();
+
+// ...and so is the terms gate. init() returns early while terms are pending,
+// so a first-ever login never reaches its hook — a brand new account (the one
+// the tour is actually for) would otherwise only get it on a later visit.
+(function () {
+  var prev = window.acceptTerms;
+  window.acceptTerms = function () {
+    var out = (typeof prev === 'function') ? prev.apply(this, arguments) : undefined;
+    // Free users still get the welcome modal first; it chains on from there.
+    setTimeout(postLoginFlow, 900);
+    return out;
+  };
+})();
+</script>
+<!-- APP READY — shown the moment a crawl finishes. The crawl used to end
+     silently: the view just swapped to the platform map, so users had no
+     signal the app was ready or that picking a test was now their move. -->
+<div id="app-ready-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:10000;align-items:center;justify-content:center;padding:20px">
+  <div style="background:#111;border:1px solid rgba(200,240,64,0.2);max-width:480px;width:100%;border-radius:4px;overflow:hidden">
+    <div style="background:#0f0f0f;border-bottom:1px solid rgba(200,240,64,0.1);padding:18px 24px;display:flex;align-items:center;justify-content:space-between">
+      <div id="app-ready-title" style="font-family:'Syne',sans-serif;font-size:16px;font-weight:800;color:#f4f2ee">Your app is <span style="color:#c8f040">ready to test</span></div>
+      <button onclick="closeAppReady()" style="background:none;border:none;color:#555;font-size:22px;cursor:pointer;line-height:1;padding:0" onmouseover="this.style.color='#f4f2ee'" onmouseout="this.style.color='#555'">&times;</button>
+    </div>
+    <div style="padding:24px;display:flex;flex-direction:column;gap:16px">
+      <p id="app-ready-sub" style="font-size:12px;color:#888;font-family:'DM Mono',monospace;line-height:1.7;margin:0"></p>
+      <p id="app-ready-lead" style="font-size:13px;color:#aaa;font-family:'DM Mono',monospace;line-height:1.7;margin:0">Now choose the test you want to run &mdash; from the menu on the <strong style="color:#c8f040">left</strong>, or straight from here:</p>
+      <div id="app-ready-choices" style="display:flex;flex-direction:column;gap:8px"></div>
+    </div>
+  </div>
+</div>
+<style>
+@keyframes tpReadyPulse { 0%,100% { box-shadow:0 0 0 0 rgba(200,240,64,0); } 50% { box-shadow:0 0 0 3px rgba(200,240,64,0.4); } }
+#nav-testing.tp-pulse { animation:tpReadyPulse 1.3s ease-in-out 5; border-radius:3px; }
+</style>
+<script>
+// Only offer what the current plan can actually run, so "pick a test" never
+// walks the user straight into a paywall. Locked ones stay visible (they are
+// the upgrade pitch) but are clearly marked.
+function _appReadyOptions() {
+  return [
+    { label: 'Security Test',    desc: 'Checks one user cannot see another\u2019s data (IDOR, sessions)',  feature: 'security',    tour: 'security',    go: function () { gatedNavigate('security', 'security'); } },
+    { label: 'Flow Test',        desc: 'One flow through your app \u2014 say what should happen, it checks',  feature: 'scenario',    tour: 'scenario',    go: function () { navigateToScenario(); } },
+    { label: 'Interactive Test', desc: 'Drive your app live with natural-language commands',            feature: 'interactive', tour: 'interactive', go: function () { gatedNavigate('chat', 'interactive'); } },
+    { label: 'Multi-Role',       desc: 'One flow across several user roles in sequence',                feature: 'multirole',   tour: 'multirole',   go: function () { gatedNavigate('multirole', 'multirole'); } }
+  ];
+}
+
+function showAppReady(message, guide) {
+  var ov = document.getElementById('app-ready-overlay');
+  if (!ov) return;
+  var sub = document.getElementById('app-ready-sub');
+  if (sub) sub.textContent = '// ' + (message || (guide ? 'step-by-step guide' : 'Deep crawl complete \u2014 pages, forms and buttons mapped.'));
+  // Same chooser, two jobs: announcing a finished crawl, and re-opening the
+  // walkthrough on demand from "Guide Me".
+  var ttl = document.getElementById('app-ready-title');
+  if (ttl) ttl.innerHTML = guide
+    ? 'Pick a test \u2014 <span style="color:#c8f040">I\u2019ll walk you through it</span>'
+    : 'Your app is <span style="color:#c8f040">ready to test</span>';
+  var lead = document.getElementById('app-ready-lead');
+  if (lead) lead.innerHTML = guide
+    ? 'I\u2019ll highlight each field and tell you what to put in it, one step at a time.'
+    : 'Now choose the test you want to run &mdash; from the menu on the <strong style="color:#c8f040">left</strong>, or straight from here:';
+
+  var box = document.getElementById('app-ready-choices');
+  if (box) {
+    box.innerHTML = '';
+    _appReadyOptions().forEach(function (opt) {
+      var ok = hasFeature(opt.feature);
+      var row = document.createElement('button');
+      row.style.cssText = 'text-align:left;display:flex;flex-direction:column;gap:3px;padding:12px 14px;border-radius:3px;cursor:pointer;font-family:inherit;' +
+        (ok ? 'background:rgba(200,240,64,0.06);border:1px solid rgba(200,240,64,0.25);'
+            : 'background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.07);');
+      row.innerHTML =
+        '<span style="font-family:\'Syne\',sans-serif;font-size:13px;font-weight:700;color:' + (ok ? '#f4f2ee' : '#666') + '">' +
+        opt.label + (ok ? '' : ' <span style="font-size:9px;font-weight:700;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.3);border-radius:2px;padding:1px 5px;margin-left:4px">\uD83D\uDD12 Upgrade</span>') +
+        '</span>' +
+        '<span style="font-family:\'DM Mono\',monospace;font-size:11px;color:' + (ok ? '#8a8a8a' : '#555') + ';line-height:1.5">' + opt.desc + '</span>';
+      row.onclick = function () {
+        closeAppReady();
+        opt.go();
+        // Hand straight over to that test's walkthrough — the popup told them
+        // to pick a test, this shows them how to fill it in.
+        if (ok && opt.tour) setTimeout(function () { startTour(opt.tour); }, 450);
+        if (!ok) showUpgradeModal();
+      };
+      box.appendChild(row);
+    });
+  }
+
+  ov.style.display = 'flex';
+  // render() rebuilds the sidebar, so attach the pulse after it settles.
+  setTimeout(function () {
+    var nav = document.getElementById('nav-testing');
+    if (nav) nav.classList.add('tp-pulse');
+  }, 120);
+}
+
+function closeAppReady() {
+  var ov = document.getElementById('app-ready-overlay');
+  if (ov) ov.style.display = 'none';
+  var nav = document.getElementById('nav-testing');
+  if (nav) nav.classList.remove('tp-pulse');
+}
+</script>
 <div id="learn-first-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:10000;align-items:center;justify-content:center;padding:20px">
   <div style="background:#111;border:1px solid rgba(200,240,64,0.2);max-width:440px;width:100%;border-radius:4px;overflow:hidden">
     <div style="background:#0f0f0f;border-bottom:1px solid rgba(200,240,64,0.1);padding:18px 24px;display:flex;align-items:center;justify-content:space-between">
@@ -5869,7 +7156,7 @@ init();
         <span style="font-size:20px;flex-shrink:0">🎁</span>
         <div>
           <div style="font-family:'Syne',sans-serif;font-size:13px;font-weight:700;color:#f4f2ee;margin-bottom:4px">Learn an app — get a free test run</div>
-          <div style="font-family:'DM Mono',monospace;font-size:11px;color:#888;line-height:1.6">Once your app is learned, you get <strong style="color:#c8f040">1 free scenario test</strong> on us — up to 100 words, no API key needed. See exactly what TestPilot can do before committing your own key.</div>
+          <div style="font-family:'DM Mono',monospace;font-size:11px;color:#888;line-height:1.6">Once your app is learned, you get <strong style="color:#c8f040">1 free flow test</strong> on us — up to 100 words, no API key needed. See exactly what TestPilot can do before committing your own key.</div>
         </div>
       </div>
       <button onclick="document.getElementById('learn-first-overlay').style.display='none';gatedLearn()" class="btn btn-primary" style="width:100%;justify-content:center">
@@ -5917,7 +7204,7 @@ init();
       <button onclick="closeWelcome()" style="background:none;border:none;color:#555;font-size:24px;cursor:pointer;line-height:1;padding:0;transition:color 0.15s" onmouseover="this.style.color='#f4f2ee'" onmouseout="this.style.color='#555'">×</button>
     </div>
     <!-- Body -->
-    <div style="padding:28px 24px;display:flex;flex-direction:column;gap:20px">
+    <div id="welcome-body" style="padding:28px 24px;display:flex;flex-direction:column;gap:20px">
       <!-- API Key section -->
       <div style="background:rgba(200,240,64,0.05);border:1px solid rgba(200,240,64,0.12);padding:16px 18px;border-radius:2px">
         <div style="font-family:'DM Mono',monospace;font-size:11px;color:#c8f040;letter-spacing:1px;margin-bottom:10px">// 01 — GET YOUR CLAUDE API KEY</div>
