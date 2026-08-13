@@ -8594,6 +8594,17 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
   page.on('pageerror', (e) => { if (diag.console.length < 300) diag.console.push('pageerror: ' + String(e && e.message).slice(0, 250)); });
   page.on('requestfailed', (r) => { try { if (firstParty(r.url()) && diag.failed.length < 300) diag.failed.push(r.url().slice(0, 200)); } catch {} });
   page.on('response', (r) => { try { if (r.status() >= 400 && firstParty(r.url()) && diag.http.length < 300) diag.http.push(r.status() + ' ' + r.url().slice(0, 180)); } catch {} });
+  // A target="_blank" link opens a NEW tab, so the page under test never
+  // changes and an honest link looked dead. Count what the context opens —
+  // and close it immediately: one leaked tab per external link is how a sweep
+  // eats a 4GB VM, and a background tab keeps loading and firing requests that
+  // would be attributed to whatever control is clicked next.
+  let tabsOpened = 0;
+  context.on('page', (p) => {
+    tabsOpened++;
+    p.close().catch(() => {});
+  });
+
   const errSnapshot = () => ({ c: diag.console.length, f: diag.failed.length, h: diag.http.length });
   const errSince = (before) => ({
     console: diag.console.slice(before.c),
@@ -8616,7 +8627,10 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
       for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) | 0;
       extra = '|' + h;
     }
-    return t.length + '|' + document.querySelectorAll('*').length + '|' + checks + '|' + location.href + extra;
+    // extra sits BEFORE the URL so the last segment is always location.href:
+    // the report tells "Navigated" from "Page updated" by comparing that
+    // segment, and a trailing hash made every select claim it navigated.
+    return t.length + '|' + document.querySelectorAll('*').length + '|' + checks + extra + '|' + location.href;
   }, deep).catch(() => null);
 
   const MAX_PAGES = 6, MAX_PER_PAGE = 12, MAX_TOTAL = 40;
@@ -8706,6 +8720,7 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
 
         const before = await domSig(item.kind === 'select');
         const eBefore = errSnapshot();
+        const tabsBefore = tabsOpened;
         let acted = false;
         // A CSS path beats a name: it reaches icon-only controls, and it cannot
         // land on a different element that happens to share the same words.
@@ -8742,6 +8757,9 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
             errs.failed.length ? `${errs.failed.length} network failure(s)` : '',
             errs.console.length ? `console: ${errs.console[0]}` : '',
           ].filter(Boolean).join(' · ');
+        } else if (tabsOpened > tabsBefore) {
+          verdict = 'works';
+          detail = 'Opened in a new tab';
         } else if (before && after && before === after) {
           // Retry once before calling anything dead — this is where a naive
           // sweep starts crying wolf.
