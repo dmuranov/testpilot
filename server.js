@@ -8404,9 +8404,15 @@ const SWEEP_DESTRUCTIVE_RE = /\b(delete|remove|borrar|elimina|eliminar|suprim|l[
 // Commits something outward or irreversible. A deleted record can be restored
 // from a backup; an email sent to a real customer cannot be unsent, and a
 // published post cannot be unseen. These deserve the same question.
-const SWEEP_COMMIT_RE = /\b(save|guardar|speichern|salvar|enregistrer|send|enviar|publish|publicar|post\b|share|compartir|submit|enviar formulario|confirm|confirmar|pay|pagar|checkout|purchase|order\b|subscribe|invite|invitar|approve|aprobar|reject|rechazar|assign|asignar|finalizar|complete order|place order|book\b|reservar|schedule\b|notify|notificar|export|import|apply|aplicar|update|actualizar)\b/i;
+const SWEEP_COMMIT_RE = /\b(save|guardar|speichern|salvar|enregistrer|send|enviar|publish|publicar|post\b|share|compartir|submit|enviar formulario|confirm|confirmar|pay|pagar|checkout|purchase|order\b|subscribe|invite|invitar|approve|aprobar|reject|rechazar|assign|asignar|finalizar|complete order|place order|book\b|reservar|schedule\b|notify|notificar|export(ar|aci[oó]n|ing)?|import(ar|aci[oó]n|ing)?|accept|aceptar|apply|aplicar|update|actualizar)\b/i;
 
 // Glyphs that mean "destroy" on their own, in every app that has ever shipped.
+// Signing out is not destructive, it is TERMINAL: the session dies, and every
+// control checked after it reports broken for a reason that has nothing to do
+// with the app. There is no point asking — the answer during a check is always
+// no — so this one is declined outright rather than gated.
+const SWEEP_LOGOUT_RE = /\b(log ?out|sign ?out|salir|cerrar sesi[oó]n|desconectar|abmelden|sair|se d[ée]connecter|d[ée]connexion|esci|uitloggen)\b/i;
+
 const SWEEP_DESTRUCTIVE_GLYPH_RE = /[\u{1F5D1}\u{232B}\u{2716}\u{274C}]/u;   // 🗑 ⌫ ✖ ❌
 
 function sweepGateReason(label) {
@@ -8415,6 +8421,7 @@ function sweepGateReason(label) {
   // stripping first left an empty string that matched nothing and sailed
   // through as harmless.
   if (SWEEP_DESTRUCTIVE_GLYPH_RE.test(raw)) return 'destructive';
+  if (SWEEP_LOGOUT_RE.test(raw)) return 'session';
   const bare = raw.replace(/[\u{1F5D1}\u{FE0F}✕✖×]/gu, ' ').replace(/\s+/g, ' ').trim();
   if (SWEEP_DESTRUCTIVE_RE.test(bare)) return 'destructive';
   if (SWEEP_COMMIT_RE.test(bare)) return 'commit';
@@ -8518,7 +8525,7 @@ const SWEEP_INVENTORY = `(() => {
   // Innermost only: a wrapper that merely CONTAINS a control is not the control.
   const leaves = real.filter((e) => !real.some((o) => o !== e && e.contains(o)));
 
-  const out = []; const seen = new Set();
+  const out = []; const seen = new Set(); const shapes = new Map();
   for (const el of leaves) {
     const tag = el.tagName;
     const role = (el.getAttribute('role') || '').toLowerCase();
@@ -8550,6 +8557,22 @@ const SWEEP_INVENTORY = `(() => {
     const key = kind + '|' + (named ? label.toLowerCase() : selector);
     if (seen.has(key)) continue;
     seen.add(key);
+
+    // A list of RECORDS is not a list of controls. An activity feed offered 180
+    // rows like "CreoTrabajo6a71be62... user@example.com 4 ago 2026" — every one
+    // a distinct label, together filling the inventory before anything else was
+    // reached. Collapse by shape (ids, numbers and dates blanked) and keep two
+    // per shape: enough to tell whether rows of that kind open, without
+    // spending the run on the hundred that behave identically. Rows whose text
+    // genuinely differs keep their own shape and are all still checked.
+    const shape = kind + '|' + label.toLowerCase()
+      .replace(/[0-9a-f]{6,}/g, '#')
+      .replace(/[0-9]+/g, '#')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const timesSeen = shapes.get(shape) || 0;
+    if (timesSeen >= 2) continue;
+    shapes.set(shape, timesSeen + 1);
     let options = null;
     if (kind === 'select') {
       options = Array.prototype.slice.call(el.options || [])
@@ -8681,6 +8704,12 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
         // clicks things a person never labelled. Ask about those too rather
         // than gambling that the icon is harmless.
         const gate = item.named ? sweepGateReason(item.label) : 'unnamed';
+        if (gate === 'session') {
+          report.items.push({ page: path, kind: item.kind, label: item.label, verdict: 'skipped', detail: 'Signing out would end the check — not clicked' });
+          emitSweep(sweepId, { type: 'skip', message: `  ⏭ "${item.label}" — signing out would end the check` });
+          checked++;
+          continue;
+        }
         if (gate) {
           const decisionKey = (item.named ? item.label : 'selector:' + item.selector).toLowerCase();
           const remembered = (sweepDecisions[appKnowledge.appId] || {})[decisionKey];
