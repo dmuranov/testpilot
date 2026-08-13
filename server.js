@@ -8400,7 +8400,7 @@ function awaitSweepConfirmation(sweepId, { timeoutMs = 10 * 60 * 1000 } = {}) {
 // agent's guard: here we ASK rather than refuse, so a false positive costs one
 // question, while a miss could cost the user real records.
 // Destroys data.
-const SWEEP_DESTRUCTIVE_RE = /\b(delete|remove|borrar|elimina|eliminar|suprim|l[oö]schen|excluir|destroy|wipe|trash|bin|papelera|clear all|reset|revoke|cancel subscription|deactivate|archive|unpublish|expulsar|dar de baja)\b/i;
+const SWEEP_DESTRUCTIVE_RE = /\b(delete|remove|borrar|elimina|eliminar|suprim|l[oö]schen|excluir|destroy|wipe|trash|bin|papelera|clear (all|completed|done|history|cart|list|data|everything)|empty (cart|trash|bin|basket)|vaciar|discard|reset|revoke|cancel subscription|deactivate|archive|unpublish|expulsar|dar de baja)\b/i;
 // Commits something outward or irreversible. A deleted record can be restored
 // from a backup; an email sent to a real customer cannot be unsent, and a
 // published post cannot be unseen. These deserve the same question.
@@ -8441,8 +8441,11 @@ const SWEEP_INVENTORY = `(() => {
   const cssPath = (el) => {
     try {
       if (el.id && /^[A-Za-z][\\w-]*$/.test(el.id)) return '#' + el.id;
-      const tid = el.getAttribute('data-testid') || el.getAttribute('data-test') || el.getAttribute('data-cy');
-      if (tid) return '[data-testid="' + tid + '"]';
+      const attrs = ['data-testid', 'data-test', 'data-cy'];
+      for (let i = 0; i < attrs.length; i++) {
+        const v = el.getAttribute(attrs[i]);
+        if (v && v.indexOf('"') < 0) return '[' + attrs[i] + '="' + v + '"]';
+      }
       const parts = [];
       let n = el;
       while (n && n.nodeType === 1 && n !== document.body && parts.length < 7) {
@@ -8486,18 +8489,20 @@ const SWEEP_INVENTORY = `(() => {
     let kind = 'button';
     if (tag === 'A' || role === 'link') kind = 'link';
     else if (type === 'checkbox' || type === 'radio' || role === 'switch' || role === 'checkbox') kind = 'toggle';
+    else if (tag === 'SELECT') kind = 'select';
 
     let label = clean(el.getAttribute('aria-label') || el.getAttribute('title'));
-    if (!label && kind === 'toggle') {
+    if (!label && (kind === 'toggle' || kind === 'select')) {
       const id = el.getAttribute('id');
       if (id) { try { const le = document.querySelector('label[for="' + CSS.escape(id) + '"]'); if (le) label = clean(le.textContent); } catch (x) {} }
       if (!label) { const w = el.closest('label'); if (w) label = clean(w.textContent); }
       if (!label) { const s = el.nextElementSibling; if (s) { const t = clean(s.textContent); if (t && t.length < 80) label = t; } }
       if (!label) { const row = el.closest('li, tr, [role="listitem"], [role="row"]'); if (row) { const t = clean(row.innerText || row.textContent); if (t && t.length < 120) label = t; } }
     }
-    if (!label) label = clean(el.textContent);
+    if (kind === 'select' && !label) label = clean(el.getAttribute('name') || el.getAttribute('id') || '') || '(dropdown)';
+    if (!label && kind !== 'select') label = clean(el.textContent);
     if (!label) { const img = el.querySelector && el.querySelector('img[alt]'); if (img) label = clean(img.getAttribute('alt')); }
-    if (!label && el.value && kind !== 'toggle') label = clean(el.value);
+    if (!label && el.value && kind !== 'toggle' && kind !== 'select') label = clean(el.value);
     if (label.length > 60) label = label.slice(0, 60);
 
     const selector = cssPath(el);
@@ -8508,11 +8513,30 @@ const SWEEP_INVENTORY = `(() => {
     const key = kind + '|' + (named ? label.toLowerCase() : selector);
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ kind, label, selector, named });
+    let options = null;
+    if (kind === 'select') {
+      options = Array.prototype.slice.call(el.options || [])
+        .map((o) => ({ value: o.value, text: clean(o.textContent) }))
+        .filter((o) => o.value !== '')
+        .slice(0, 12);
+    }
+    out.push({ kind, label, selector, named, options });
     if (out.length >= 40) break;
   }
   return out;
 })()`;
+
+// A native <select> is driven, not clicked: a click opens an OS-level list
+// Playwright cannot see, so the DOM never changed and every dropdown came back
+// "no_effect". Choosing an option it is not already on is the real interaction.
+async function sweepDriveSelect(page, item) {
+  if (!item.selector) return false;
+  const loc = page.locator(item.selector).first();
+  const cur = await loc.inputValue({ timeout: 2000 }).catch(() => null);
+  const opts = (item.options || []).filter((o) => o.value !== cur);
+  if (!opts.length) return false;
+  return await loc.selectOption(opts[0].value, { timeout: 4000 }).then(() => true).catch(() => false);
+}
 
 async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', apiKey = '' } = {}) {
   const report = sweepResults.get(sweepId);
@@ -8540,12 +8564,23 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
     http: diag.http.slice(before.h),
   });
 
-  const domSig = () => page.evaluate(() => {
+  // `deep` adds a hash of the page text itself. Sorting or filtering a list
+  // REORDERS text without changing its length or the element count, so the
+  // plain signature could not see a working dropdown and called it no_effect.
+  // Only selects ask for it: for buttons the looser signature is deliberate —
+  // it tolerates a ticking clock instead of calling every control "works".
+  const domSig = (deep = false) => page.evaluate((deep) => {
     const t = (document.body && document.body.innerText) || '';
     const checks = [...document.querySelectorAll('input[type="checkbox"], input[type="radio"], [role="checkbox"], [role="switch"]')]
       .map(e => (e.checked === true || e.getAttribute('aria-checked') === 'true') ? '1' : '0').join('');
-    return t.length + '|' + document.querySelectorAll('*').length + '|' + checks + '|' + location.href;
-  }).catch(() => null);
+    let extra = '';
+    if (deep) {
+      let h = 0;
+      for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) | 0;
+      extra = '|' + h;
+    }
+    return t.length + '|' + document.querySelectorAll('*').length + '|' + checks + '|' + location.href + extra;
+  }, deep).catch(() => null);
 
   const MAX_PAGES = 6, MAX_PER_PAGE = 12, MAX_TOTAL = 40;
   const DEADLINE = Date.now() + 8 * 60 * 1000;
@@ -8632,16 +8667,18 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
           emitSweep(sweepId, { type: 'info', message: `  ✔ "${item.label}" — approved (${source})` });
         }
 
-        const before = await domSig();
+        const before = await domSig(item.kind === 'select');
         const eBefore = errSnapshot();
         let acted = false;
         // A CSS path beats a name: it reaches icon-only controls, and it cannot
         // land on a different element that happens to share the same words.
-        if (item.selector) {
+        if (item.kind === 'select') {
+          acted = await sweepDriveSelect(page, item);
+        } else if (item.selector) {
           acted = await page.locator(item.selector).first()
             .click({ timeout: 4000 }).then(() => true).catch(() => false);
         }
-        if (!acted && item.named) {
+        if (!acted && item.named && item.kind !== 'select') {
           if (item.kind === 'toggle') {
             const tg = await clickToggleByName(page, item.label);
             acted = !!tg.ok;
@@ -8652,7 +8689,7 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
         }
         await page.waitForTimeout(1200);
         await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
-        const after = await domSig();
+        const after = await domSig(item.kind === 'select');
         const errs = errSince(eBefore);
         checked++;
 
@@ -8672,11 +8709,12 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
           // Retry once before calling anything dead — this is where a naive
           // sweep starts crying wolf.
           const eB2 = errSnapshot();
-          if (item.selector) await page.locator(item.selector).first().click({ timeout: 3000 }).catch(() => {});
+          if (item.kind === 'select') await sweepDriveSelect(page, item);
+          else if (item.selector) await page.locator(item.selector).first().click({ timeout: 3000 }).catch(() => {});
           else if (item.kind === 'toggle') await clickToggleByName(page, item.label);
           else await clickButton(page, item.label).catch(() => {});
           await page.waitForTimeout(1200);
-          const after2 = await domSig();
+          const after2 = await domSig(item.kind === 'select');
           const errs2 = errSince(eB2);
           if (errs2.console.length || errs2.http.length) { verdict = 'broken'; detail = `console/network error on retry: ${(errs2.http[0] || errs2.console[0] || '').slice(0, 120)}`; }
           else if (after2 && after2 !== before) { verdict = 'works'; detail = 'Responded on the second click'; }
