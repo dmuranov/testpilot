@@ -8462,7 +8462,8 @@ const SWEEP_INVENTORY = `(() => {
     } catch (x) { return null; }
   };
 
-  const isControl = (e) => {
+  // Something the page SAYS is a control: a tag, a role, a handler, a tab stop.
+  const isSemantic = (e) => {
     const tag = e.tagName;
     if (tag === 'BUTTON' || tag === 'A' || tag === 'SELECT') return true;
     if (tag === 'INPUT') return ['submit', 'button', 'checkbox', 'radio', 'reset'].indexOf((e.getAttribute('type') || '').toLowerCase()) >= 0;
@@ -8472,14 +8473,50 @@ const SWEEP_INVENTORY = `(() => {
     if (e.classList && e.classList.contains('clickable-element')) return true;   // Bubble
     const ti = e.getAttribute('tabindex');
     if (ti !== null && ti !== '-1') return true;
-    try { if (getComputedStyle(e).cursor === 'pointer') return true; } catch (x) {}
     return false;
   };
+  // Everything else that merely LOOKS clickable. Kept, because a vibe-coded app
+  // is full of plain divs that React makes clickable with no role or handler
+  // attribute — dropping these would blind the sweep to half its market.
+  const looksClickable = (e) => {
+    try { return getComputedStyle(e).cursor === 'pointer'; } catch (x) { return false; }
+  };
+  const isControl = (e) => isSemantic(e) || looksClickable(e);
 
   const all = Array.prototype.slice.call(document.querySelectorAll('body *'));
   const candidates = all.filter((e) => vis(e) && isControl(e));
+
+  const hasSemanticAncestor = (e) => {
+    let n = e.parentElement;
+    while (n && n !== document.body) { if (isSemantic(n)) return true; n = n.parentElement; }
+    return false;
+  };
+  // Is this thing just painted on top of a real control? A styled dropdown
+  // renders its current value in a span laid over the native <select>; the span
+  // is chrome, and clicking it is a click on the select at best.
+  const sittingOnAControl = (e) => {
+    const a = e.getBoundingClientRect();
+    const area = a.width * a.height;
+    if (!area) return false;
+    for (let i = 0; i < candidates.length; i++) {
+      const o = candidates[i];
+      if (o === e || !isSemantic(o) || o.contains(e) || e.contains(o)) continue;
+      const b = o.getBoundingClientRect();
+      const ix = Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left));
+      const iy = Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
+      if ((ix * iy) / area >= 0.8) return true;
+    }
+    return false;
+  };
+
+  // cursor:pointer is INHERITED, so every text wrapper and image inside a real
+  // control looks clickable too. Those are the control's insides, not controls:
+  // left in, they hid the real <a> behind the innermost-wins rule below, turning
+  // one product link into an unnamed "(icon)" plus a separate name button — and
+  // asking the owner to confirm both.
+  const real = candidates.filter((e) => isSemantic(e) || (!hasSemanticAncestor(e) && !sittingOnAControl(e)));
   // Innermost only: a wrapper that merely CONTAINS a control is not the control.
-  const leaves = candidates.filter((e) => !candidates.some((o) => o !== e && e.contains(o)));
+  const leaves = real.filter((e) => !real.some((o) => o !== e && e.contains(o)));
 
   const out = []; const seen = new Set();
   for (const el of leaves) {
