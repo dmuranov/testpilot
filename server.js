@@ -8589,6 +8589,61 @@ const SWEEP_INVENTORY = `(() => {
 // A native <select> is driven, not clicked: a click opens an OS-level list
 // Playwright cannot see, so the DOM never changed and every dropdown came back
 // "no_effect". Choosing an option it is not already on is the real interaction.
+// Nobody should have to decode a stack trace to find out what broke. Every
+// finding says what happened in a sentence a person can act on, and carries the
+// raw error alongside it as evidence — the words first, the proof underneath,
+// never the proof instead of the words.
+function explainSweepError(errs) {
+  const firstLine = (x) => String(x || '').split('\n')[0].trim();
+  const fileOf = (x) => {
+    const m = String(x || '').match(/\/([A-Za-z0-9_.-]+\.js):(\d+):\d+/);
+    return m ? `${m[1]} line ${m[2]}` : '';
+  };
+  if (errs.http && errs.http.length) {
+    const m = String(errs.http[0]).match(/^(\d{3})\s+(\S+)/) || [];
+    const status = m[1] || '';
+    const url = m[2] || String(errs.http[0]);
+    let where = url;
+    try { where = new URL(url).pathname; } catch {}
+    const extra = errs.http.length > 1 ? ` (${errs.http.length} requests failed in total)` : '';
+    return {
+      detail: `This asked the server for ${where} and got back ${status || 'an error'}, so whatever it was meant to load or save did not happen${extra}.`,
+      evidence: `${status} ${url}`.trim(),
+    };
+  }
+  if (errs.failed && errs.failed.length) {
+    return {
+      detail: `A request this made never completed (${errs.failed[0].slice(0, 80)}), so it finished in an unknown state.`,
+      evidence: String(errs.failed[0]).slice(0, 200),
+    };
+  }
+  const c = firstLine(errs.console && errs.console[0]);
+  const src = fileOf(errs.console && errs.console[0]);
+  // An AxiosError carrying "status code 500" is the app telling you its server
+  // call failed. Calling that "the app's own code threw an error" is technically
+  // true and practically useless — the owner needs to know it is the backend.
+  const statusInText = c.match(/status code (\d{3})/i);
+  if (statusInText) {
+    return {
+      detail: `A request this made to the server came back ${statusInText[1]}, so the data it needed never arrived and the action did not finish.`,
+      evidence: c.slice(0, 220),
+    };
+  }
+  if (/(^|\b)(TypeError|ReferenceError|SyntaxError|RangeError|Uncaught|[A-Za-z]+Error)\b/.test(c)) {
+    return {
+      detail: `The app's own code threw an error when this was clicked${src ? `, in ${src}` : ''}, so the action did not finish.`,
+      evidence: c.slice(0, 220),
+    };
+  }
+  if (/Failed to load resource/i.test(c)) {
+    return {
+      detail: 'The page could not load one of its own files when this was clicked, so part of it is missing.',
+      evidence: c.slice(0, 220),
+    };
+  }
+  return { detail: 'The app reported an error when this was clicked.', evidence: c.slice(0, 220) };
+}
+
 async function sweepDriveSelect(page, item) {
   if (!item.selector) return false;
   const loc = page.locator(item.selector).first();
@@ -8701,6 +8756,13 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
   const MAX_PAGES = 6, MAX_PER_PAGE = 12, MAX_TOTAL = 40;
   const DEADLINE = Date.now() + 8 * 60 * 1000;
   let checked = 0;
+  const coverage = {
+    pagesInApp: Object.keys(appKnowledge.pages || {}).filter((p) => !p.includes('::')).length,
+    pagesChecked: 0,
+    controlsFound: 0,      // on the pages it actually opened
+    controlsChecked: 0,
+    stoppedBecause: 'it finished everything it set out to check',
+  };
 
   try {
     emitSweep(sweepId, { type: 'info', message: `Opening ${appKnowledge.url}…` });
@@ -8735,6 +8797,8 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
 
       let inventory = [];
       try { inventory = await page.evaluate(SWEEP_INVENTORY) || []; } catch {}
+      coverage.pagesChecked++;
+      coverage.controlsFound += inventory.length;
       inventory = inventory.slice(0, MAX_PER_PAGE);
       emitSweep(sweepId, { type: 'info', message: `  ${inventory.length} controls found` });
 
@@ -8855,7 +8919,7 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
         checked++;
 
         const hadError = errs.console.length || errs.failed.length || errs.http.length;
-        let verdict, detail;
+        let verdict, detail, evidence = '';
         // Confirmed before reporting: an SPA can be mid-swap for a moment, and
         // calling that a crash would be the worst kind of false alarm.
         let blank = false;
@@ -8871,15 +8935,13 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
           // owner needs to read first, and the console error is the evidence for
           // it rather than the headline.
           verdict = 'crashed';
-          detail = 'The page went blank — the app stopped rendering and the navigation is gone'
-            + (errs.console.length ? `. Console: ${String(errs.console[0]).slice(0, 160)}` : '');
+          detail = 'The page went blank. Nothing rendered at all and the navigation disappeared, so there was no way to continue from here.';
+          evidence = errs.console.length ? explainSweepError(errs).evidence : '';
         } else if (hadError) {
           verdict = 'broken';
-          detail = [
-            errs.http.length ? `${errs.http.length} failed request(s): ${errs.http[0]}` : '',
-            errs.failed.length ? `${errs.failed.length} network failure(s)` : '',
-            errs.console.length ? `console: ${errs.console[0]}` : '',
-          ].filter(Boolean).join(' · ');
+          const ex = explainSweepError(errs);
+          detail = ex.detail;
+          evidence = ex.evidence;
         } else if (tabsOpened > tabsBefore) {
           verdict = 'works';
           detail = 'Opened in a new tab';
@@ -8913,12 +8975,12 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
           if (wentBlank(contentBefore, landed)) {
             const late = errSince(eBefore);
             verdict = 'crashed';
-            detail = 'The page rendered and then went blank — the app crashed once its data arrived, taking the navigation with it'
-              + (late.console.length ? `. Console: ${String(late.console[0]).slice(0, 160)}` : '');
+            detail = 'The page appeared and then went blank a moment later — it crashed once its data arrived, taking the navigation with it.';
+            evidence = late.console.length ? explainSweepError(late).evidence : '';
           }
         }
 
-        report.items.push({ page: path, kind: item.kind, label: item.label, verdict, detail });
+        report.items.push({ page: path, kind: item.kind, label: item.label, verdict, detail, evidence });
         const icon = verdict === 'works' ? '✅' : verdict === 'broken' ? '❌' : verdict === 'no_effect' ? '⚠️' : '⏭';
         emitSweep(sweepId, { type: verdict === 'broken' ? 'fail' : 'step', message: `  ${icon} [${item.kind}] "${item.label}" — ${verdict}` });
 
@@ -8938,6 +9000,11 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
       }
     }
 
+    coverage.controlsChecked = checked;
+    if (Date.now() > DEADLINE) coverage.stoppedBecause = 'it ran out of time (8 minute limit)';
+    else if (checked >= MAX_TOTAL) coverage.stoppedBecause = `it reached its limit of ${MAX_TOTAL} controls per check`;
+    else if (coverage.pagesInApp > MAX_PAGES) coverage.stoppedBecause = `it only opens the first ${MAX_PAGES} pages of an app`;
+    report.coverage = coverage;
     report.status = 'completed';
   } catch (e) {
     report.status = 'error';
@@ -8957,7 +9024,7 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
     for (const i of report.items) {
       if (i.verdict !== 'broken' && i.verdict !== 'crashed') continue;
       const sig = String(i.detail || '').replace(/[0-9a-f]{8,}/gi, '#').replace(/[0-9]+/g, '#').slice(0, 120);
-      if (!defects.has(sig)) defects.set(sig, { detail: i.detail, verdict: i.verdict, controls: [], pages: new Set() });
+      if (!defects.has(sig)) defects.set(sig, { detail: i.detail, evidence: i.evidence || '', verdict: i.verdict, controls: [], pages: new Set() });
       const d = defects.get(sig);
       d.controls.push(i.label);
       d.pages.add(i.page);
@@ -8965,6 +9032,7 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
     }
     report.defects = [...defects.values()].map((d) => ({
       detail: d.detail,
+      evidence: d.evidence,
       verdict: d.verdict,
       controls: d.controls.length,
       pages: [...d.pages],
@@ -8983,7 +9051,10 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
     try { await browser.close(); } catch {}
     emitSweep(sweepId, {
       type: 'summary',
-      message: `Check complete: ${report.counts.works || 0} working · ${report.counts.crashed || 0} crashed · ${report.counts.broken || 0} broken · ${report.counts.no_effect || 0} suspicious · ${report.counts.skipped || 0} skipped`
+      message: (report.coverage && report.coverage.pagesChecked < report.coverage.pagesInApp
+          ? `Checked ${report.coverage.controlsChecked} controls on ${report.coverage.pagesChecked} of your app's ${report.coverage.pagesInApp} pages — this is NOT the whole app, because ${report.coverage.stoppedBecause}. `
+          : `Checked ${(report.coverage || {}).controlsChecked || 0} controls across all ${(report.coverage || {}).pagesInApp || 0} pages. `)
+        + `Result: ${report.counts.works || 0} working · ${report.counts.crashed || 0} crashed · ${report.counts.broken || 0} broken · ${report.counts.no_effect || 0} suspicious · ${report.counts.skipped || 0} skipped`
         + (report.defects && report.defects.length
           ? ` — ${report.defects.length} distinct problem${report.defects.length === 1 ? '' : 's'}${report.defects.some((d) => d.appWide) ? ' (some app-wide, not caused by one control)' : ''}`
           : ''),

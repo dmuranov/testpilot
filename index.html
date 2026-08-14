@@ -3667,9 +3667,37 @@ function renderSweep() {
     </div>` : ''}
 
     ${items.length ? `
+    ${s.coverage ? `
+    <div class="card" style="margin-top:14px;border-left:3px solid ${s.coverage.pagesChecked < s.coverage.pagesInApp ? '#f59e0b' : 'var(--green)'}">
+      <div style="padding:12px 14px;font-size:13px;line-height:1.6">
+        ${s.coverage.pagesChecked < s.coverage.pagesInApp
+          ? `<strong style="color:#f59e0b">This was not your whole app.</strong> TestPilot checked <strong>${s.coverage.controlsChecked} controls</strong> on <strong>${s.coverage.pagesChecked} of your ${s.coverage.pagesInApp} pages</strong>, then stopped because ${escapeHtml(s.coverage.stoppedBecause)}. The other ${s.coverage.pagesInApp - s.coverage.pagesChecked} page${s.coverage.pagesInApp - s.coverage.pagesChecked === 1 ? ' was' : 's were'} never opened — anything broken there is still unknown.`
+          : `Checked <strong>${s.coverage.controlsChecked} controls</strong> across all <strong>${s.coverage.pagesInApp} pages</strong> of your app.`}
+      </div>
+    </div>` : ''}
+
+    ${(s.defects || []).length ? `
+    <div class="card" style="margin-top:14px">
+      <div class="card-header"><div class="card-title">What went wrong (${s.defects.length})</div></div>
+      <div style="padding:4px 14px 14px">
+        ${s.defects.map(d => `
+          <div style="padding:12px 0;border-bottom:1px solid var(--border)">
+            <div style="font-size:13px;line-height:1.6">
+              ${d.verdict === 'crashed' ? '<span style="color:var(--red);font-weight:700">CRASHED</span> — ' : ''}${escapeHtml(d.detail || '')}
+            </div>
+            <div style="font-size:12px;color:var(--text-muted);margin-top:6px">
+              Seen on ${d.controls} control${d.controls === 1 ? '' : 's'}, page${d.pages.length === 1 ? '' : 's'}: ${d.pages.map(p => escapeHtml(p)).join(', ')}
+              ${d.appWide ? ' · <span style="color:#f59e0b">happens across the app, so it is not caused by any one button</span>' : ''}
+            </div>
+            ${d.evidence ? `<div style="margin-top:8px;font-family:'DM Mono',monospace;font-size:11.5px;color:#999;background:rgba(255,255,255,0.03);border-left:2px solid var(--border);padding:8px 10px;overflow-x:auto">${escapeHtml(d.evidence)}</div>` : ''}
+          </div>`).join('')}
+      </div>
+    </div>` : ''}
+
     <div class="stats-row" style="max-width:720px;margin-top:14px">
       <div class="stat-card"><div class="stat-value">${items.length}</div><div class="stat-label">Checked</div></div>
       <div class="stat-card"><div class="stat-value" style="color:var(--green)">${counts.works || 0}</div><div class="stat-label">Working</div></div>
+      ${counts.crashed ? `<div class="stat-card" title="The page stopped rendering entirely — a visitor would see a blank screen."><div class="stat-value" style="color:var(--red)">${counts.crashed}</div><div class="stat-label">Crashed</div></div>` : ''}
       <div class="stat-card"><div class="stat-value" style="color:var(--red)">${counts.broken || 0}</div><div class="stat-label">Broken</div></div>
       <div class="stat-card" title="Clicked twice and nothing changed. Often fine — a link to the page you are already on looks identical."><div class="stat-value" style="color:#f97316">${counts.no_effect || 0}</div><div class="stat-label">Nothing Happened</div></div>
       ${counts.skipped ? `<div class="stat-card"><div class="stat-value" style="color:var(--text-muted)">${counts.skipped}</div><div class="stat-label">Skipped</div></div>` : ''}
@@ -3687,7 +3715,7 @@ function renderSweep() {
           <td style="padding:7px 8px;color:var(--text-muted)">${i.kind}</td>
           <td style="padding:7px 8px;color:var(--text-muted);font-family:monospace;font-size:11px">${escapeHtml(i.page)}</td>
           <td style="padding:7px 8px;white-space:nowrap">${badge(i.verdict)}</td>
-          <td style="padding:7px 8px;color:#999">${escapeHtml(i.detail || '')}</td>
+          <td style="padding:7px 8px;color:#999">${escapeHtml(i.detail || '')}${i.evidence ? `<div style="margin-top:5px;font-family:'DM Mono',monospace;font-size:11px;color:#777;word-break:break-word">${escapeHtml(i.evidence)}</div>` : ''}</td>
         </tr>`).join('')}
         </tbody>
       </table>
@@ -3736,7 +3764,12 @@ function streamSweep(sweepId) {
     if (d.message) state.sweep.log.push(d);
     if (d.type === 'done' || d.type === 'summary') {
       const rep = await fetch(`${API}/api/sweep/${sweepId}`).then(r => r.json()).catch(() => null);
-      if (rep) { state.sweep.items = rep.items || []; state.sweep.status = rep.status; }
+      if (rep) {
+        state.sweep.items = rep.items || [];
+        state.sweep.status = rep.status;
+        state.sweep.coverage = rep.coverage || null;
+        state.sweep.defects = rep.defects || [];
+      }
       if (d.type === 'done') es.close();
     }
     render();
@@ -4537,6 +4570,23 @@ async function runTest() {
   const hasSession = !!sessionStateRaw;
 
   if (!scenario) { tpToast('Describe what to test'); return; }
+
+  // "Test everything, every button" is not a flow — it is what Check Everything
+  // does. Asked of the step-by-step agent it burns its whole step budget and
+  // comes back "incomplete" with nothing found, which is how the first real
+  // user of this product spent two runs and left.
+  const WHOLE_APP_RE = /\b(everything|every (button|botton|page|link|feature|workflow|flow)|all (buttons|pages|links|features|workflows|connections|syncs)|whole app|entire app|test all)\b/i;
+  if (WHOLE_APP_RE.test(scenario) && hasFeature('sweep') && !state._wholeAppNudged) {
+    state._wholeAppNudged = true;
+    const goCheck = await tpConfirm(
+      'This asks for the whole app, not one flow. "Check Everything" is built for exactly that: '
+      + 'it clicks every button, link and dropdown it can find and reports what is dead or erroring, '
+      + 'asking you first before it touches anything destructive. '
+      + 'A flow test instead follows one path step by step, and will stop when it runs out of steps — '
+      + 'on a request this broad it usually ends unfinished. Open Check Everything instead?'
+    );
+    if (goCheck) { navigate('sweep'); return; }
+  }
   if (!noLogin && !hasSession && (!email || !password)) { tpToast('Provide login credentials, paste a session under "Advanced", or check "No login required"'); return; }
 
   const isFreeUser = currentUser?.plan === 'free';
