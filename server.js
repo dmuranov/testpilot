@@ -8,6 +8,7 @@ import { detectUndisclosedRename, renameDisclosureNote, terminalVerifyDiagnostic
 import psl from 'psl';
 import { loadRecipe, saveRecipe, shouldCaptureRun, isReplayableAction, replayStepHeld, stepIdentity, recipeKey, EMAIL_TOKEN, PASSWORD_TOKEN } from './routes/recipes.js';
 import { assertPublicUrl } from './routes/ssrf.js';
+import { scanExposedFiles } from './security-exposure.js';
 import express from 'express';
 import cors from 'cors';
 import { chromium } from 'playwright';
@@ -10378,6 +10379,181 @@ function extractJsonObject(text) {
   }
   return null;
 }
+
+// ═══════════════════════════════════════════════════════════════
+// FREE LEAK CHECK — is the app publishing files it shouldn't?
+// ═══════════════════════════════════════════════════════════════
+// The one security check that needs nothing but a URL: no browser, no second
+// user, no Anthropic key, no run credit. It exists because we failed it
+// ourselves — express.static('./') served /sessions.json, 57 live session
+// tokens, to anyone who asked.
+//
+// OWNERSHIP: ownsApp() proves the app row belongs to this account, NOT that the
+// account controls the domain — anyone can Learn "stripe.com" and call it
+// theirs. Requiring the account's email domain to match the app's would block
+// essentially every real customer (gmail address pointing at *.lovable.app),
+// so the DETAILS are gated on proving control of the site instead: a meta tag
+// or a /tp-verify-<token>.txt file. Unverified callers get counts only, which
+// is no more than they would learn by curling those paths themselves.
+const LEAK_CHECK_ORIGINS_PER_DAY = 5;
+const LEAK_CHECK_SCANS_PER_HOUR = 20;
+const VERIFIED_SITES_FILE = './verified-sites.json';
+
+const leakCheckUsage = new Map();   // canonical email -> { dayKey, origins:Set, hourKey, scans }
+let verifiedSites = null;           // canonical email -> { origin: verifiedAt }
+
+async function loadVerifiedSites() {
+  if (verifiedSites) return verifiedSites;
+  try { verifiedSites = JSON.parse(await fs.readFile(VERIFIED_SITES_FILE, 'utf-8')); }
+  catch { verifiedSites = {}; }
+  return verifiedSites;
+}
+
+async function saveVerifiedSites() {
+  try { await fs.writeFile(VERIFIED_SITES_FILE, JSON.stringify(verifiedSites)); }
+  catch (e) { console.error('[leak-check] verified-sites save failed:', e.message); }
+}
+
+// Deterministic per (account, origin) so there is nothing to store before the
+// user proves anything, and the same token can be re-derived on every visit.
+function siteVerifyToken(email, origin) {
+  const secret = process.env.SITE_VERIFY_SECRET || process.env.SUPABASE_SERVICE_KEY || 'testpilot-site-verify';
+  return 'tp-' + createHash('sha256').update(secret + '|' + canonicalEmail(email) + '|' + origin).digest('hex').slice(0, 24);
+}
+
+function siteVerificationInstructions(email, origin) {
+  const token = siteVerifyToken(email, origin);
+  return {
+    token,
+    metaTag: '<meta name="testpilot-site-verification" content="' + token + '">',
+    filePath: '/tp-verify-' + token + '.txt',
+    fileBody: token,
+    howTo: 'Add the meta tag to your app\'s <head>, or publish the file at that path with the token as its only content. Then press Verify.',
+  };
+}
+
+function leakCheckRateLimit(email, origin) {
+  const key = canonicalEmail(email);
+  const now = new Date().toISOString();
+  const dayKey = now.slice(0, 10);
+  const hourKey = now.slice(0, 13);
+  let u = leakCheckUsage.get(key);
+  if (!u || u.dayKey !== dayKey) u = { dayKey, origins: new Set(), hourKey, scans: 0 };
+  if (u.hourKey !== hourKey) { u.hourKey = hourKey; u.scans = 0; }
+  if (!u.origins.has(origin) && u.origins.size >= LEAK_CHECK_ORIGINS_PER_DAY) {
+    return { ok: false, error: 'Free Leak Check is limited to ' + LEAK_CHECK_ORIGINS_PER_DAY + ' different sites per day.' };
+  }
+  if (u.scans >= LEAK_CHECK_SCANS_PER_HOUR) {
+    return { ok: false, error: 'Too many checks this hour — try again shortly.' };
+  }
+  u.origins.add(origin);
+  u.scans++;
+  leakCheckUsage.set(key, u);
+  return { ok: true };
+}
+
+function originForApp(appId) {
+  const map = platformMaps.get(appId);
+  if (!map || !map.url) return null;
+  try { return new URL(map.url).origin; } catch { return null; }
+}
+
+// Resolve app + ownership + SSRF + origin, or send the error response.
+async function leakCheckTarget(req, res) {
+  const sessionUser = requireUser(req, res);
+  if (!sessionUser) return null;
+  const appId = (req.body && req.body.appId) || '';
+  if (!appId) { res.status(400).json({ error: 'appId required' }); return null; }
+  if (!ownsApp(appId, sessionUser.email)) {
+    res.status(403).json({ error: 'This app belongs to another account.', code: 'OWNERSHIP_MISMATCH' });
+    return null;
+  }
+  const origin = originForApp(appId);
+  if (!origin) { res.status(404).json({ error: 'App not found' }); return null; }
+  try { await assertPublicUrl(origin); }
+  catch (e) { res.status(400).json({ error: 'Refusing to scan that address: ' + e.message }); return null; }
+  return { sessionUser, origin };
+}
+
+app.post('/api/security/leak-check', async (req, res) => {
+  const target = await leakCheckTarget(req, res);
+  if (!target) return;
+  const { sessionUser, origin } = target;
+
+  const limit = leakCheckRateLimit(sessionUser.email, origin);
+  if (!limit.ok) return res.status(429).json({ error: limit.error, code: 'RATE_LIMITED' });
+
+  try {
+    const result = await scanExposedFiles(origin);
+    const verified = await isSiteVerified(sessionUser.email, origin);
+    const counts = {};
+    for (const f of result.findings) counts[f.severity] = (counts[f.severity] || 0) + 1;
+    console.log('[leak-check]', canonicalEmail(sessionUser.email), origin,
+      'findings=' + result.findings.length, 'verified=' + verified);
+
+    const base = { origin, verified, checkedPaths: result.checkedPaths, total: result.findings.length, counts };
+    if (verified) return res.json({ ...base, findings: result.findings });
+    // Unverified: totals only — no paths, and never the .env key names.
+    return res.json({
+      ...base,
+      findings: [],
+      locked: result.findings.length > 0,
+      verification: siteVerificationInstructions(sessionUser.email, origin),
+    });
+  } catch (e) {
+    console.error('[leak-check] error', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+async function isSiteVerified(email, origin) {
+  const store = await loadVerifiedSites();
+  const rec = store[canonicalEmail(email)];
+  return !!(rec && rec[origin]);
+}
+
+app.post('/api/security/verify-site', async (req, res) => {
+  const target = await leakCheckTarget(req, res);
+  if (!target) return;
+  const { sessionUser, origin } = target;
+  const token = siteVerifyToken(sessionUser.email, origin);
+  let method = null;
+
+  // File first. A catch-all SPA host answers 200 + index.html here, so require
+  // the body to BE the token — not merely contain it. Some 404 pages echo the
+  // requested path back into the HTML, which would otherwise verify anything.
+  try {
+    const r = await fetch(origin + '/tp-verify-' + token + '.txt',
+      { redirect: 'manual', signal: AbortSignal.timeout(8000) });
+    if (r.status === 200) {
+      const body = (await r.text()).trim();
+      if (body.length <= 64 && body === token) method = 'file';
+    }
+  } catch {}
+
+  if (!method) {
+    try {
+      const r = await fetch(origin + '/', { redirect: 'follow', signal: AbortSignal.timeout(8000) });
+      const html = (await r.text()).slice(0, 512 * 1024);
+      // Deliberately not a regex: the token must appear inside the same tag as
+      // the verification name, and quoting styles vary too much to match safely.
+      const at = html.indexOf('testpilot-site-verification');
+      if (at !== -1 && html.slice(at, at + 200).includes(token)) method = 'meta';
+    } catch {}
+  }
+
+  if (!method) {
+    return res.json({ verified: false, origin, ...siteVerificationInstructions(sessionUser.email, origin) });
+  }
+
+  const store = await loadVerifiedSites();
+  const key = canonicalEmail(sessionUser.email);
+  store[key] = store[key] || {};
+  store[key][origin] = new Date().toISOString();
+  await saveVerifiedSites();
+  console.log('[leak-check] verified', key, origin, 'via', method);
+  res.json({ verified: true, origin, method });
+});
 
 app.post('/api/security/verdict', async (req, res) => {
   // Funnel rework: gate the security flow behind a paid plan. Pulled from
