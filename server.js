@@ -157,9 +157,22 @@ const PRICE_IDS = {
 const PLAN_LIMITS = {
   // Pricing v2: every PAID tier includes the whole product; the only limit is
   // number of apps. `runs: null` = unlimited; `runs: 1` = capped (free/onerun).
-  // Free: 1 app, 1 scenario run, then paywall. Scenario-only on purpose:
-  // multirole needs two accounts, security probes authz — neither suits an
-  // anonymous first run. Enforced via app_slots_used + free_run_used.
+  // Free: 1 app, 1 scenario run, then paywall. Enforced via app_slots_used +
+  // free_run_used.
+  //
+  // CAREFUL: `features` below means SUBSCRIPTION features, and is read in only
+  // two places — the multirole gate and GET /api/plan. It is not the whole
+  // story for free, and the note that used to sit here ("scenario-only on
+  // purpose ... security probes authz") argued against what the code now does:
+  //   security   — /api/security/api-intercept grants free ONE scan, funded by
+  //                ANTHROPIC_SUPPORT_KEY and forced to mode:'read-only'. The
+  //                authz differentiator is what converts, so it is given away.
+  //   sweep      — hasFeature() in index.html grants it to every plan.
+  //   leak check — /api/security/leak-check is open to every plan: no browser,
+  //                no tokens, no run credit, so nothing to meter.
+  // Adding those names to the array below would change what /api/plan reports
+  // to the client, so the grants stay where they are and this comment carries
+  // the truth.
   free:    { apps: 1,    runs: 1,    features: ['scenario'] },
   // OneRun: 1 app, ONE run credit per €5 (users.credits). The single credit
   // unlocks ANY run type — scenario, multirole, OR security — one use, refunded
