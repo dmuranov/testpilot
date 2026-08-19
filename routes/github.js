@@ -26,10 +26,14 @@ const BASE_URL = process.env.BASE_URL || 'https://testpilotapp.dev';
 // NOTE: applied ONLY to the user-facing routes below — the GitHub webhook
 // (/webhooks/github/:app_id) authenticates by HMAC signature, has no session,
 // and must NOT pass through this.
-async function assertGithubAppOwner(req, res, app_id) {
+function sessionEmail(req) {
   const sessionMap = req.app?.locals?.sessions;
   const token = req.cookies?.tpsession;
-  const email = ((sessionMap && token && sessionMap.get(token)?.email) || '').toLowerCase();
+  return ((sessionMap && token && sessionMap.get(token)?.email) || '').toLowerCase();
+}
+
+async function assertGithubAppOwner(req, res, app_id) {
+  const email = sessionEmail(req);
   if (!email) { res.status(401).json({ error: 'Not authenticated', code: 'AUTH_REQUIRED' }); return false; }
   const { data: app } = await supabaseClient.from('apps').select('user_email').eq('app_id', app_id).maybeSingle();
   if (!app || (app.user_email || '').toLowerCase() !== email) {
@@ -65,6 +69,51 @@ router.use((req, res, next) => {
   }
   return next();
 });
+
+// ─────────────────────────────────────────────
+// OAUTH CSRF STATE (login-CSRF / token-fixation defense)
+// ─────────────────────────────────────────────
+// `state` used to be base64({app_id}): not random, not tied to a session, and
+// never verified on return. That made the callback a token-fixation hole —
+// attacker creates their own app, sends a victim /auth/github?app_id=<their app>,
+// the victim authorizes GitHub, and the callback wrote the VICTIM's access token
+// onto the ATTACKER's app row. The attacker then passed the ownership check on
+// /apps/:app_id/github/repos (they really do own that app) and read every repo
+// the token reached — with `repo` scope, full read/write on all of them.
+//
+// state is now an opaque random nonce. app_id and the initiating account live
+// server-side and are both re-verified before any token is written.
+//
+// A module-level Map is coherent here because the engine runs single-instance
+// fork mode (ecosystem.config.cjs says so explicitly) — the same assumption the
+// existing sessions Map already relies on. If this ever moves to cluster mode,
+// this store must move to Supabase/Redis along with sessions.
+const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+const pendingOAuthStates = new Map(); // nonce -> { app_id, email, expires }
+
+function putOAuthState(app_id, email) {
+  const nonce = crypto.randomBytes(32).toString('base64url');
+  pendingOAuthStates.set(nonce, { app_id, email, expires: Date.now() + OAUTH_STATE_TTL_MS });
+  return nonce;
+}
+
+// Single-use: the entry is consumed on first read, so a captured callback URL
+// cannot be replayed.
+function takeOAuthState(nonce) {
+  if (typeof nonce !== 'string' || !nonce) return null;
+  const entry = pendingOAuthStates.get(nonce);
+  if (!entry) return null;
+  pendingOAuthStates.delete(nonce);
+  if (entry.expires < Date.now()) return null;
+  return entry;
+}
+
+// Abandoned flows (user closes the GitHub page) never reach the callback, so
+// sweep on issue to keep the map bounded.
+function sweepOAuthStates() {
+  const now = Date.now();
+  for (const [k, v] of pendingOAuthStates) if (v.expires < now) pendingOAuthStates.delete(k);
+}
 
 // ─────────────────────────────────────────────
 // HELPER: Verify GitHub webhook signature
@@ -138,11 +187,16 @@ async function getUserRepos(accessToken) {
 // STEP 1: Redirect user to GitHub OAuth
 // GET /api/v1/auth/github?app_id=app_xxx
 // ─────────────────────────────────────────────
-router.get('/auth/github', (req, res) => {
+router.get('/auth/github', async (req, res) => {
   const { app_id } = req.query;
   if (!app_id) return res.status(400).json({ error: 'app_id is required' });
 
-  const state = Buffer.from(JSON.stringify({ app_id })).toString('base64');
+  // Was open to any visitor naming any app_id. The flow now only starts for the
+  // signed-in owner of that app, which is also what binds the nonce below.
+  if (!(await assertGithubAppOwner(req, res, String(app_id)))) return;
+
+  sweepOAuthStates();
+  const state = putOAuthState(String(app_id), sessionEmail(req));
   const githubAuthUrl = new URL('https://github.com/login/oauth/authorize');
   githubAuthUrl.searchParams.set('client_id', GITHUB_CLIENT_ID);
   githubAuthUrl.searchParams.set('redirect_uri', `${BASE_URL}/api/v1/auth/github/callback`);
@@ -161,13 +215,29 @@ router.get('/auth/github/callback', async (req, res) => {
 
   if (error) return res.redirect(`${BASE_URL}/app?error=github_denied`);
 
-  let app_id;
-  try {
-    const decoded = JSON.parse(Buffer.from(state, 'base64').toString());
-    app_id = decoded.app_id;
-  } catch {
-    return res.redirect(`${BASE_URL}/app?error=invalid_state`);
+  // 1. The nonce must be one we issued, unexpired and unused. app_id comes from
+  //    our own store, never from the query string.
+  const pending = takeOAuthState(state);
+  if (!pending) return res.redirect(`${BASE_URL}/app?error=invalid_state`);
+  const { app_id } = pending;
+
+  // 2. The browser coming back must be the same TestPilot session that started
+  //    the flow. tpsession is SameSite=Lax and this is a top-level cross-site
+  //    GET, so the cookie is present here (see Set-Cookie in server.js).
+  const email = sessionEmail(req);
+  if (!email || email !== pending.email) {
+    return res.redirect(`${BASE_URL}/app?error=session_mismatch`);
   }
+
+  // 3. Re-check ownership at write time — the app could have changed hands or
+  //    been deleted between the redirect out and the redirect back.
+  const { data: ownerRow } = await supabaseClient
+    .from('apps').select('user_email').eq('app_id', app_id).maybeSingle();
+  if (!ownerRow || (ownerRow.user_email || '').toLowerCase() !== email) {
+    return res.redirect(`${BASE_URL}/app?error=ownership_mismatch`);
+  }
+
+  if (!code) return res.redirect(`${BASE_URL}/app?error=github_auth_failed`);
 
   try {
     const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
@@ -194,7 +264,10 @@ router.get('/auth/github/callback', async (req, res) => {
     const { error: updateError } = await supabaseClient
       .from('apps')
       .update({ github_access_token: accessToken, github_owner: githubUser.login })
-      .eq('app_id', app_id);
+      .eq('app_id', app_id)
+      // Defense in depth: scope the write to the verified owner row, so even a
+      // future logic slip upstream cannot land a token on someone else's app.
+      .eq('user_email', ownerRow.user_email);
 
     if (updateError) throw updateError;
 
