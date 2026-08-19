@@ -373,6 +373,7 @@ function renderStagingSafe() {
           </p>
         </div>
         <div style="display:flex;gap:8px;align-items:center">
+          <span class="badge badge-yellow">BETA</span>
           <span class="ss-dot ss-dot-green" style="display:inline-block"></span>
           <span style="font-size:12px;font-family:'DM Mono',monospace;color:var(--green)">Watching commits</span>
           <button class="btn btn-ghost btn-sm" onclick="ssLoadReports()">↻ Refresh</button>
@@ -383,10 +384,15 @@ function renderStagingSafe() {
       <!-- Status bar -->
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px;margin-bottom:24px">
         <div class="card" style="padding:16px;text-align:center;margin-bottom:0">
-          <div style="font-size:11px;font-family:'DM Mono',monospace;color:var(--text-muted);margin-bottom:6px">STAGING</div>
-          <a href="${ss.stagingUrl}" target="_blank" style="font-size:11px;font-family:'DM Mono',monospace;color:var(--accent);text-decoration:none;word-break:break-all">
+          <div style="font-size:11px;font-family:'DM Mono',monospace;color:var(--text-muted);margin-bottom:6px">STAGING · UNLISTED</div>
+          <a href="${ss.stagingUrl}" target="_blank" title="Unlisted, not password-protected — anyone with this link can open it. Keep real customer data out of staging." style="font-size:11px;font-family:'DM Mono',monospace;color:var(--accent);text-decoration:none;word-break:break-all">
             ${ss.stagingUrl ? ss.stagingUrl.replace('https://', '') : '—'} ↗
           </a>
+          ${ss.stagingUrl ? `
+            <div style="font-size:10px;font-family:'DM Mono',monospace;color:var(--text-muted);margin-top:6px;line-height:1.4">
+              anyone with the link can open it
+            </div>
+          ` : ''}
         </div>
         <div class="card" style="padding:16px;text-align:center;margin-bottom:0">
           <div style="font-size:11px;font-family:'DM Mono',monospace;color:var(--text-muted);margin-bottom:6px">SCENARIOS</div>
