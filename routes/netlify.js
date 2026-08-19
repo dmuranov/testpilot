@@ -8,7 +8,7 @@ import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { randomUUID } from 'crypto';
+import { randomUUID, randomBytes } from 'crypto';
 import { runStagingSafeTests } from './staging-test.js';
 
 const router = express.Router();
@@ -105,8 +105,16 @@ async function netlifyAPI(method, endpoint, body = null, isZip = false) {
 // ─────────────────────────────────────────────
 // HELPER: Create Netlify site for an app
 // ─────────────────────────────────────────────
-async function provisionNetlifySite(appId, appName) {
-  const subdomain = `tp-${appName.toLowerCase().replace(/[^a-z0-9]/g, '-')}-${appId.slice(-6)}`;
+// The staging clone is publicly reachable: Netlify Basic Auth via `_headers`
+// is plan-gated on this account, so the URL itself is the only thing between a
+// customer's pre-release code and anyone who guesses it. The old name was
+// `tp-<app name>-<last 6 of app_id>` — the app name is public and the suffix is
+// 24 bits, so the namespace was walkable. The name now carries no app identity
+// and 96 bits of entropy, and can no longer collide with another customer's.
+// The app -> site mapping lives in `apps.netlify_site_id`; the Netlify dashboard
+// no longer says which site belongs to whom.
+async function provisionNetlifySite() {
+  const subdomain = `tp-${randomBytes(12).toString('hex')}`;
   const site = await netlifyAPI('POST', '/sites', { name: subdomain, custom_domain: null });
   return {
     netlify_site_id: site.id,
@@ -188,7 +196,7 @@ router.post('/apps/:app_id/staging/provision', async (req, res) => {
     }
 
     console.log(`[Staging Safe] Provisioning Netlify site for app ${app_id} (${app.name})`);
-    const { netlify_site_id, staging_url } = await provisionNetlifySite(app_id, app.name);
+    const { netlify_site_id, staging_url } = await provisionNetlifySite();
 
     await supabaseClient.from('apps').update({ netlify_site_id, staging_url }).eq('app_id', app_id);
 
