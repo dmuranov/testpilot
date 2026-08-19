@@ -7725,10 +7725,24 @@ CRITICAL CLASSIFICATION RULES (apply in order):
 6. EMPTY-DOWNSTREAM CLAIMS → If the agent reports an aggregated/derived view is empty (dashboard shows zero, report has no rows, list view is empty, search returns nothing), check the upstream steps. Did the agent's earlier save/create actions actually persist data with the right shape (non-zero quantities, real values, correct entity association)? Empty downstream + incomplete or zero-valued upstream = correct app behavior, not a bug.
 7. ONLY count as a REAL APP BUG: cases where the agent did everything right (filled ALL required fields with non-default values, clicked the correct state-change buttons including synonyms, waited for save, verified upstream is populated) AND the app produced an incorrect result AND the failure is not a downstream consequence of an earlier failure.
 
+VERDICT RULE (this decides the first line the user reads, so it is the most consequential call you make here):
+The Result follows the SCENARIO'S OWN GOAL and the Root-cause bugs list. Nothing else feeds it.
+- "pass" → the scenario's stated goal was achieved and verified, AND Root-cause bugs is "None".
+  TestPilot's own friction NEVER downgrades a pass: guardrails firing, refused destructive clicks,
+  failing to clean up its own test data, selector instability, retries and tool limitations are OUR
+  problems, not the app's. A run that proves the user's flow works is a pass even if the tooling was
+  untidy getting there.
+- "fail" → Root-cause bugs lists at least one real app defect (rule 7).
+- "partial" → ONLY when the scenario's goal could not be verified either way AND no app defect was
+  confirmed, i.e. we genuinely could not tell. Never write "partial" just because steps were blocked,
+  skipped, retried or noisy.
+If you are about to write "partial" while Root-cause bugs is "None" and the goal was verified, the
+correct answer is "pass".
+
 STEP NUMBER CITATION: When you mention a step, use the EXACT step number as it appears in the Steps list above. Do NOT estimate, infer, or round step numbers. If you can't pinpoint an exact step, say "near the end" or "during the quote creation phase" instead of inventing a number. Wrong step numbers make the report useless to humans reviewing it.
 
 Output structure (exact sections, max 220 words total):
-- Result: pass / partial / fail
+- Result: pass / partial / fail — apply the VERDICT RULE above; it overrides how messy the steps look
 - What worked: 1-2 sentences
 - Root-cause bugs: numbered list of REAL APP BUGS ONLY (per rule 7). For each: "Step X — [what the agent did] — [what the app did wrong]". If zero real bugs, write "None". DO NOT put TestPilot's own guardrails or tool friction in this section.
 - Cascade / skipped steps: bullet list of steps that failed only because a root-cause APP bug blocked them. If none, omit this section.
