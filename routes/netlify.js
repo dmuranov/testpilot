@@ -116,10 +116,18 @@ async function netlifyAPI(method, endpoint, body = null, isZip = false) {
 async function provisionNetlifySite() {
   const subdomain = `tp-${randomBytes(12).toString('hex')}`;
   const site = await netlifyAPI('POST', '/sites', { name: subdomain, custom_domain: null });
+  // A Netlify *site* has no `subdomain` field — only a *deploy* does. Reading it
+  // here produced the literal string "https://undefined.netlify.app", which is
+  // what got stored as staging_url and later handed to the test runner.
+  // `ssl_url` is the site's canonical https URL; the others are fallbacks.
+  const staging_url = site.ssl_url || `https://${site.default_domain || site.name}`;
+  if (!staging_url.includes(subdomain)) {
+    throw new Error(`Netlify returned a site URL that does not match the requested name: ${staging_url}`);
+  }
   return {
     netlify_site_id: site.id,
-    staging_url: `https://${site.subdomain}.netlify.app`,
-    subdomain: site.subdomain,
+    staging_url,
+    subdomain: site.name,
   };
 }
 
