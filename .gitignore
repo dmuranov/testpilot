@@ -46,4 +46,4 @@ embed-tokens.json
 content-engine-results*.json
 
 # ── Ad-hoc gauntlet drivers (contain test credentials) ──
-pp-*.mjs
+pp-*
