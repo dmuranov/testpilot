@@ -117,6 +117,13 @@ function renderStagingSafe() {
             }
           </div>
           ${ss.stagingUrl ? `
+            <div style="font-size:11px;font-family:'DM Mono',monospace;color:var(--text-muted);line-height:1.7;margin-top:12px;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius)">
+              Unlisted, not password-protected — the random name is the only thing keeping this
+              address hidden. Anyone you send it to can open it, so keep real customer data out
+              of staging.
+            </div>
+          ` : ''}
+          ${ss.stagingUrl ? `
             <div style="margin-top:16px">
               <button class="btn btn-primary" onclick="ssNextPhase('learn')">
                 Continue to Learn →
@@ -126,7 +133,7 @@ function renderStagingSafe() {
         ` : `
           <p style="font-size:13px;color:var(--text-dim);margin-bottom:20px;line-height:1.6">
             Connect your GitHub repo. TestPilot will watch every commit,
-            deploy to a private staging URL, and run your scenarios automatically.
+            deploy to an unlisted staging URL, and run your scenarios automatically.
           </p>
 
           <div style="margin-bottom:16px" id="ss-repo-list"></div>
@@ -2253,7 +2260,7 @@ function render() {
         </button>
         <button class="nav-btn ${state.view === 'staging-safe' ? 'active' : ''}"
           onclick="gatedNavigate('staging-safe', 'stagingsafe')"
-          data-tooltip="Staging Safe — connect GitHub, auto-deploy every commit to a private staging URL, run all your scenarios before you publish. Don't let broken code go live.">
+          data-tooltip="Staging Safe — connect GitHub, auto-deploy every commit to an unlisted staging URL, run all your scenarios before you publish. Don't let broken code go live.">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M12 2L2 7l10 5 10-5-10-5z"/>
             <path d="M2 17l10 5 10-5"/>
