@@ -8715,6 +8715,22 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
     text: ((document.body && document.body.innerText) || '').trim().length,
     nodes: document.querySelectorAll('body *').length,
   })).catch(() => null);
+  // A modal covers the page without changing the URL, so the "go back to the
+  // page under test" rule never fired and every remaining control was reported
+  // unreachable — 12 seconds each, a whole page of false findings from one
+  // dialog nobody closed. A person would dismiss it and carry on.
+  const dialogOpen = () => page.evaluate(() => {
+    const sel = '[role="dialog"], [aria-modal="true"], .modal, .ReactModal__Overlay, [data-radix-dialog-content], [data-state="open"][role="alertdialog"]';
+    return Array.prototype.slice.call(document.querySelectorAll(sel)).some((e) => {
+      try {
+        const cs = getComputedStyle(e);
+        if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') return false;
+        const r = e.getBoundingClientRect();
+        return r.width > 100 && r.height > 60;
+      } catch (x) { return false; }
+    });
+  }).catch(() => false);
+
   const hasContent = (c) => !!c && c.text >= 30;
   // Never judge "blank" from a single snapshot. Right after a navigation the
   // document is legitimately empty ({text:0,nodes:6}), and this app renders its
@@ -8753,8 +8769,18 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
     return t.length + '|' + document.querySelectorAll('*').length + '|' + checks + extra + '|' + location.href;
   }, deep).catch(() => null);
 
-  const MAX_PAGES = 6, MAX_PER_PAGE = 12, MAX_TOTAL = 40;
-  const DEADLINE = Date.now() + 8 * 60 * 1000;
+  // Sized to actually finish a real app: a 17-page dashboard was getting 4
+  // pages and 40 controls. At roughly 5-7s per control, 200 controls lands near
+  // the 25-minute budget, so time is the real guard and the caps are the
+  // backstop — and whichever one stops the run, the report now says so.
+  // A sweep costs tokens only for its login, so a longer run is wall-clock and
+  // CPU, not spend. Env-overridable to retune without a deploy.
+  const num = (v, d) => Math.max(1, parseInt(process.env[v] || String(d), 10) || d);
+  const MAX_PAGES = num('SWEEP_MAX_PAGES', 25);
+  const MAX_PER_PAGE = num('SWEEP_MAX_PER_PAGE', 30);
+  const MAX_TOTAL = num('SWEEP_MAX_TOTAL', 200);
+  const TIME_BUDGET_MIN = num('SWEEP_TIME_BUDGET_MIN', 25);
+  const DEADLINE = Date.now() + TIME_BUDGET_MIN * 60 * 1000;
   let checked = 0;
   const coverage = {
     pagesInApp: Object.keys(appKnowledge.pages || {}).filter((p) => !p.includes('::')).length,
@@ -8870,6 +8896,9 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
             report.items.push({
               page: path, kind: 'page', label: path, verdict: 'crashed',
               detail: 'This page is blank — the app stopped rendering here, so nothing on it could be checked. A reload did not bring it back.',
+              evidence: diag.console.length
+                ? String(diag.console[diag.console.length - 1]).split('\n')[0].slice(0, 220)
+                : '',
             });
             emitSweep(sweepId, { type: 'fail', message: `  💥 ${path} — the app is blank here, even after a reload; skipping the rest of this page` });
             checked++;
@@ -8991,6 +9020,19 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
           await page.waitForTimeout(1200);
         }
 
+        // Judged first, dismissed second: for the control that opened it, the
+        // modal is the effect and counts as working. For every control after
+        // it, it is just a lid over the page.
+        if (page.url() === url && await dialogOpen()) {
+          await page.keyboard.press('Escape').catch(() => {});
+          await page.waitForTimeout(500);
+          if (await dialogOpen()) {
+            // Escape does not close every dialog. Reloading always does.
+            await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+            await settle(5000);
+          }
+        }
+
         // Return to the page under test so one control's navigation doesn't
         // silently move the sweep somewhere else.
         if ((await page.url()) !== url) {
@@ -9001,7 +9043,7 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
     }
 
     coverage.controlsChecked = checked;
-    if (Date.now() > DEADLINE) coverage.stoppedBecause = 'it ran out of time (8 minute limit)';
+    if (Date.now() > DEADLINE) coverage.stoppedBecause = `it ran out of time (${TIME_BUDGET_MIN} minute limit)`;
     else if (checked >= MAX_TOTAL) coverage.stoppedBecause = `it reached its limit of ${MAX_TOTAL} controls per check`;
     else if (coverage.pagesInApp > MAX_PAGES) coverage.stoppedBecause = `it only opens the first ${MAX_PAGES} pages of an app`;
     report.coverage = coverage;
