@@ -782,6 +782,37 @@ app.get('/screenshots/:file', (req, res) => {
 // users unable to see new features or bug fixes even after Ctrl+F5.
 // JS/CSS/images keep their default long cache because they're versioned
 // by mtime-derived ETags and rarely break across deploys.
+// ── STATIC GUARD ──────────────────────────────────────────────
+// express.static below publishes this process's working directory, which is
+// the git checkout: sessions.json (live session tokens), traffic-log.json, the
+// server.js.bak-* snapshots left behind by every VM edit, deploy.sh. All of it
+// was fetchable over the public internet — /sessions.json returned 200 with 57
+// tokens across 19 accounts, admin included.
+//
+// Deny the sensitive shapes before static ever sees the request. Public assets
+// that happen to match a denied extension are named explicitly. /api is skipped
+// so a future .json-shaped endpoint cannot be broken by this guard.
+const STATIC_ALLOW = new Set(['/embed.js', '/attrib.js']);
+const STATIC_DENY_EXT = ['.json', '.sh', '.log', '.env', '.pem', '.key', '.db', '.sqlite', '.sqlite3', '.mjs'];
+
+function isDeniedStaticPath(p) {
+  if (p === '/server.js') return true;
+  if (p.includes('.bak')) return true;          // server.js.bak-<topic>-<ts>
+  const lower = p.toLowerCase();
+  return STATIC_DENY_EXT.some(ext => lower.endsWith(ext));
+}
+
+app.use((req, res, next) => {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+  if (req.path.startsWith('/api/')) return next();
+  if (STATIC_ALLOW.has(req.path)) return next();
+  if (isDeniedStaticPath(req.path)) {
+    console.warn('[static-guard] blocked', req.method, req.path);
+    return res.status(404).type('text/plain').send('Not Found');
+  }
+  next();
+});
+
 app.use(express.static('./', {
   index: false,
   setHeaders: (res, filePath) => {
