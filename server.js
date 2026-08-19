@@ -8,7 +8,7 @@ import { detectUndisclosedRename, renameDisclosureNote, terminalVerifyDiagnostic
 import psl from 'psl';
 import { loadRecipe, saveRecipe, shouldCaptureRun, isReplayableAction, replayStepHeld, stepIdentity, recipeKey, EMAIL_TOKEN, PASSWORD_TOKEN } from './routes/recipes.js';
 import { assertPublicUrl } from './routes/ssrf.js';
-import { scanExposedFiles } from './security-exposure.js';
+import { scanExposedFiles, tokenFileMatches, metaTagMatches } from './security-exposure.js';
 import express from 'express';
 import cors from 'cors';
 import { chromium } from 'playwright';
@@ -579,6 +579,13 @@ async function getUserByEmail(email) {
     console.warn('[users] lookup failed:', err.message);
     return null;
   }
+}
+
+// Attribution values arrive from the browser, so they are untrusted: clamp to
+// the same shape attrib.js produces and drop anything else.
+function cleanAttrib(v) {
+  const t = String(v ?? '').toLowerCase().replace(/[^a-z0-9._-]/g, '').slice(0, 40);
+  return t || null;
 }
 
 async function createOrGetUser(email) {
@@ -1571,10 +1578,19 @@ app.get('/app', (req, res) => {
         const btn = document.querySelector('button');
         btn.textContent = 'Sending...';
         btn.disabled = true;
+        // First-touch attribution, written by /attrib.js on the landing page.
+        // This page doesn't load that script, so read the key directly.
+        var attrib = {};
+        try { attrib = JSON.parse(localStorage.getItem('tp_attrib') || '{}') || {}; } catch (e) {}
         const res = await fetch('/api/auth/request', {
           method: 'POST',
           headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({email})
+          body: JSON.stringify({
+            email,
+            source: attrib.source || '',
+            medium: attrib.medium || '',
+            campaign: attrib.campaign || ''
+          })
         });
         const msg = document.getElementById('msg');
         msg.style.display = 'block';
@@ -1691,6 +1707,29 @@ app.post('/api/auth/request', async (req, res) => {
       // until plan moves to a usable tier.
       const created = await supabase('POST', 'users', { email, plan: 'pending', credits: 0 });
       userId = created[0].id;
+
+      // Where did this signup come from? Clarity knows for ~30 days and can't be
+      // joined to this table; the question that actually matters three weeks
+      // after a campaign is "which source produced someone who ran a test", and
+      // only a column on the user row answers that.
+      //
+      // Written as a SEPARATE best-effort PATCH, never as part of the INSERT
+      // above: if signup_source doesn't exist yet in Supabase, this logs and the
+      // signup still completes. Adding it to the INSERT would break every signup
+      // the moment the column is missing.
+      const attribSource = cleanAttrib(req.body?.source);
+      if (attribSource) {
+        try {
+          await supabase('PATCH', 'users', {
+            signup_source: attribSource,
+            signup_medium: cleanAttrib(req.body?.medium),
+            signup_campaign: cleanAttrib(req.body?.campaign),
+          }, `?id=eq.${userId}`);
+          console.log('[signup]', email, 'source=' + attribSource);
+        } catch (err) {
+          console.warn('[signup] source not stored (add signup_source/signup_medium/signup_campaign to users):', err.message);
+        }
+      }
       // Notify Dado of new signup
       mailer({
         from: 'TestPilot <hello@testpilotapp.dev>',
@@ -7916,6 +7955,41 @@ app.delete('/api/apps/:appId', async (req, res) => {
   }
   platformMaps.delete(req.params.appId);
   await fs.unlink(path.join(MAPS_DIR, `${req.params.appId}.json`)).catch(() => {});
+
+  // Release the plan slot. recountUserAppSlots counts app_ownership rows, so
+  // leaving the row behind spent the slot permanently: a free user who learned
+  // the wrong URL, deleted it and tried again got "Your plan includes 1 app
+  // slots. Upgrade to add more." next to an empty dashboard, with no way back
+  // and nothing explaining it. That is the first thing a trial user does.
+  //
+  // Best-effort and non-fatal: the app is already gone from the caller's view,
+  // so a Supabase hiccup must not turn into a failed delete. recount is
+  // authoritative, so a half-failure self-heals on the next learn.
+  try {
+    const norm = normalizeAppUrl(map.url || '');
+    const owner = canonicalEmail(me);
+    if (norm.ok && owner) {
+      const owned = await getAppByNormalized(norm.normalized);
+      // Only ever the caller's own row. pgFilter rejects anything that could
+      // widen the filter — without it a hostile value turns this into a DELETE
+      // that matches every row in the table.
+      if (owned && canonicalEmail(owned.owner_email) === owner) {
+        const fUrl = pgFilter(norm.normalized);
+        const fEmail = pgFilter(owned.owner_email);
+        if (fUrl && fEmail) {
+          await supabase('DELETE', 'app_ownership', null, `?url_normalized=eq.${fUrl}&owner_email=eq.${fEmail}`);
+        }
+      }
+      const dbUser = await getUserByEmail(owner);
+      if (dbUser && dbUser.id) {
+        const left = await recountUserAppSlots(owner, dbUser.id);
+        console.log('[apps] deleted', req.params.appId, 'slot released for', owner, 'slots now', left);
+      }
+    }
+  } catch (err) {
+    console.warn('[apps] slot release failed:', err.message);
+  }
+
   res.json({ deleted: true });
 });
 
@@ -10538,20 +10612,14 @@ app.post('/api/security/verify-site', async (req, res) => {
   try {
     const r = await fetch(origin + '/tp-verify-' + token + '.txt',
       { redirect: 'manual', signal: AbortSignal.timeout(8000) });
-    if (r.status === 200) {
-      const body = (await r.text()).trim();
-      if (body.length <= 64 && body === token) method = 'file';
-    }
+    if (r.status === 200 && tokenFileMatches(await r.text(), token)) method = 'file';
   } catch {}
 
   if (!method) {
     try {
       const r = await fetch(origin + '/', { redirect: 'follow', signal: AbortSignal.timeout(8000) });
       const html = (await r.text()).slice(0, 512 * 1024);
-      // Deliberately not a regex: the token must appear inside the same tag as
-      // the verification name, and quoting styles vary too much to match safely.
-      const at = html.indexOf('testpilot-site-verification');
-      if (at !== -1 && html.slice(at, at + 200).includes(token)) method = 'meta';
+      if (metaTagMatches(html, token)) method = 'meta';
     } catch {}
   }
 

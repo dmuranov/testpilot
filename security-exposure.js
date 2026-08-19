@@ -116,6 +116,34 @@ const CHECKS = [
     evidence: () => 'Reveals file names in the deployed folder' },
 ];
 
+// ── SITE VERIFICATION PREDICATES ──────────────────────────────
+// Used by /api/security/verify-site. They live here, beside the scanner, so
+// the deployed rule and the test are literally the same function.
+//
+// The trap: hosts in our market answer ANY path with 200 + index.html, and some
+// 404 pages render the requested path back into the markup ("Page /tp-verify-x
+// not found"). A token check that asks "does the response contain the token"
+// therefore verifies every domain on earth, including ones the caller does not
+// own. So the file must BE the token, and the meta match must find the token
+// beside the verification name rather than loose in the page.
+export function tokenFileMatches(body, token) {
+  if (!body || !token) return false;
+  const trimmed = String(body).trim();
+  if (trimmed.length > 64) return false;   // a page, not a token file
+  return trimmed === token;
+}
+
+export function metaTagMatches(html, token) {
+  if (!html || !token) return false;
+  const s = String(html);
+  const at = s.indexOf('testpilot-site-verification');
+  if (at === -1) return false;
+  // Window BOTH ways: <meta content="…" name="testpilot-site-verification">
+  // is as valid as the other order, and a forward-only window silently fails
+  // it — which reads to the user as "I added the tag and it says no".
+  return s.slice(Math.max(0, at - 200), at + 200).includes(token);
+}
+
 export async function scanExposedFiles(appUrl) {
   const origin = new URL(appUrl).origin;
 
