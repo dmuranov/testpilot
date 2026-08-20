@@ -4461,9 +4461,13 @@ async function startLearn() {
       body: JSON.stringify({ url, email, password, description: desc, apiKey: getApiKey(), freeLearn: canLearnFree, userEmail: currentUser?.email, ...(learnSessionRaw ? { sessionState: learnSessionRaw } : {}) })
     });
 
-    // Funnel rework: 402 from /api/learn means slot limit hit. Pop the
-    // unified paywall instead of trying to consume the SSE body.
-    if (res.status === 402 || res.status === 403) {
+    // Any non-OK response is a JSON error, not an SSE stream. This guard used
+    // to be (status === 402 || 403), so a 429 (daily free budget hit mid-
+    // campaign), a 400 (invalid/blocked URL), or a 500 fell straight through to
+    // res.body.getReader() below and tried to parse a JSON error as an event
+    // stream — hanging the spinner on the first thing a new user does. Mirror
+    // the run path, which already guards on !res.ok.
+    if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       state.loading = false;
       state.learnProgress.push({ phase: 'error', message: err.error || 'Cannot start learn' });
