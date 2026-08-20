@@ -1702,10 +1702,14 @@ app.post('/api/auth/request', async (req, res) => {
     const isNewUser = !users || users.length === 0;
     let userId;
     if (isNewUser) {
-      // First-time email: create as 'pending' (not 'free') so the user knows
-      // they need approval before they can log in. Do NOT email a magic link
-      // until plan moves to a usable tier.
-      const created = await supabase('POST', 'users', { email, plan: 'pending', credits: 0 });
+      // Campaign funnel (20 Aug 2026): new signups are auto-approved to 'free'
+      // and get their magic link immediately. Invite-only was the right call
+      // while there was no traffic; with listings running, every minute a
+      // visitor waits on a manual SQL approval is a signup lost — and the old
+      // path told them 'check your email' for a link that was never sent.
+      // Abuse stays bounded by the free tier itself: 1 app, 1 run, and the
+      // support-key daily budget cap.
+      const created = await supabase('POST', 'users', { email, plan: 'free', credits: 0 });
       userId = created[0].id;
 
       // Where did this signup come from? Clarity knows for ~30 days and can't be
@@ -1738,15 +1742,16 @@ app.post('/api/auth/request', async (req, res) => {
         html: `<div style="font-family:sans-serif;max-width:480px;padding:32px 20px">
           <h2 style="font-size:18px;font-weight:800;margin-bottom:16px">New Access Request</h2>
           <p style="font-size:14px;color:#333"><strong>Email:</strong> ${email}</p>
-          <p style="font-size:14px;color:#333"><strong>Plan:</strong> pending</p>
+          <p style="font-size:14px;color:#333"><strong>Plan:</strong> free (auto-approved, link sent)</p>
+          <p style="font-size:14px;color:#333"><strong>Source:</strong> ${attribSource || 'direct/unknown'}</p>
           <p style="font-size:14px;color:#333"><strong>IP:</strong> ${ip}</p>
           <p style="font-size:14px;color:#333"><strong>Time:</strong> ${new Date().toLocaleString('en-GB', { timeZone: 'Europe/Madrid' })}</p>
           <hr style="margin:20px 0;border:none;border-top:1px solid #eee"/>
-          <p style="font-size:12px;color:#888">To approve: Supabase → update users set plan = 'tester' where email = '${email}';</p>
+          <p style="font-size:12px;color:#888">No action needed — they can log in now. To block: Supabase → update users set plan = 'blocked' where email = '${email}';</p>
         </div>`
       }).catch(() => {});
-      // Don't send the magic link yet — return same shape so client UI can show "request received".
-      return res.json({ ok: true, status: 'pending_approval' });
+      // Fall through: the magic link is created and sent below, same as for a
+      // returning user. No early return, no approval step.
     } else {
       userId = users[0].id;
       const currentPlan = users[0].plan;
