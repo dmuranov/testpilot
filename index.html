@@ -4468,10 +4468,15 @@ async function startLearn() {
       state.loading = false;
       state.learnProgress.push({ phase: 'error', message: err.error || 'Cannot start learn' });
       render();
-      const reason = err.code === 'APP_SLOT_LIMIT' ? 'app_slot'
-                   : err.code === 'APP_OWNED_BY_OTHER' ? 'feature'
-                   : 'feature';
-      showFunnelPaywall(reason);
+      // Only a genuine plan limit earns the pricing table. A 403 for a URL
+      // already claimed by another account, a blocked address, or any other
+      // technical refusal is NOT something paying fixes — and answering it with
+      // "This feature requires a paid plan" reads as bait-and-switch to someone
+      // who just arrived from a listing and pasted their own app. The real
+      // message is already pushed into learnProgress above, so show that.
+      if (err.code === 'APP_SLOT_LIMIT') showFunnelPaywall('app_slot');
+      else if (res.status === 402) showFunnelPaywall('feature');
+      else tpToast(err.error || 'Could not start learn', 'error');
       return;
     }
 
