@@ -170,6 +170,7 @@
   </div>
 </div>
 
+<script src="/attrib.js"></script>
 <script>
 const state = { appId: null, testId: null, userEmail: null, appEmail: '', appPw: '', learnSummary: '' };
 
@@ -231,11 +232,16 @@ async function startFunnel() {
   state.appEmail = appEmail;
   state.appPw = appPw;
 
+  // First touch captured by /attrib.js on this page (or stored earlier by the
+  // landing page). The server sanitizes with cleanAttrib; absent means direct.
+  let attrib = (window.tpAttribution && window.tpAttribution.first) || null;
+  if (!attrib) { try { attrib = JSON.parse(localStorage.getItem('tp_attrib') || 'null'); } catch (e) {} }
+
   try {
     const res = await fetch('/api/funnel/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userEmail: email, url }),
+      body: JSON.stringify({ userEmail: email, url, source: attrib?.source || '', medium: attrib?.medium || '', campaign: attrib?.campaign || '' }),
     });
     const data = await res.json();
     if (!res.ok || !data.ok) {

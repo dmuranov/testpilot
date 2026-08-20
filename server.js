@@ -1480,6 +1480,22 @@ app.post('/api/funnel/start', async (req, res) => {
     if (!dbUser) {
       return res.status(500).json({ ok: false, error: 'Could not create account' });
     }
+
+    // First-touch signup attribution — same columns, same contract as the
+    // magic-link path in /api/auth/request: a SEPARATE best-effort PATCH so a
+    // missing column can never break the funnel. Guarded on the row not having
+    // a source yet, so a returning user's original first touch is never
+    // overwritten by a later campaign click.
+    const attribSource = cleanAttrib(req.body?.source);
+    if (attribSource && !dbUser.signup_source) {
+      supabase('PATCH', 'users', {
+        signup_source: attribSource,
+        signup_medium: cleanAttrib(req.body?.medium),
+        signup_campaign: cleanAttrib(req.body?.campaign),
+      }, `?id=eq.${dbUser.id}`)
+        .then(() => console.log('[signup]', userEmail, 'source=' + attribSource))
+        .catch(err => console.warn('[signup] source not stored (add signup_source/signup_medium/signup_campaign to users):', err.message));
+    }
     const userPlan = dbUser.plan || 'free';
     const planLimits = PLAN_LIMITS[userPlan] || PLAN_LIMITS.free;
 
@@ -1582,6 +1598,18 @@ app.get('/app', (req, res) => {
         // This page doesn't load that script, so read the key directly.
         var attrib = {};
         try { attrib = JSON.parse(localStorage.getItem('tp_attrib') || '{}') || {}; } catch (e) {}
+        // A campaign link can point straight at /app: nothing has stored a
+        // first touch yet, so fall back to utm_* on this page's own URL and
+        // store it, first-touch style, consistent with attrib.js.
+        if (!attrib.source) {
+          try {
+            var q = new URLSearchParams(location.search);
+            if (q.get('utm_source')) {
+              attrib = { source: q.get('utm_source'), medium: q.get('utm_medium') || 'unknown', campaign: q.get('utm_campaign') || 'none' };
+              localStorage.setItem('tp_attrib', JSON.stringify(attrib));
+            }
+          } catch (e) {}
+        }
         const res = await fetch('/api/auth/request', {
           method: 'POST',
           headers: {'Content-Type':'application/json'},
