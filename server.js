@@ -8328,14 +8328,18 @@ app.post('/api/test', async (req, res) => {
   const userPlan = sessionUser?.plan || dbUser?.plan || 'free';
   if (userPlan === 'free') {
     const alreadyUsed = !!(sessionUser?.free_run_used || dbUser?.free_run_used);
-    // Only anonymous /first-run callers can claim a free run.
-    // Magic-link sessions (returning users) must be on a paid plan.
-    if (freeRun && sessionUser && sessionUser.source !== 'first-run') {
-      return res.status(402).json({
-        error: 'Free runs are only available via the /first-run flow. Choose a plan to continue.',
-        code: 'FREE_RUN_NOT_ALLOWED',
-      });
-    }
+    // One free run per free account, enforced by free_run_used below — that
+    // flag is the real control, and it is persisted, so a forged session cannot
+    // spend a second one.
+    //
+    // This used to ALSO require the session to have come from the anonymous
+    // /first-run funnel (session.source === 'first-run'), which made the free
+    // run unusable for anyone who signed up and came back through a magic
+    // link. That is now every campaign visitor: the dashboard advertised
+    // "1 free test run available", offered a Run Free Test button, and the
+    // server answered with 402 and a pricing table. Spend is still bounded by
+    // isFreeBudgetExceeded() above, which is the gate that actually protects
+    // the support key.
     if (alreadyUsed) {
       return res.status(402).json({
         error: 'Free run already used. Choose a plan to continue.',
