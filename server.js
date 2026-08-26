@@ -2126,6 +2126,36 @@ async function dispatchLiveInput(runId, evt) {
   } catch { return false; }
 }
 
+// Google/Microsoft/GitHub OAuth almost always opens its account-chooser in a
+// SEPARATE popup window (window.open — very commonly via Firebase Auth's
+// signInWithPopup or similar), not the original page. A screencast attached
+// only to the original page never shows it — confirmed live: "the pop-up
+// with accounts available doesn't show up" after clicking Sign in with
+// Google. This watches the browser context for a new page appearing while
+// the human has control, and switches the SAME runId's live view onto it
+// (frontend sees no difference — same live_frame/live_view_ready events),
+// then switches back once the popup closes (OAuth done or cancelled).
+// Returns an unsubscribe function.
+function watchForPopups(originalPage, runId, ctx) {
+  const context = originalPage.context();
+  const onNewPage = async (popup) => {
+    try {
+      await popup.waitForLoadState('domcontentloaded', { timeout: 8000 }).catch(() => {});
+      await stopLiveView(runId);
+      await startLiveView(popup, runId, ctx);
+      ctx.emit({ type: 'live_view_ready', runId });
+      popup.once('close', async () => {
+        if (originalPage.isClosed()) return;
+        await stopLiveView(runId);
+        await startLiveView(originalPage, runId, ctx);
+        ctx.emit({ type: 'live_view_ready', runId });
+      });
+    } catch { /* best-effort — a failed switch just leaves the human on whichever page was already showing */ }
+  };
+  context.on('page', onNewPage);
+  return () => context.off('page', onNewPage);
+}
+
 // Offers the human a live takeover when login failed on a page that also
 // shows an OAuth button. Returns a fresh {success:true,...} if the handoff
 // ended with the user actually logged in, or null to fall through to the
@@ -2142,6 +2172,7 @@ async function tryOAuthHandoff(page, ctx) {
     if (decision?.action !== 'accept') return null;
   } catch { return null; } // declined, superseded, or nobody responded within 60s
 
+  const unwatchPopups = watchForPopups(page, ctx.runId, ctx);
   try {
     await startLiveView(page, ctx.runId, ctx);
     ctx.emit({ type: 'live_view_ready', runId: ctx.runId });
@@ -2149,6 +2180,7 @@ async function tryOAuthHandoff(page, ctx) {
   } catch {
     return null; // timed out waiting for "done"
   } finally {
+    unwatchPopups();
     await stopLiveView(ctx.runId);
   }
 
