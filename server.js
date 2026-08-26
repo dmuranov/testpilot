@@ -2076,7 +2076,13 @@ async function startLiveView(page, runId, ctx) {
     ctx.emit({ type: 'live_frame', runId, data: frame.data });
     cdp.send('Page.screencastFrameAck', { sessionId: frame.sessionId }).catch(() => {});
   });
-  await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 60, maxWidth: 1024, maxHeight: 768, everyNthFrame: 1 });
+  // maxWidth/maxHeight MUST match the page's actual viewport (runAgentTest's
+  // browser.newContext viewport, 1280x800) — CDP only sends frames at native
+  // resolution up to this cap, and mismatched bounds meant a click computed
+  // from the frontend's canvas coordinates landed at the wrong point on the
+  // real page (confirmed live: clicking "Accept All" on a cookie banner did
+  // nothing because the dispatched coordinates were off).
+  await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 60, maxWidth: 1280, maxHeight: 800, everyNthFrame: 1 });
   return cdp;
 }
 
@@ -2100,7 +2106,11 @@ async function dispatchLiveInput(runId, evt) {
     if (evt.type === 'mousemove' || evt.type === 'mousedown' || evt.type === 'mouseup') {
       await cdp.send('Input.dispatchMouseEvent', {
         type: evt.type === 'mousemove' ? 'mouseMoved' : evt.type === 'mousedown' ? 'mousePressed' : 'mouseReleased',
-        x: evt.x, y: evt.y, button: 'left', clickCount: evt.type === 'mousedown' ? 1 : 0,
+        // clickCount:1 on BOTH press and release — CDP/Chromium needs a
+        // matching non-zero count on the release too for it to register as
+        // an actual click (this is how Playwright/Puppeteer dispatch clicks
+        // internally); 0 on release was silently producing no click at all.
+        x: evt.x, y: evt.y, button: 'left', clickCount: evt.type === 'mousemove' ? 0 : 1,
       });
     } else if (evt.type === 'keydown' || evt.type === 'keyup') {
       await cdp.send('Input.dispatchKeyEvent', {

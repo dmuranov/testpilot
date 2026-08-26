@@ -4655,7 +4655,11 @@ function showOAuthHandoffPrompt(runId, message) {
 
 // Built once live_view_ready arrives (screencast is actually running). Frame
 // size must match server.js startLiveView's maxWidth/maxHeight.
-const LIVE_VIEW_W = 1024, LIVE_VIEW_H = 768;
+// Must match runAgentTest's browser.newContext viewport (server.js) exactly —
+// any mismatch means a click computed from canvas coordinates lands at the
+// wrong point on the real page (confirmed live: clicking "Accept All" on a
+// cookie banner did nothing when this was 1024x768 against a 1280x800 page).
+const LIVE_VIEW_W = 1280, LIVE_VIEW_H = 800;
 function openLiveView(runId) {
   const box = document.getElementById('oauth-handoff-' + runId);
   if (!box) return;
