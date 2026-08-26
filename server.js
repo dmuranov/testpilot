@@ -2478,9 +2478,16 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
     const afterScreenshot = await takeScreenshot(page, 'login-after');
     const newUrl = page.url();
 
-    // Check for error messages
+    // Check for error messages. Window was 500 chars — too short: on a real
+    // app (cvmagician.com) the actual "Invalid email or password" text sits
+    // at character 676, pushed past the cutoff by ordinary nav/header text
+    // (site name, nav links, "Welcome Back" heading) that precedes the form
+    // in DOM text order. hasError silently came back false, which meant the
+    // OAuth-handoff offer below (gated on hasError) never got a chance to
+    // fire even though the page clearly showed the error. 3000 comfortably
+    // covers real-world header sizes without scanning the whole page.
     const bodyText = await page.textContent('body').catch(() => '');
-    const hasError = /invalid|incorrect|wrong|error|failed|falló|incorrecta/i.test(bodyText.substring(0, 500));
+    const hasError = /invalid|incorrect|wrong|error|failed|falló|incorrecta/i.test(bodyText.substring(0, 3000));
 
     // Decide on what the page SHOWS, not on what the URL happens to spell. The
     // old test (`!newUrl.includes('login')`) was true for every sign-in page
