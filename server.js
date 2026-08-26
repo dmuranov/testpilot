@@ -5518,7 +5518,7 @@ function restoreCreds(action, creds) {
 // uncapped crawl OOM'd the whole VM, taking mocount down with it. Refuse to
 // start a browser when the box is low on memory; callers surface the thrown
 // error as a retryable "server busy" rather than a dead host.
-async function launchBrowser(opts = { headless: true }) {
+async function launchBrowser(opts = {}) {
   try {
     const meminfo = await fs.readFile('/proc/meminfo', 'utf-8');
     const kb = Number(/MemAvailable:\s+(\d+)/.exec(meminfo)?.[1] || 0);
@@ -5529,7 +5529,18 @@ async function launchBrowser(opts = { headless: true }) {
     if (/Server is busy/.test(e.message)) throw e;
     // /proc/meminfo unreadable (non-Linux dev box) — skip the guard.
   }
-  return chromium.launch(opts);
+  // HEADED (via the xvfb pm2 process + DISPLAY env, ecosystem.config.cjs), not
+  // headless. Google's account sign-in blocks on the headless Chromium
+  // signature specifically — a real human driving the live-view OAuth handoff
+  // (tryOAuthHandoff) was hitting "This browser or app may not be secure"
+  // even though every click/keystroke was genuinely theirs, because the
+  // browser itself still looked automated. --disable-blink-features=
+  // AutomationControlled removes the other half of that signature
+  // (confirmed live: navigator.webdriver reads false with it, true without).
+  // Applies to every run, not just handoff-eligible ones, since it's the one
+  // shared launchBrowser() — headless runs never needed the old default for
+  // any functional reason, just historical inertia.
+  return chromium.launch({ headless: false, args: ['--disable-blink-features=AutomationControlled'], ...opts });
 }
 
 // PNG dimensions parsed from base64 — reads just the IHDR chunk (no deps).

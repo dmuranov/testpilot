@@ -14,10 +14,26 @@
 //     state (sessions Map, activeScans counter, platformMaps, globalBrain). Cluster
 //     mode with >1 worker would fragment that state across processes. Single fork only.
 //
+// xvfb: a virtual display so Chromium can run HEADED (see launchBrowser,
+// server.js). Google's account sign-in ("This browser or app may not be
+// secure") keys heavily off the headless Chromium signature — a real human
+// driving the live-view OAuth handoff (tryOAuthHandoff, server.js) was
+// getting blocked by this even though every click/keystroke was genuinely
+// theirs. Headed + --disable-blink-features=AutomationControlled fixes it
+// (confirmed live: navigator.webdriver reads false against this display).
+// testpilot's DISPLAY env below points every launchBrowser() call at it.
+//
 // Apply on the VM:  pm2 start ecosystem.config.cjs && pm2 save
 // (env/secrets come from ./.env via the app's own dotenv — not injected here.)
 module.exports = {
   apps: [
+    {
+      name: 'xvfb',
+      script: '/usr/bin/Xvfb',
+      args: [':99', '-screen', '0', '1280x800x24', '-nolisten', 'tcp'],
+      interpreter: 'none',
+      autorestart: true,
+    },
     {
       name: 'testpilot',
       script: 'server.js',
@@ -28,6 +44,7 @@ module.exports = {
       max_memory_restart: '1800M',
       env: {
         NODE_ENV: 'production',
+        DISPLAY: ':99',
       },
     },
   ],
