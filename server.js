@@ -2101,7 +2101,11 @@ async function stopLiveView(runId) {
 // flow needs (Enter, Tab, Backspace).
 async function dispatchLiveInput(runId, evt) {
   const cdp = activeLiveViews.get(runId);
-  if (!cdp) return false;
+  // Silent drop here (no active CDP session, e.g. mid-switch between the
+  // original page and an OAuth popup) previously looked identical to a
+  // dispatch that landed on the wrong element — logged so the two are
+  // distinguishable if this comes up again.
+  if (!cdp) { console.log(`[live-input] ${runId} DROPPED (no active CDP session) type=${evt.type}`); return false; }
   try {
     if (evt.type === 'mousemove' || evt.type === 'mousedown' || evt.type === 'mouseup') {
       await cdp.send('Input.dispatchMouseEvent', {
@@ -2123,7 +2127,7 @@ async function dispatchLiveInput(runId, evt) {
       return false;
     }
     return true;
-  } catch { return false; }
+  } catch (err) { console.log(`[live-input] ${runId} DISPATCH ERROR type=${evt.type}:`, err.message); return false; }
 }
 
 // Google/Microsoft/GitHub OAuth almost always opens its account-chooser in a
@@ -2142,15 +2146,26 @@ function watchForPopups(originalPage, runId, ctx) {
     try {
       await popup.waitForLoadState('domcontentloaded', { timeout: 8000 }).catch(() => {});
       await stopLiveView(runId);
-      await startLiveView(popup, runId, ctx);
+      try {
+        await startLiveView(popup, runId, ctx);
+      } catch (err) {
+        // Seen live: "No target with given id found" — the popup's own CDP
+        // target can vanish between the 'page' event firing and attaching a
+        // screencast to it (e.g. Google replacing it mid-navigation). Falling
+        // back to the original page beats leaving the human staring at a
+        // frozen frame with every click silently dropped (activeLiveViews
+        // would otherwise have no entry for this runId at all).
+        console.log(`[live-view] ${runId} startLiveView(popup) FAILED: ${err.message} — falling back to original page`);
+        await startLiveView(originalPage, runId, ctx);
+      }
       ctx.emit({ type: 'live_view_ready', runId });
       popup.once('close', async () => {
         if (originalPage.isClosed()) return;
         await stopLiveView(runId);
-        await startLiveView(originalPage, runId, ctx);
+        await startLiveView(originalPage, runId, ctx).catch(err => console.log(`[live-view] ${runId} startLiveView(original, after popup close) FAILED: ${err.message}`));
         ctx.emit({ type: 'live_view_ready', runId });
       });
-    } catch { /* best-effort — a failed switch just leaves the human on whichever page was already showing */ }
+    } catch (err) { console.log(`[live-view] ${runId} onNewPage handler error: ${err.message}`); }
   };
   context.on('page', onNewPage);
   return () => context.off('page', onNewPage);
