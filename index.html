@@ -4673,14 +4673,24 @@ function openLiveView(runId) {
   const canvas = box.querySelector(`#live-canvas-${runId}`);
   const ctx2d = canvas.getContext('2d');
   window._tpLiveViews = window._tpLiveViews || {};
-  window._tpLiveViews[runId] = { canvas, ctx2d };
+  const entry = { canvas, ctx2d, frameW: LIVE_VIEW_W, frameH: LIVE_VIEW_H };
+  window._tpLiveViews[runId] = entry;
 
   const send = (payload) => fetch(`${API}/api/live-view/${encodeURIComponent(runId)}/input`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
   }).catch(() => {});
+  // Coordinates must be in the CURRENT frame's own native resolution, not the
+  // fixed 1280x800 canvas size — a click computed in the wrong space lands at
+  // the wrong point on the real page. This matters once the live view switches
+  // onto an OAuth popup (watchForPopups, server.js): Google's sign-in popup is
+  // a much smaller window than the original 1280x800 page, so its screencast
+  // frames arrive at that smaller native size (confirmed live: typing into the
+  // Google email field worked — Input.insertText doesn't depend on coordinates
+  // — but clicking "Next" did nothing, because the click was dispatched in
+  // 1280x800 space against a popup whose real viewport was far smaller).
   const toFrameCoords = (clientX, clientY) => {
     const r = canvas.getBoundingClientRect();
-    return { x: (clientX - r.left) * (LIVE_VIEW_W / r.width), y: (clientY - r.top) * (LIVE_VIEW_H / r.height) };
+    return { x: (clientX - r.left) * (entry.frameW / r.width), y: (clientY - r.top) * (entry.frameH / r.height) };
   };
   canvas.addEventListener('mousedown', (e) => { canvas.focus(); const p = toFrameCoords(e.clientX, e.clientY); send({ type: 'mousedown', ...p }); });
   canvas.addEventListener('mouseup', (e) => { const p = toFrameCoords(e.clientX, e.clientY); send({ type: 'mouseup', ...p }); });
@@ -4708,7 +4718,20 @@ function renderLiveFrame(runId, base64Jpeg) {
   const entry = window._tpLiveViews && window._tpLiveViews[runId];
   if (!entry) return;
   const img = new Image();
-  img.onload = () => entry.ctx2d.drawImage(img, 0, 0, entry.canvas.width, entry.canvas.height);
+  img.onload = () => {
+    // Resize the canvas's backing store to the frame's actual resolution (it
+    // changes when the live view switches between the original page and an
+    // OAuth popup of a different size) so drawImage draws 1:1 with no
+    // stretch, and toFrameCoords' click math stays correct for whichever
+    // page is currently live.
+    if (entry.frameW !== img.naturalWidth || entry.frameH !== img.naturalHeight) {
+      entry.frameW = img.naturalWidth;
+      entry.frameH = img.naturalHeight;
+      entry.canvas.width = img.naturalWidth;
+      entry.canvas.height = img.naturalHeight;
+    }
+    entry.ctx2d.drawImage(img, 0, 0);
+  };
   img.src = 'data:image/jpeg;base64,' + base64Jpeg;
 }
 
