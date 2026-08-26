@@ -36,6 +36,11 @@ _bak/
 *.migrated
 *.pdf
 *.xlsx
+# ...except the bundled placeholders the file-upload path actually ships with
+# (choosePlaceholderFile, server.js) — these are source assets, not test cruft.
+!placeholder.pdf
+!placeholder-invoice.pdf
+!placeholder.xlsx
 
 # ── Runtime state written by the server (per-install, not baseline) ──
 cleanup-configs.json
@@ -44,6 +49,7 @@ free-sweep-used.json
 schedules.json
 embed-tokens.json
 content-engine-results*.json
+saved-sessions.json
 
 # ── Ad-hoc gauntlet drivers (contain test credentials) ──
 pp-*
