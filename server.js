@@ -5663,6 +5663,33 @@ function safeRegex(pattern) {
   try { return new RegExp(pattern, 'i'); } catch { return null; }
 }
 
+// Pure text/pattern match — plain substring if the pattern doesn't compile
+// as a regex (or is empty), regex test otherwise. Shared by the live check
+// and the negative control so they can never drift apart on semantics.
+function matchesText(valueOrPattern, text) {
+  const re = safeRegex(valueOrPattern);
+  return re ? re.test(text) : String(text).includes(String(valueOrPattern || ''));
+}
+
+// Find the most recent call in `apiCalls` matching assert's urlPattern(+method),
+// then check its status/bodyContains if the assertion names them. Shared by
+// the live check (against diag.apiCalls) and the negative control (against a
+// slice of it from BEFORE the action). Returns {matched, call, body}.
+async function matchNetworkCall(assert, apiCalls) {
+  const urlRe = safeRegex(assert.urlPattern);
+  if (!urlRe) return { matched: false, call: null, body: '' };
+  const candidates = (apiCalls || []).filter(c => urlRe.test(c.url) && (!assert.method || c.method === assert.method));
+  const call = candidates[candidates.length - 1]; // most recent match wins
+  if (!call) return { matched: false, call: null, body: '' };
+  if (assert.status != null && call.status !== assert.status) return { matched: false, call, body: '' };
+  let body = '';
+  if (assert.bodyContains) {
+    try { body = await call.response.text(); } catch { /* unreadable — treated as no match below */ }
+    if (!matchesText(assert.bodyContains, body)) return { matched: false, call, body };
+  }
+  return { matched: true, call, body };
+}
+
 // Structured, deterministic alternative to the vision judge for a verify
 // step that names a real state signature (action.assert — see the action
 // schema in runAgentTest's system prompt) instead of asking a model to
@@ -5681,36 +5708,26 @@ async function evaluateStateAssertion(assert, page, diag) {
   }
 
   if (type === 'dom_text_contains') {
-    const re = safeRegex(assert.value);
     const text = (await page.textContent('body').catch(() => '')) || '';
-    const hit = re ? re.test(text) : text.includes(String(assert.value || ''));
     const expected = `page contains "${assert.value}"`;
-    if (hit) return { status: 'WORKS', expected, actual: 'found on the page' };
+    if (matchesText(assert.value, text)) return { status: 'WORKS', expected, actual: 'found on the page' };
     const snippet = text.replace(/\s+/g, ' ').trim().slice(0, 400);
     return { status: 'BROKEN', expected, actual: `not found — page text was: "${snippet}"` };
   }
 
   if (type === 'network_response') {
-    const urlRe = safeRegex(assert.urlPattern);
     const expectedParts = [`a call to ${assert.urlPattern}`];
     if (assert.status != null) expectedParts.push(`status ${assert.status}`);
     if (assert.bodyContains) expectedParts.push(`body containing "${assert.bodyContains}"`);
     const expected = expectedParts.join(', ');
-    if (!urlRe) return { status: 'UNCERTAIN', expected, actual: 'the urlPattern given is not a valid regex' };
+    if (!safeRegex(assert.urlPattern)) return { status: 'UNCERTAIN', expected, actual: 'the urlPattern given is not a valid regex' };
 
-    const matches = (diag.apiCalls || []).filter(c => urlRe.test(c.url) && (!assert.method || c.method === assert.method));
-    const call = matches[matches.length - 1]; // most recent match wins
+    const { matched, call, body } = await matchNetworkCall(assert, diag.apiCalls);
     if (!call) return { status: 'UNCERTAIN', expected, actual: 'no matching network call was observed during this run — wrong pattern, or it hasn\'t fired yet' };
-
-    if (assert.status != null && call.status !== assert.status) {
-      return { status: 'BROKEN', expected, actual: `${call.method} ${call.url} → ${call.status}` };
-    }
-    if (assert.bodyContains) {
-      let body = '';
-      try { body = await call.response.text(); } catch { /* body unreadable — fall through, treated as no match */ }
-      const bodyRe = safeRegex(assert.bodyContains);
-      const hit = bodyRe ? bodyRe.test(body) : body.includes(String(assert.bodyContains));
-      if (!hit) return { status: 'BROKEN', expected, actual: `${call.method} ${call.url} → ${call.status}, body: "${body.slice(0, 300)}"` };
+    if (!matched) {
+      return { status: 'BROKEN', expected, actual: assert.status != null && call.status !== assert.status
+        ? `${call.method} ${call.url} → ${call.status}`
+        : `${call.method} ${call.url} → ${call.status}, body: "${body.slice(0, 300)}"` };
     }
     return { status: 'WORKS', expected, actual: `${call.method} ${call.url} → ${call.status}` };
   }
@@ -5719,34 +5736,58 @@ async function evaluateStateAssertion(assert, page, diag) {
 }
 
 // A NEGATIVE CONTROL, run automatically the instant a structured assertion
-// passes: does this same pattern also match a trivially blank/absent state —
-// an empty URL, an empty page, an empty response body — or a network check
-// with no status/body constraint at all (so it only proves a call HAPPENED,
-// not that it SUCCEEDED)? If so, the assertion just passed but doesn't
-// actually prove what it claims to: it would pass the same way if the app
-// were broken. Deliberately NOT a live fault-injection replay (re-firing the
-// real action a second time against a production app — e.g. a checkout call
-// — risks a real duplicate side effect, like a second order or charge); this
-// is pure regex/string logic against a synthetic sample, zero extra cost,
-// zero risk, run on every pass rather than cached from a one-time check.
+// passes: does this SAME assertion also match the state as it was BEFORE the
+// action it's supposed to be proving (preActionState — the url/page-text/
+// api-call-count snapshot captured just before the last non-verify action,
+// see runAgentTest's main loop)? If so, the pass proves nothing about the
+// action: dom_text_contains:"Order" matching after checkout tells you
+// nothing if "Order now" was already on the pre-checkout page too. This is
+// strictly stronger than a blank/empty-state check — a pattern loose enough
+// to match blank is automatically loose enough to match a real pre-action
+// page, but not the reverse (confirmed: "Order" doesn't match "", but WOULD
+// match the real pre-action page, which the empty check alone would miss).
+// preActionState is null only when verify is the very first action in the
+// run (nothing to compare against) — falls back to the empty-state check
+// there as a strictly weaker degenerate case, noted as such in the message.
+//
+// The before/after comparison only makes sense for an assert claiming the
+// action caused something NEW — assert.expectChange:false (a total that
+// should stay correct, a page that shouldn't have navigated) is SUPPOSED to
+// match before and after, so applying this control there would be a false
+// positive on every legitimate persistence check, and at volume that's how
+// a demotion label stops meaning anything (every run comes back "unverified"
+// and people learn to ignore it). The structural weakness checks below
+// (an assertion with no real constraint at all) aren't about before/after
+// and still apply regardless of expectChange.
+//
+// Deliberately NOT a live fault-injection replay (re-firing the real action
+// a second time against a production app — e.g. a checkout call — risks a
+// real duplicate side effect, like a second order or charge); this reuses
+// state already captured, zero extra cost, zero risk, runs on every pass.
 // Returns {wentRed: true|false|null, note}. null = not applicable (unknown
-// assert type) — never surfaced as a finding.
-function negativeControlCheck(assert) {
+// assert type, or a before/after check skipped for expectChange:false) —
+// never surfaced as a finding.
+async function negativeControlCheck(assert, preActionState, diag) {
   const type = assert?.type;
+  const expectChange = assert?.expectChange !== false;
+  const haveBefore = !!preActionState;
+  const baseline = haveBefore ? 'the state before this step\'s action' : 'an empty/blank state (no prior action to compare against this run)';
 
   if (type === 'url_matches') {
+    if (!expectChange) return { wentRed: null, note: '' };
     const re = safeRegex(assert.pattern);
     if (!re) return { wentRed: null, note: '' };
-    return re.test('')
-      ? { wentRed: false, note: 'this URL pattern also matches an empty string — it may not require anything specific about the destination.' }
+    const testUrl = haveBefore ? preActionState.url : '';
+    return re.test(testUrl)
+      ? { wentRed: false, note: `this URL pattern also matches ${baseline} (${JSON.stringify(testUrl)}) — it may not require anything the action actually caused.` }
       : { wentRed: true, note: '' };
   }
 
   if (type === 'dom_text_contains') {
-    const re = safeRegex(assert.value);
-    const matchesBlank = re ? re.test('') : String(assert.value || '') === '';
-    return matchesBlank
-      ? { wentRed: false, note: 'this text check also matches an empty page — it may not require anything specific to be visible.' }
+    if (!expectChange) return { wentRed: null, note: '' };
+    const testText = haveBefore ? preActionState.text : '';
+    return matchesText(assert.value, testText)
+      ? { wentRed: false, note: `this text check also matches ${baseline} — it may already have been true before the action ran.` }
       : { wentRed: true, note: '' };
   }
 
@@ -5754,10 +5795,13 @@ function negativeControlCheck(assert) {
     if (assert.status == null && !assert.bodyContains) {
       return { wentRed: false, note: 'this assertion only checks that a matching call happened — it would pass even if that call itself failed, since neither a status nor a body check is set.' };
     }
-    if (assert.bodyContains) {
-      const re = safeRegex(assert.bodyContains);
-      const matchesBlank = re ? re.test('') : String(assert.bodyContains) === '';
-      if (matchesBlank) return { wentRed: false, note: 'the body check also matches an empty response body.' };
+    if (!expectChange) return { wentRed: null, note: '' };
+    if (haveBefore) {
+      const priorCalls = (diag.apiCalls || []).slice(0, preActionState.apiCallCount);
+      const { matched, call } = await matchNetworkCall(assert, priorCalls);
+      if (matched) return { wentRed: false, note: `a call matching this assertion already existed before this step's action (${call.method} ${call.url} → ${call.status}) — the "proof" may just be a stale earlier call, not evidence this action did anything.` };
+    } else if (assert.bodyContains && matchesText(assert.bodyContains, '')) {
+      return { wentRed: false, note: 'the body check also matches an empty response body.' };
     }
     return { wentRed: true, note: '' };
   }
@@ -6136,9 +6180,12 @@ AVAILABLE ACTIONS (respond with ONLY one JSON object):
 {"action": "verify", "check": "what this proves", "assert": {"type":"url_matches","pattern":"regex, e.g. /orders/\\\\d+"}}
 {"action": "verify", "check": "what this proves", "assert": {"type":"dom_text_contains","value":"exact or partial text/regex expected somewhere on the page, e.g. an order id"}}
 {"action": "verify", "check": "what this proves", "assert": {"type":"network_response","urlPattern":"regex matching the API call, e.g. /api/orders","status":201,"bodyContains":"optional text/regex expected in the response body"}}
+{"action": "verify", "check": "total is still correct after changing quantity", "assert": {"type":"dom_text_contains","value":"€40.00","expectChange":false}}
 {"action": "done", "summary": "final result based on what actually happened"}
 
 ASSERT — use for a step whose real proof is APPLICATION STATE, not appearance: an order/payment/booking completing, a record actually persisting, anything where "the page looks right" could still be wrong (e.g. a confirmation screen rendered from stale local state while the actual save silently failed server-side). When the step you're verifying has a concrete state signature — a URL that only exists post-success, an id/reference visible in the DOM, or the actual API call that performed the action — attach "assert" and TestPilot checks that directly instead of judging a screenshot. Use plain "verify" (no assert) for anything whose correctness genuinely IS what's on screen (a label, a validation message, a layout). Don't force an assert where there's no real state signature to check.
+
+"expectChange" (default true) — set this to false when the assert is checking something that should be TRUE BOTH BEFORE AND AFTER the action (a total staying correct after an unrelated change, still being on the same page, a value that should NOT have moved) rather than something NEW the action caused. TestPilot runs an automatic sanity check on every assert that passes — it compares against the state from just before the action to make sure the assert isn't trivially true regardless of what happened. That check assumes the assert is about something the action CHANGED; for an assert about something that's supposed to stay the same, set expectChange:false so it isn't wrongly flagged.
 
 ═══════════════════════════════════════════════════════════════════
 HOW WEB FORMS BEHAVE — READ THIS, IT IS THE #1 SOURCE OF AGENT CONFUSION
@@ -6343,6 +6390,14 @@ What is your first action?`,
     if (replayQueue.length) emitStep(testId, { type: 'info', message: `⚡ Found a saved recipe (${replayQueue.length} steps) for this task — replaying it; will switch to the live agent if the UI has changed.` });
 
     let budgetWarned = false;
+    // Snapshot of state as of right before the most recent NON-verify action
+    // executed — the real "before" a structured assertion's negative control
+    // compares against (see negativeControlCheck). Updated at the top of
+    // every non-verify iteration, left untouched across consecutive verifies
+    // so it still reflects "before the action this verify is about", not
+    // "before the verify call itself" (which would just be the same
+    // already-acted-on state and prove nothing).
+    let preActionState = null;
     for (let turn = 0; turn < MAX_AGENT_STEPS; turn++) {
       // Cost guard: cap at COST_TOKEN_BUDGET. At 80%, warn the agent so it
       // can call `done` cleanly with a partial summary — avoids the old
@@ -6501,6 +6556,14 @@ What is your first action?`,
           && PAYMENT_COMMIT_RE.test(String(action.target || ''))) {
         result.reachedPaymentStep = true;
         action = { action: 'done', summary: `Reached the final payment/booking step ("${action.target}") — stopped here without submitting, per stop-before-pay mode. The flow up to checkout appears to work.` };
+      }
+
+      if (action.action !== 'verify' && action.action !== 'done') {
+        preActionState = {
+          url: page.url(),
+          text: await page.textContent('body').catch(() => '') || '',
+          apiCallCount: diag.apiCalls.length,
+        };
       }
 
       try {
@@ -7439,7 +7502,7 @@ Look at this turn's screenshot and the Buttons / Fields lists. Pick something el
                   // against a blank/absent state? Shown to the user (never
                   // counted as a bug — the WORKS verdict for THIS run stands)
                   // so a weak check is visible instead of silently trusted.
-                  const nc = negativeControlCheck(action.assert);
+                  const nc = await negativeControlCheck(action.assert, preActionState, diag);
                   if (nc.wentRed === false) {
                     result.findings.push(classifyFailure({
                       cause: 'state_assertion_unproven',
