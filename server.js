@@ -9075,7 +9075,11 @@ function emitSweep(sweepId, event) {
   const payload = `data: ${JSON.stringify(event)}\n\n`;
   for (const r of rs) { try { r.write(payload); } catch {} }
   const rep = sweepResults.get(sweepId);
-  if (rep && event.type !== 'ping') rep.log.push(event);
+  // live_frame carries a full base64 JPEG, one per screencast frame — fine to
+  // stream live over SSE for the login-handoff canvas, but persisting every
+  // frame into the sweep's stored log would balloon it for the length of
+  // however long a human takes to log in. Stream it, don't keep it.
+  if (rep && event.type !== 'ping' && event.type !== 'live_frame') rep.log.push(event);
 }
 
 // Same shape as awaitTwoFactorCode: park a promise the HTTP route resolves.
@@ -9492,7 +9496,14 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
       emitSweep(sweepId, { type: 'info', message: 'Logging in…' });
       // Whoever the route decided pays — the support key only when the route
       // granted a free allowance, otherwise the caller's own key.
-      const li = await visionLogin(page, credentials, apiKey, { runId: sweepId, emit: () => {} }).catch(e => ({ success: false, error: e.message }));
+      // emit was a no-op () => {} — ctx.runId is truthy and ctx.emit passes
+      // the typeof-function gate, so visionLogin's 2FA and OAuth-handoff
+      // paths both "fired" (called ctx.emit) but the event went nowhere: the
+      // frontend never got the awaiting_2fa/awaiting_oauth_handoff SSE event,
+      // so neither prompt ever appeared, and the wait for a response that
+      // could never arrive just burned the full timeout before failing.
+      // Routing through emitSweep actually reaches the sweep-stream frontend.
+      const li = await visionLogin(page, credentials, apiKey, { runId: sweepId, emit: (event) => emitSweep(sweepId, event) }).catch(e => ({ success: false, error: e.message }));
       emitSweep(sweepId, { type: li.success ? 'pass' : 'fail', message: li.success ? 'Login successful' : `Could not log in: ${li.error || 'unknown'}` });
       if (!li.success) {
         report.status = 'blocked';

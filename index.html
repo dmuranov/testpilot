@@ -3794,6 +3794,17 @@ function streamSweep(sweepId) {
   es.onmessage = async (ev) => {
     let d; try { d = JSON.parse(ev.data); } catch { return; }
     if (d.type === 'awaiting_confirm') { showSweepConfirm(sweepId, d); return; }
+    // 2FA and OAuth live-handoff — same events the learn/test streams handle
+    // (showOAuthHandoffPrompt et al. are shared functions). Check Everything's
+    // login used to pass a no-op emit here, so these fired server-side but
+    // never reached the frontend: no prompt ever appeared, and the run just
+    // burned its full wait timeout before failing. Handle before the generic
+    // log push, same reason as the other streams — live_frame in particular
+    // would otherwise flood the log with raw base64 on every frame.
+    if (d.type === 'awaiting_2fa') { show2faPrompt(d.runId, d.message); return; }
+    if (d.type === 'awaiting_oauth_handoff') { showOAuthHandoffPrompt(d.runId, d.message); return; }
+    if (d.type === 'live_view_ready') { openLiveView(d.runId); return; }
+    if (d.type === 'live_frame') { renderLiveFrame(d.runId, d.data); return; }
     state.sweep.log = state.sweep.log || [];
     if (d.message) state.sweep.log.push(d);
     if (d.type === 'done' || d.type === 'summary') {
