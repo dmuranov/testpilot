@@ -2199,12 +2199,24 @@ async function tryOAuthHandoff(page, ctx) {
     await stopLiveView(ctx.runId);
   }
 
-  const freshScreenshot = await takeScreenshot(page, 'login-after-handoff');
   const stillHasForm = await page.locator(LOGIN_FORM_SELECTOR).first().isVisible({ timeout: 2500 }).catch(() => false);
-  if (!stillHasForm) {
-    return { success: true, screenshot: freshScreenshot, message: `Logged in via manual handoff. Now at: ${page.url()}` };
-  }
-  return null; // still not logged in after the handoff — fall through to the normal error
+  if (stillHasForm) return null; // still not logged in after the handoff — fall through to the normal error
+
+  // The login form disappearing does NOT mean the app has finished exchanging
+  // the OAuth code for its own session cookie yet — confirmed live: a session
+  // captured (server.js's saved-session capture) immediately after this point
+  // went invalid within 2 minutes, because storageState() ran before
+  // cvmagician's backend had actually set its auth cookie, so what got saved
+  // was a half-authenticated snapshot. Settle for the exchange to finish,
+  // then re-check: a real failure bounces back to the login form here; a
+  // real success stays away from it.
+  await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+  await page.waitForTimeout(1500);
+  const stillHasFormAfterSettle = await page.locator(LOGIN_FORM_SELECTOR).first().isVisible({ timeout: 2500 }).catch(() => false);
+  if (stillHasFormAfterSettle) return null;
+
+  const freshScreenshot = await takeScreenshot(page, 'login-after-handoff');
+  return { success: true, screenshot: freshScreenshot, message: `Logged in via manual handoff. Now at: ${page.url()}` };
 }
 
 // Detect a visible one-time-code / OTP / 2FA input. Runs AFTER step-1 auth, so a
@@ -11827,6 +11839,16 @@ app.post('/api/saved-sessions/:appId/capture', async (req, res) => {
         return;
       }
       await page.waitForTimeout(1500);
+      // Defense-in-depth on top of tryOAuthHandoff's own settle+recheck: never
+      // persist a session while a password field is still visible — confirmed
+      // live, a session saved right at this point went invalid within 2
+      // minutes because the app hadn't actually finished session exchange.
+      const stillLoggedOut = await page.locator('input[type="password"]').first().isVisible({ timeout: 1500 }).catch(() => false);
+      if (stillLoggedOut) {
+        emitCapture(captureId, { type: 'error', message: 'Login looked successful but a password field is still visible — not saving what would be a broken session. Try again.' });
+        await browser.close();
+        return;
+      }
       const sessionState = await ctx.storageState();
       const key = savedSessionKey(sessionUser.email, appId, role);
       savedSessions.set(key, {
