@@ -4626,27 +4626,55 @@ function show2faPrompt(runId, message) {
 // screencast) so the user can finish the OAuth flow themselves; the test
 // resumes automatically once they click Done. Self-contained like
 // show2faPrompt, for the same reason (server is blocked while paused).
+// The handoff prompt and the live-view canvas both need to be reliably fully
+// visible and interactable — they used to get appended into whichever
+// .test-stream log panel was active, which caps at max-height:500px with its
+// own overflow-y:auto. Confirmed live: the box landed mostly below the fold
+// with no auto-scroll, the user could see only its top edge, and had no way
+// to reach the "Done" button or type into the canvas. A fixed full-viewport
+// overlay guarantees visibility regardless of the log panel's scroll state.
+function getLiveOverlayHost() {
+  let overlay = document.getElementById('tp-live-overlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = 'tp-live-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:flex-start;justify-content:center;overflow:auto;background:rgba(0,0,0,0.65);padding:24px';
+    document.body.appendChild(overlay);
+  }
+  return overlay;
+}
+function closeLiveOverlay(runId) {
+  document.getElementById('oauth-handoff-' + runId)?.remove();
+  const overlay = document.getElementById('tp-live-overlay');
+  if (overlay && !overlay.firstElementChild) overlay.remove();
+}
+
 function showOAuthHandoffPrompt(runId, message) {
   if (!runId || document.getElementById('oauth-handoff-' + runId)) return;
-  const host = document.getElementById('learn-stream') || document.getElementById('test-stream') || document.getElementById('sec-stream') || document.body;
   const box = document.createElement('div');
   box.id = 'oauth-handoff-' + runId;
-  box.style.cssText = 'margin:12px 0;padding:14px;border:1px solid var(--accent,#6c5ce7);border-radius:8px;background:rgba(108,92,231,0.08)';
+  box.style.cssText = 'width:100%;max-width:720px;margin:auto;padding:14px;border:1px solid var(--accent,#6c5ce7);border-radius:8px;background:var(--bg-elevated,#15151c)';
   box.innerHTML = `
     <div style="font-weight:600;margin-bottom:10px">🔑 ${message || 'Login failed — this app may need Google sign-in'}</div>
     <div style="display:flex;gap:8px">
       <button id="oauth-take-${runId}" class="btn btn-primary">Take over &amp; log in myself</button>
       <button id="oauth-skip-${runId}" class="btn btn-ghost">Skip</button>
     </div>`;
-  host.appendChild(box);
+  getLiveOverlayHost().appendChild(box);
+  box.scrollIntoView({ block: 'center' });
   box.querySelector(`#oauth-skip-${runId}`).addEventListener('click', async () => {
     box.innerHTML = '<div style="color:var(--text-muted)">Skipped — continuing with the normal error.</div>';
     await fetch(`${API}/api/live-view/${encodeURIComponent(runId)}/decline`, { method: 'POST' }).catch(() => {});
+    setTimeout(() => closeLiveOverlay(runId), 1500);
   });
   box.querySelector(`#oauth-take-${runId}`).addEventListener('click', async () => {
     box.innerHTML = '<div style="color:var(--accent,#6c5ce7)">Connecting…</div>';
     const r = await fetch(`${API}/api/live-view/${encodeURIComponent(runId)}/accept`, { method: 'POST' }).catch(() => null);
-    if (!r || !r.ok) { box.innerHTML = '<div style="color:#e74c3c">Could not start the live view — the offer may have expired. The test will continue with the normal error.</div>'; return; }
+    if (!r || !r.ok) {
+      box.innerHTML = '<div style="color:#e74c3c">Could not start the live view — the offer may have expired. The test will continue with the normal error.</div>';
+      setTimeout(() => closeLiveOverlay(runId), 3000);
+      return;
+    }
     // The canvas/controls get built by openLiveView() once the server confirms
     // the screencast actually started (the live_view_ready SSE event) —
     // starting it takes a moment, so don't build the UI before it's real.
@@ -4663,6 +4691,7 @@ const LIVE_VIEW_W = 1280, LIVE_VIEW_H = 800;
 function openLiveView(runId) {
   const box = document.getElementById('oauth-handoff-' + runId);
   if (!box) return;
+  box.style.maxWidth = LIVE_VIEW_W + 'px'; // was 720px, sized for the prompt's buttons — too narrow for the canvas
   box.innerHTML = `
     <div style="font-weight:600;margin-bottom:8px">🔑 Log in yourself below, then click Done.</div>
     <canvas id="live-canvas-${runId}" width="${LIVE_VIEW_W}" height="${LIVE_VIEW_H}" tabindex="0"
@@ -4695,8 +4724,21 @@ function openLiveView(runId) {
   canvas.addEventListener('mousedown', (e) => { canvas.focus(); const p = toFrameCoords(e.clientX, e.clientY); send({ type: 'mousedown', ...p }); });
   canvas.addEventListener('mouseup', (e) => { const p = toFrameCoords(e.clientX, e.clientY); send({ type: 'mouseup', ...p }); });
   canvas.addEventListener('mousemove', (e) => { const p = toFrameCoords(e.clientX, e.clientY); send({ type: 'mousemove', ...p }); });
-  canvas.addEventListener('keydown', (e) => {
+  canvas.addEventListener('keydown', async (e) => {
     e.preventDefault();
+    // Ctrl/Cmd+V was falling into the printable-character branch below and
+    // sending the literal letter "v" — the modifier was silently dropped, so
+    // paste looked like it just did nothing (confirmed live: pasting a
+    // password typed a "v" instead). Read the clipboard directly and relay
+    // its contents as text instead of trying to make a real paste happen on
+    // the remote page.
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'v' || e.key === 'V')) {
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text) send({ type: 'text', text });
+      } catch { /* clipboard read needs permission/HTTPS — nothing more we can do */ }
+      return;
+    }
     // Printable characters go as one Input.insertText (correct for Unicode);
     // everything else (Enter/Tab/Backspace/...) goes as a real key event.
     if (e.key.length === 1) { send({ type: 'text', text: e.key }); return; }
@@ -4711,6 +4753,7 @@ function openLiveView(runId) {
     box.innerHTML = '<div style="color:var(--accent,#6c5ce7)">Continuing…</div>';
     delete window._tpLiveViews[runId];
     await fetch(`${API}/api/live-view/${encodeURIComponent(runId)}/done`, { method: 'POST' }).catch(() => {});
+    closeLiveOverlay(runId);
   });
 }
 
