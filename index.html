@@ -4531,6 +4531,19 @@ async function startLearn() {
         if (line.startsWith('data: ')) {
           try {
             const data = JSON.parse(line.substring(6));
+
+            // OAuth live-handoff control events are NOT log lines — the
+            // takeover prompt / canvas are their own DOM (like the 2FA
+            // prompt), and live_frame in particular carries a full base64
+            // JPEG per frame, which would otherwise get pushed into
+            // learnProgress and rendered as raw unreadable text on every
+            // single frame (this is what happened before this fix — a wall
+            // of base64 flooding the crawl log). Handle and skip entirely,
+            // same shape as the /api/test stream's handling below.
+            if (data.type === 'awaiting_oauth_handoff') { showOAuthHandoffPrompt(data.runId, data.message); continue; }
+            if (data.type === 'live_view_ready') { openLiveView(data.runId); continue; }
+            if (data.type === 'live_frame') { renderLiveFrame(data.runId, data.data); continue; }
+
             state.learnProgress.push(data);
 
             if (data.phase === 'complete') {
@@ -4557,11 +4570,6 @@ async function startLearn() {
             if (data.phase === 'awaiting_2fa' || data.type === 'awaiting_2fa') {
               show2faPrompt(data.runId, data.message);
             }
-            if (data.phase === 'awaiting_oauth_handoff' || data.type === 'awaiting_oauth_handoff') {
-              showOAuthHandoffPrompt(data.runId, data.message);
-            }
-            if (data.type === 'live_view_ready') openLiveView(data.runId);
-            if (data.type === 'live_frame') renderLiveFrame(data.runId, data.data);
           } catch (e) { /* partial JSON */ }
         }
       }
