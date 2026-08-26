@@ -2942,7 +2942,7 @@ function renderTestRun() {
         <h2>${state.testMode === 'flow_e2e' ? 'Checkout & Booking Test' : 'Run Test'}</h2>
         ${state.testMode === 'flow_e2e' ? `<div style="font-size:12px;color:var(--text-muted);margin-top:2px">Describe the booking/checkout/signup journey to follow — TestPilot reports whether it reaches the end, exactly where it breaks if not, and which steps are slow enough that real users would likely drop off.</div>` : ''}
         ${state.apps.length > 1 ? `
-          <select onchange="state.selectedApp = state.apps.find(a => a.appId === this.value); state._savedForm = null; render()" style="margin-top:4px;background:var(--bg-hover);color:var(--text);border:1px solid var(--border);border-radius:2px;padding:4px 8px;font-size:12px;font-family:'DM Mono',monospace;max-width:360px;cursor:pointer">
+          <select onchange="state.selectedApp = state.apps.find(a => a.appId === this.value); state._savedForm = null; state.testSavedRole = ''; render()" style="margin-top:4px;background:var(--bg-hover);color:var(--text);border:1px solid var(--border);border-radius:2px;padding:4px 8px;font-size:12px;font-family:'DM Mono',monospace;max-width:360px;cursor:pointer">
             ${state.apps.map(a => `<option value="${escapeHtml(a.appId || '')}" ${app?.appId === a.appId ? 'selected' : ''}>${escapeHtml(a.summary?.appName || a.url || a.appId)}</option>`).join('')}
           </select>
         ` : `<div style="font-size:12px;color:var(--text-muted);margin-top:2px">${escapeHtml(app?.summary?.appName || app?.url || '')}</div>`}
@@ -2971,7 +2971,8 @@ function renderTestRun() {
         <input type="checkbox" id="test-no-login" onchange="state._testNoLogin=this.checked;toggleTestLoginFields()" style="width:16px;height:16px;accent-color:var(--accent);cursor:pointer" ${state._testNoLogin ? 'checked' : ''} />
         <label for="test-no-login" style="cursor:pointer;font-size:13px;color:var(--text-dim);margin:0">No login required</label>
       </div>
-      <div id="test-login-fields" style="display:${state._testNoLogin ? 'none' : 'block'}">
+      ${!state._testNoLogin ? renderSavedLoginPicker(app?.appId, state.testSavedRole || '', "state.testSavedRole=this.value;render()", 'test') : ''}
+      <div id="test-login-fields" style="display:${(state._testNoLogin || state.testSavedRole) ? 'none' : 'block'}">
         <div style="display:flex;gap:10px">
           <div class="form-group" style="flex:1">
             <label>Email</label>
@@ -3643,6 +3644,94 @@ function cancelMultiRole() {
 }
 
 
+// Cache of saved login role labels per app (server.js: /api/saved-sessions).
+// null-ish key = never fetched; [] = fetched, possibly genuinely empty. The
+// sentinel avoids re-firing the request on every render tick while a fetch
+// is in flight — render() gets called far more often than the data changes.
+state.savedLogins = state.savedLogins || {};
+function loadSavedLogins(appId) {
+  if (!appId || state.savedLogins[appId]) return;
+  state.savedLogins[appId] = [];
+  fetch(`${API}/api/saved-sessions/${encodeURIComponent(appId)}`)
+    .then(r => r.json())
+    .then(r => { state.savedLogins[appId] = (r && r.roles) || []; render(); })
+    .catch(() => {});
+}
+
+// Shared "saved login" picker — Test/Check Everything can reuse a session
+// captured once instead of retyping credentials or pasting a session every
+// single run. `onChangeJs` is the literal onchange body (uses `this.value`)
+// so each screen routes the selection into its own state shape;
+// `screenPrefix` keeps the element id unique per screen.
+function renderSavedLoginPicker(appId, currentRole, onChangeJs, screenPrefix) {
+  if (!appId) return '';
+  loadSavedLogins(appId);
+  const roles = state.savedLogins[appId] || [];
+  return `
+    <div class="form-group">
+      <label>Saved login (optional)</label>
+      <div style="display:flex;gap:8px;align-items:center">
+        <select class="form-input" id="${screenPrefix}-saved-role" onchange="${onChangeJs}" style="flex:1">
+          <option value="">— none, enter credentials below —</option>
+          ${roles.map(r => `<option value="${escapeHtml(r.role)}" ${currentRole === r.role ? 'selected' : ''}>${escapeHtml(r.role)}</option>`).join('')}
+        </select>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="showCaptureLoginForm('${appId}')">+ Capture new role</button>
+      </div>
+      ${currentRole ? `<div style="font-size:11px;color:var(--text-dim);margin-top:4px">Using the saved "${escapeHtml(currentRole)}" login — no need to log in again.</div>` : ''}
+    </div>`;
+}
+
+// Log in ONCE for (appId, role) and save the resulting session server-side —
+// handles 2FA and the OAuth live-handoff exactly like a normal run, reusing
+// the SAME overlay/prompt functions (show2faPrompt, showOAuthHandoffPrompt,
+// openLiveView, renderLiveFrame) keyed by captureId as their runId.
+function showCaptureLoginForm(appId) {
+  const overlay = getLiveOverlayHost();
+  const box = document.createElement('div');
+  box.id = 'capture-login-form';
+  box.style.cssText = 'width:100%;max-width:420px;margin:auto;padding:16px;border:1px solid var(--accent,#6c5ce7);border-radius:8px;background:var(--bg-elevated,#15151c)';
+  box.innerHTML = `
+    <div style="font-weight:600;margin-bottom:10px">Save a login for this app</div>
+    <div class="form-group"><label>Role label</label><input class="form-input" id="cap-role" placeholder="e.g. Owner, Free user" /></div>
+    <div class="form-group"><label>Login email</label><input class="form-input" id="cap-email" placeholder="user@app.com" /></div>
+    <div class="form-group"><label>Password</label><input class="form-input" type="password" id="cap-password" placeholder="leave blank for Google-only — you'll take over live" /></div>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn btn-primary" id="cap-start">Capture</button>
+      <button class="btn btn-ghost" id="cap-cancel">Cancel</button>
+    </div>
+    <div id="cap-status" style="margin-top:10px;font-size:12px;color:var(--text-muted)"></div>`;
+  overlay.appendChild(box);
+  box.scrollIntoView({ block: 'center' });
+  box.querySelector('#cap-cancel').addEventListener('click', () => { box.remove(); if (!overlay.firstElementChild) overlay.remove(); });
+  box.querySelector('#cap-start').addEventListener('click', async () => {
+    const role = box.querySelector('#cap-role').value.trim();
+    const email = box.querySelector('#cap-email').value.trim();
+    const password = box.querySelector('#cap-password').value;
+    if (!role || !email) { tpToast('Role label and email are required'); return; }
+    box.querySelector('#cap-status').textContent = 'Starting…';
+    const r = await fetch(`${API}/api/saved-sessions/${encodeURIComponent(appId)}/capture`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role, email, password, apiKey: getApiKey() }),
+    }).then(res => res.json()).catch(() => null);
+    if (!r || !r.captureId) { box.querySelector('#cap-status').textContent = 'Could not start capture.'; return; }
+    const captureId = r.captureId;
+    box.remove();
+    if (!overlay.firstElementChild) overlay.remove();
+    const es = new EventSource(`${API}/api/saved-sessions/${encodeURIComponent(appId)}/stream/${captureId}`);
+    es.onmessage = (ev) => {
+      let d; try { d = JSON.parse(ev.data); } catch { return; }
+      const runId = d.runId || captureId;
+      if (d.type === 'awaiting_2fa') { show2faPrompt(runId, d.message); return; }
+      if (d.type === 'awaiting_oauth_handoff') { showOAuthHandoffPrompt(runId, d.message); return; }
+      if (d.type === 'live_view_ready') { openLiveView(runId); return; }
+      if (d.type === 'live_frame') { renderLiveFrame(runId, d.data); return; }
+      if (d.type === 'done') { tpToast(d.message || 'Login saved'); delete state.savedLogins[appId]; loadSavedLogins(appId); closeLiveOverlay(runId); es.close(); }
+      if (d.type === 'error') { tpToast(d.message || 'Capture failed', 'error'); closeLiveOverlay(runId); es.close(); }
+    };
+    es.onerror = () => es.close();
+  });
+}
+
 function renderSweep() {
   const apps = state.apps || [];
   const s = state.sweep || {};
@@ -3671,10 +3760,12 @@ function renderSweep() {
     <div class="card" style="max-width:720px">
       <div class="form-group">
         <label>App</label>
-        <select class="form-input" id="sweep-app" ${running ? 'disabled' : ''}>
-          ${apps.map(a => `<option value="${a.appId}" ${s.appId === a.appId ? 'selected' : ''}>${escapeHtml(a.summary?.appName || a.url)}</option>`).join('')}
+        <select class="form-input" id="sweep-app" ${running ? 'disabled' : ''} onchange="state.sweep = Object.assign({}, state.sweep, { appId: this.value, savedRole: '' }); render()">
+          ${apps.map(a => `<option value="${a.appId}" ${(s.appId || apps[0]?.appId) === a.appId ? 'selected' : ''}>${escapeHtml(a.summary?.appName || a.url)}</option>`).join('')}
         </select>
       </div>
+      ${renderSavedLoginPicker(s.appId || apps[0]?.appId, s.savedRole || '', "state.sweep=Object.assign({},state.sweep,{savedRole:this.value});render()", 'sweep')}
+      ${!s.savedRole ? `
       <label style="display:flex;align-items:center;gap:8px;margin:10px 0">
         <input type="checkbox" id="sweep-no-login" ${s.noLogin !== false ? 'checked' : ''} onchange="state.sweep = Object.assign({}, state.sweep, { noLogin: this.checked }); render()" />
         <span style="font-size:13px">No login required — app is publicly accessible</span>
@@ -3683,7 +3774,7 @@ function renderSweep() {
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
         <div class="form-group"><label>Login email</label><input class="form-input" id="sweep-email" placeholder="user@app.com" /></div>
         <div class="form-group"><label>Password</label><input class="form-input" type="password" id="sweep-password" /></div>
-      </div>` : ''}
+      </div>` : ''}` : ''}
       <div style="background:rgba(200,240,64,0.05);border:1px solid rgba(200,240,64,0.15);padding:12px 14px;border-radius:2px;margin:14px 0;font-size:12px;color:#a8a8a8;line-height:1.6">
         Anything that looks destructive — Delete, Remove, Reset — is <strong style="color:#c8f040">never clicked without asking you first</strong>. Your answer is remembered for that control.
       </div>
@@ -3761,17 +3852,18 @@ function renderSweep() {
 async function startSweep() {
   const appId = document.getElementById('sweep-app')?.value;
   if (!appId) { tpToast('Pick an app first'); return; }
-  const noLogin = document.getElementById('sweep-no-login')?.checked;
-  const email = noLogin ? '' : (document.getElementById('sweep-email')?.value || '').trim();
-  const password = noLogin ? '' : (document.getElementById('sweep-password')?.value || '');
-  if (!noLogin && (!email || !password)) { tpToast('Enter a test login, or tick "No login required"'); return; }
+  const savedSessionRole = state.sweep?.savedRole || '';
+  const noLogin = savedSessionRole ? false : document.getElementById('sweep-no-login')?.checked;
+  const email = (noLogin || savedSessionRole) ? '' : (document.getElementById('sweep-email')?.value || '').trim();
+  const password = (noLogin || savedSessionRole) ? '' : (document.getElementById('sweep-password')?.value || '');
+  if (!noLogin && !savedSessionRole && (!email || !password)) { tpToast('Enter a test login, pick a saved login, or tick "No login required"'); return; }
 
-  state.sweep = { status: 'running', appId, noLogin, log: [], items: [] };
+  state.sweep = { status: 'running', appId, noLogin, savedRole: savedSessionRole, log: [], items: [] };
   render();
   try {
     const res = await fetch(`${API}/api/sweep`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ appId, email, password, apiKey: getApiKey() }),
+      body: JSON.stringify({ appId, email, password, savedSessionRole: savedSessionRole || undefined, apiKey: getApiKey() }),
     });
     const data = await res.json();
     if (!res.ok || !data.sweepId) {
@@ -4808,11 +4900,12 @@ function repeatableClause(on) {
 async function runTest() {
   const scenario = document.getElementById('test-scenario')?.value?.trim();
   const noLogin = document.getElementById('test-no-login')?.checked;
-  const email = noLogin ? '' : document.getElementById('test-email')?.value?.trim();
-  const password = noLogin ? '' : document.getElementById('test-password')?.value;
+  const savedSessionRole = noLogin ? '' : (state.testSavedRole || '');
+  const email = (noLogin || savedSessionRole) ? '' : document.getElementById('test-email')?.value?.trim();
+  const password = (noLogin || savedSessionRole) ? '' : document.getElementById('test-password')?.value;
   // "Bring your own session" — server accepts a Playwright storageState/cookies
   // array. When provided, it skips login entirely (works for SSO/MFA/CAPTCHA).
-  const sessionStateRaw = noLogin ? '' : document.getElementById('test-session-state')?.value?.trim();
+  const sessionStateRaw = (noLogin || savedSessionRole) ? '' : document.getElementById('test-session-state')?.value?.trim();
   const hasSession = !!sessionStateRaw;
 
   if (!scenario) { tpToast('Describe what to test'); return; }
@@ -4833,7 +4926,7 @@ async function runTest() {
     );
     if (goCheck) { navigate('sweep'); return; }
   }
-  if (!noLogin && !hasSession && (!email || !password)) { tpToast('Provide login credentials, paste a session under "Advanced", or check "No login required"'); return; }
+  if (!noLogin && !savedSessionRole && !hasSession && (!email || !password)) { tpToast('Provide login credentials, pick a saved login, paste a session under "Advanced", or check "No login required"'); return; }
 
   const isFreeUser = currentUser?.plan === 'free';
   const freeRunUsed = currentUser?.free_run_used === true;
@@ -4865,7 +4958,7 @@ async function runTest() {
     const res = await fetch(`${API}${isFlowTest ? '/api/test/flow' : '/api/test'}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ appId, scenario: scenarioToRun, email, password, apiKey: getApiKey(), freeRun: isFreeRun, userEmail: currentUser?.email, ...(hasSession ? { sessionState: sessionStateRaw } : {}), ...(isFlowTest ? { paymentMode: 'stop-before-pay' } : {}) })
+      body: JSON.stringify({ appId, scenario: scenarioToRun, email, password, apiKey: getApiKey(), freeRun: isFreeRun, userEmail: currentUser?.email, ...(hasSession ? { sessionState: sessionStateRaw } : {}), ...(savedSessionRole ? { savedSessionRole } : {}), ...(isFlowTest ? { paymentMode: 'stop-before-pay' } : {}) })
     });
 
     if (!res.ok) {

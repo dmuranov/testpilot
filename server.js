@@ -8836,13 +8836,13 @@ function scenarioSuggestion(appId) {
 }
 
 app.post('/api/test', async (req, res) => {
-  const { appId, scenario, email, password, apiKey, freeRun, userEmail, sessionState: rawSessionState } = req.body;
+  const { appId, scenario, email, password, apiKey, freeRun, userEmail, sessionState: rawSessionState, savedSessionRole } = req.body;
   // "Bring your own session" — paste an already-authenticated Playwright
   // storageState (or cookies array) to skip login entirely. Sidesteps
   // SSO/OAuth/MFA/CAPTCHA logins that visionLogin can't handle. NOT persisted.
   const ss = parseSessionState(rawSessionState);
   if (!ss.ok) return res.status(400).json({ error: ss.error, code: 'SESSION_STATE_INVALID' });
-  const sessionState = ss.sessionState;
+  let sessionState = ss.sessionState;
 
   // Gate BEFORE any budget check, credit reservation or free-run burn, so an
   // untestable instruction costs the user nothing.
@@ -8872,6 +8872,15 @@ app.post('/api/test', async (req, res) => {
   const sessionUser = token ? sessions.get(token) : null;
   const ownerEmail = sessionUser?.email ? sessionUser.email.trim().toLowerCase() : canonicalEmail(userEmail);
   const ownerUserId = sessionUser?.userId || null;
+
+  // Saved login — resolve a stored (appId, role) session instead of retyping
+  // credentials or pasting a session every run. An explicit pasted
+  // sessionState still wins (an operator override); savedSessionRole only
+  // fills in when nothing was pasted.
+  if (!sessionState && savedSessionRole && appId) {
+    sessionState = resolveSavedSession(appId, savedSessionRole, ownerEmail);
+    if (!sessionState) return res.status(400).json({ error: `No saved login found for role "${savedSessionRole}" on this app — it may have been deleted. Capture it again.`, code: 'SAVED_SESSION_NOT_FOUND' });
+  }
 
   // Plan + free-run gate. Look up the user's persisted plan/free_run_used so
   // a forged session can't bypass; the in-memory session is only the cache.
@@ -9815,12 +9824,18 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
 app.post('/api/sweep', async (req, res) => {
   const sessionUser = requireUser(req, res);
   if (!sessionUser) return;
-  let { appId, email, password, apiKey, sessionState: rawSessionState } = req.body || {};
+  let { appId, email, password, apiKey, sessionState: rawSessionState, savedSessionRole } = req.body || {};
   const appKnowledge = platformMaps.get(appId);
   if (!appKnowledge) return res.status(404).json({ error: 'App not found' });
   if (!ownsApp(appId, sessionUser.email)) return res.status(403).json({ error: 'This app belongs to another account.', code: 'OWNERSHIP_MISMATCH' });
   const ss = parseSessionState(rawSessionState);
   if (!ss.ok) return res.status(400).json({ error: ss.error, code: 'SESSION_STATE_INVALID' });
+  // Saved login — same resolution as /api/test: an explicit pasted
+  // sessionState still wins, savedSessionRole fills in otherwise.
+  if (!ss.sessionState && savedSessionRole) {
+    ss.sessionState = resolveSavedSession(appId, savedSessionRole, sessionUser.email);
+    if (!ss.sessionState) return res.status(400).json({ error: `No saved login found for role "${savedSessionRole}" on this app — it may have been deleted. Capture it again.`, code: 'SAVED_SESSION_NOT_FOUND' });
+  }
 
   // One at a time per person.
   if (activeSweepsByUser.get(canonicalEmail(sessionUser.email))) {
@@ -10230,13 +10245,17 @@ app.post('/api/test/flow', async (req, res) => {
     return res.status(403).json({ error: 'End-to-End Flow Test requires a paid plan', code: 'PLAN_FEATURE_LOCKED' });
   }
 
-  const { appId, scenario, email, password, apiKey, freeRun, sessionState: rawSessionState } = req.body || {};
+  const { appId, scenario, email, password, apiKey, freeRun, sessionState: rawSessionState, savedSessionRole } = req.body || {};
   let { paymentMode } = req.body || {};
   paymentMode = FLOW_PAYMENT_MODES.includes(paymentMode) ? paymentMode : 'stop-before-pay';
 
   const ss = parseSessionState(rawSessionState);
   if (!ss.ok) return res.status(400).json({ error: ss.error, code: 'SESSION_STATE_INVALID' });
-  const sessionState = ss.sessionState;
+  let sessionState = ss.sessionState;
+  if (!sessionState && savedSessionRole) {
+    sessionState = resolveSavedSession(appId, savedSessionRole, user.email);
+    if (!sessionState) return res.status(400).json({ error: `No saved login found for role "${savedSessionRole}" on this app — it may have been deleted. Capture it again.`, code: 'SAVED_SESSION_NOT_FOUND' });
+  }
 
   const _sa = assessScenario(scenario);
   if (!_sa.ok) {
@@ -11693,6 +11712,150 @@ Respond in plain text, no markdown.` }]
     }
   });
 });
+
+// ── Saved login sessions (per app, per role label) ──────────────────────
+// Log in once, reuse across Learn/Test/Check Everything without retyping
+// credentials or re-driving OAuth/2FA every single run. Keyed by (owner
+// email, appId, role label) so one app can have several roles saved side by
+// side (Owner, Free user, Admin...) — switching role is just picking a
+// different saved slot. Stored encrypted at rest with the same key already
+// used for embed tokens' API keys (embedEncKey/encryptSecret/decryptSecret,
+// server.js:1224) — a Playwright storageState is bearer-equivalent to a live
+// login, same trust level as an API key.
+const SAVED_SESSIONS_FILE = './saved-sessions.json';
+const savedSessions = new Map(); // `${owner}|${appId}|${role}` -> {owner, appId, role, sessionStateEnc, capturedAt}
+function savedSessionKey(owner, appId, role) { return `${canonicalEmail(owner)}|${appId}|${role}`; }
+async function loadSavedSessions() {
+  try {
+    const data = await fs.readFile(SAVED_SESSIONS_FILE, 'utf-8');
+    for (const s of JSON.parse(data)) savedSessions.set(savedSessionKey(s.owner, s.appId, s.role), s);
+    console.log(`[saved-sessions] loaded ${savedSessions.size} session(s) from disk`);
+  } catch { /* first run */ }
+}
+function persistSavedSessions() {
+  fs.writeFile(SAVED_SESSIONS_FILE, JSON.stringify([...savedSessions.values()]))
+    .catch(e => console.error('[saved-sessions] save failed:', e.message));
+}
+
+// SSE registry for a capture in progress — same shape as emitSweep, just for
+// a one-shot capture instead of a whole run.
+const captureStreams = new Map(); // captureId -> [res, ...]
+function emitCapture(captureId, event) {
+  const rs = captureStreams.get(captureId) || [];
+  const payload = `data: ${JSON.stringify(event)}\n\n`;
+  for (const r of rs) { try { r.write(payload); } catch {} }
+}
+
+app.get('/api/saved-sessions/:appId/stream/:captureId', (req, res) => {
+  const sessionUser = requireUser(req, res);
+  if (!sessionUser) return;
+  res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
+  const { captureId } = req.params;
+  const rs = captureStreams.get(captureId) || [];
+  rs.push(res);
+  captureStreams.set(captureId, rs);
+  req.on('close', () => {
+    const list = (captureStreams.get(captureId) || []).filter((r) => r !== res);
+    if (list.length) captureStreams.set(captureId, list); else captureStreams.delete(captureId);
+  });
+});
+
+// List saved role labels for an app — labels + capturedAt ONLY, never the
+// stored session itself. The encrypted session never round-trips back to
+// the browser; it's resolved server-side at run-start time instead.
+app.get('/api/saved-sessions/:appId', (req, res) => {
+  const sessionUser = requireUser(req, res);
+  if (!sessionUser) return;
+  const { appId } = req.params;
+  if (!ownsApp(appId, sessionUser.email)) return res.status(403).json({ error: 'This app belongs to another account.', code: 'OWNERSHIP_MISMATCH' });
+  const prefix = `${canonicalEmail(sessionUser.email)}|${appId}|`;
+  const roles = [...savedSessions.values()]
+    .filter((s) => savedSessionKey(s.owner, s.appId, s.role).startsWith(prefix))
+    .map((s) => ({ role: s.role, capturedAt: s.capturedAt }));
+  res.json({ roles });
+});
+
+app.delete('/api/saved-sessions/:appId/:role', (req, res) => {
+  const sessionUser = requireUser(req, res);
+  if (!sessionUser) return;
+  const { appId, role } = req.params;
+  if (!ownsApp(appId, sessionUser.email)) return res.status(403).json({ error: 'This app belongs to another account.', code: 'OWNERSHIP_MISMATCH' });
+  const key = savedSessionKey(sessionUser.email, appId, role);
+  if (!savedSessions.has(key)) return res.status(404).json({ error: 'No saved login under that role for this app.' });
+  savedSessions.delete(key);
+  persistSavedSessions();
+  res.json({ ok: true });
+});
+
+// Capture a login ONCE for (appId, role) and save the resulting session —
+// handles 2FA and the OAuth live-handoff exactly like a normal run (same
+// tryOAuthHandoff/awaitTwoFactorCode machinery, routed through emitCapture
+// instead of emitSweep/emitStep). The app's URL is resolved server-side from
+// platformMaps, NEVER taken from the request — this only drives a login
+// against an app the user has already registered and owns, so there's no
+// open-redirect/SSRF surface the way a raw user-supplied URL would have.
+app.post('/api/saved-sessions/:appId/capture', async (req, res) => {
+  const sessionUser = requireUser(req, res);
+  if (!sessionUser) return;
+  const { appId } = req.params;
+  const { role, email, password, apiKey } = req.body || {};
+  if (!role || !String(role).trim()) return res.status(400).json({ error: 'A role label is required (e.g. "Owner", "Free user").' });
+  if (!email) return res.status(400).json({ error: 'Email is required — for an OAuth-only account, use any placeholder and take over during the live handoff.' });
+  const appKnowledge = platformMaps.get(appId);
+  if (!appKnowledge) return res.status(404).json({ error: 'App not found' });
+  if (!ownsApp(appId, sessionUser.email)) return res.status(403).json({ error: 'This app belongs to another account.', code: 'OWNERSHIP_MISMATCH' });
+
+  const captureId = randomUUID();
+  res.json({ captureId });
+
+  (async () => {
+    let browser;
+    try {
+      browser = await launchBrowser();
+      const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+      const page = await ctx.newPage();
+      await page.goto(appKnowledge.url, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
+      await page.waitForTimeout(1500);
+      emitCapture(captureId, { type: 'info', message: 'Logging in…' });
+      const result = await visionLogin(page, { email, password }, apiKey || process.env.ANTHROPIC_SUPPORT_KEY, {
+        runId: captureId,
+        emit: (event) => emitCapture(captureId, event),
+      });
+      if (!result.success) {
+        emitCapture(captureId, { type: 'error', message: `Could not log in: ${result.error}` });
+        await browser.close();
+        return;
+      }
+      await page.waitForTimeout(1500);
+      const sessionState = await ctx.storageState();
+      const key = savedSessionKey(sessionUser.email, appId, role);
+      savedSessions.set(key, {
+        owner: canonicalEmail(sessionUser.email),
+        appId,
+        role,
+        sessionStateEnc: encryptSecret(JSON.stringify(sessionState)),
+        capturedAt: new Date().toISOString(),
+      });
+      persistSavedSessions();
+      emitCapture(captureId, { type: 'done', message: `Saved "${role}" for this app — pick it from the login dropdown next time.` });
+      await browser.close();
+    } catch (e) {
+      emitCapture(captureId, { type: 'error', message: `Capture failed: ${e.message}` });
+      try { await browser?.close(); } catch {}
+    } finally {
+      captureStreams.delete(captureId);
+    }
+  })();
+});
+
+// Resolve a saved (appId, role) to a live sessionState, decrypted server-side
+// only — never sent back to the browser. Learn/Test/Sweep start routes call
+// this when the request carries savedSessionRole instead of raw credentials.
+function resolveSavedSession(appId, role, ownerEmail) {
+  const rec = savedSessions.get(savedSessionKey(ownerEmail, appId, role));
+  if (!rec) return null;
+  try { return JSON.parse(decryptSecret(rec.sessionStateEnc)); } catch { return null; }
+}
 
 // Capture a reusable Playwright session by logging in once (with the 2FA
 // bridge) and exporting the storageState. This is how a user gets a session for
@@ -13181,6 +13344,7 @@ await loadTestResults();
 await loadFreeSpendToday();
 await loadSessions();
 await loadEmbedTokens();
+await loadSavedSessions();
 await loadSweepDecisions();
 await loadFreeSweepUsed();
 console.log(`[freeSpend] daily ceiling: ${FREE_DAILY_TOKEN_BUDGET} weighted tokens (~€${FREE_DAILY_BUDGET_EUR} at $${SONNET_INPUT_USD_PER_MTOK}/MTok input, ${USD_PER_EUR} USD/EUR)`);
