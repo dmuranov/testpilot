@@ -1933,13 +1933,13 @@ function hasFeature(feature) {
   // Funnel rework: free + onerun get scenario only; everything else is paywalled.
   const features = {
     free:    ['scenario', 'security', 'sweep'],
-    onerun:  ['scenario', 'multirole', 'security', 'sweep'],
-    solo:    ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe', 'sweep'],
-    starter: ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe', 'sweep'],
-    pro:     ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe', 'sweep'],
-    agency:  ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe', 'sweep'],
-    admin:   ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe', 'sweep'],
-    tester:  ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe', 'sweep']
+    onerun:  ['scenario', 'multirole', 'security', 'sweep', 'flow'],
+    solo:    ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe', 'sweep', 'flow'],
+    starter: ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe', 'sweep', 'flow'],
+    pro:     ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe', 'sweep', 'flow'],
+    agency:  ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe', 'sweep', 'flow'],
+    admin:   ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe', 'sweep', 'flow'],
+    tester:  ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe', 'sweep', 'flow']
   };
   return (features[plan] || features.free).includes(feature);
 }
@@ -2945,7 +2945,8 @@ function renderTestRun() {
   return `
     <div class="page-header">
       <div>
-        <h2>Run Test</h2>
+        <h2>${state.testMode === 'flow_e2e' ? 'Checkout & Booking Test' : 'Run Test'}</h2>
+        ${state.testMode === 'flow_e2e' ? `<div style="font-size:12px;color:var(--text-muted);margin-top:2px">Describe the booking/checkout/signup journey to follow — TestPilot reports whether it reaches the end, exactly where it breaks if not, and which steps are slow enough that real users would likely drop off.</div>` : ''}
         ${state.apps.length > 1 ? `
           <select onchange="state.selectedApp = state.apps.find(a => a.appId === this.value); state._savedForm = null; render()" style="margin-top:4px;background:var(--bg-hover);color:var(--text);border:1px solid var(--border);border-radius:2px;padding:4px 8px;font-size:12px;font-family:'DM Mono',monospace;max-width:360px;cursor:pointer">
             ${state.apps.map(a => `<option value="${escapeHtml(a.appId || '')}" ${app?.appId === a.appId ? 'selected' : ''}>${escapeHtml(a.summary?.appName || a.url || a.appId)}</option>`).join('')}
@@ -3112,6 +3113,21 @@ function renderTestDetail() {
         <div class="stat-label">Total Steps</div>
       </div>
     </div>
+
+    ${test.type === 'flow_e2e' ? `
+    <div class="card" style="border-left:3px solid ${test.reachedPaymentStep ? 'var(--green,#4ade80)' : '#f59e0b'}">
+      <div class="card-title" style="margin-bottom:6px">💳 Checkout & Booking</div>
+      <div style="font-size:13px;color:var(--text);line-height:1.6">
+        ${test.reachedPaymentStep
+          ? 'Reached the final payment/booking step successfully — stopped before submitting (stop-before-pay mode).'
+          : 'Did not reach a payment/booking step in this run — see the step log below for where it stopped.'}
+      </div>
+      ${s.frictionPoints?.length ? `
+      <div style="margin-top:12px">
+        <div style="font-size:12px;color:#f59e0b;font-weight:700;margin-bottom:6px">⏱️ ${s.frictionPoints.length} slow step${s.frictionPoints.length === 1 ? '' : 's'} — possible drop-off point${s.frictionPoints.length === 1 ? '' : 's'}</div>
+        ${s.frictionPoints.map(f => `<div style="font-family:'DM Mono',monospace;font-size:11.5px;color:var(--text-dim);padding:4px 0;border-bottom:1px solid var(--border)">Step ${f.step} took <strong style="color:#f59e0b">${(f.durationMs / 1000).toFixed(1)}s</strong>${f.intent ? ' — ' + tpEsc(f.intent) : ''}</div>`).join('')}
+      </div>` : `<div style="font-size:12px;color:var(--text-muted);margin-top:10px">No steps crossed the slow-step threshold.</div>`}
+    </div>` : ''}
 
     ${test.bugs?.length ? `
     <div class="card">
@@ -4081,11 +4097,22 @@ function renderDetailStep(s) {
       </span>
     </div>`;
   }
+  // Friction badge: a step slow enough that a real user would likely drop off
+  // (End-to-End Flow Test's headline finding). Threshold mirrors the server's
+  // FRICTION_THRESHOLD_MS — purely a display cutoff, doesn't affect scoring.
+  const frictionMs = 15000;
+  const isSlow = (s.durationMs || 0) > frictionMs;
+  const durationBadge = s.durationMs != null
+    ? `<span style="font-family:'DM Mono',monospace;font-size:10px;color:${isSlow ? '#f59e0b' : 'var(--text-muted)'};margin-left:8px" title="${isSlow ? 'Slow step — possible drop-off point' : 'Step duration'}">${isSlow ? '⏱️ ' : ''}${(s.durationMs / 1000).toFixed(1)}s</span>`
+    : '';
+  const milestoneBadge = s.milestone === 'payment_commit'
+    ? `<span style="font-family:'DM Mono',monospace;font-size:10px;color:var(--accent);margin-left:8px" title="Final payment/booking step">💳 checkout</span>`
+    : '';
   return `
     <div class="step-line step-${s.status}">
       <span class="step-icon">${icon}</span>
       <span class="step-text">
-        <strong>Step ${s.step}:</strong> ${s.action} → ${s.selector || ''} ${s.value ? '= "' + s.value + '"' : ''}
+        <strong>Step ${s.step}:</strong> ${s.action} → ${s.selector || ''} ${s.value ? '= "' + s.value + '"' : ''}${durationBadge}${milestoneBadge}
         <br><span style="color:var(--text-muted)">${s.outcome || s.summary || s.description || ''}</span>
         ${s.thinking ? `<br><span style="color:var(--text-muted);font-style:italic">💭 ${s.thinking}</span>` : ''}
       </span>
@@ -4181,6 +4208,24 @@ function navigateToScenario() {
   if (!state.selectedApp && state.apps.length > 0) {
     state.selectedApp = state.apps[0];
   }
+  state.testMode = null; // leaving flow-test mode, if it was set
+  state.view = 'test-run';
+  render();
+}
+
+// Checkout & Booking Test reuses the Scenario Test view/form (renderTestRun,
+// runTest) — it's the same underlying engine with a different endpoint and
+// payment handling, not a separate UI. state.testMode is the only signal.
+function navigateToFlowTest() {
+  if (state.apps.length === 0) {
+    const el = document.getElementById('learn-first-overlay');
+    if (el) el.style.display = 'flex';
+    return;
+  }
+  if (!state.selectedApp && state.apps.length > 0) {
+    state.selectedApp = state.apps[0];
+  }
+  state.testMode = 'flow_e2e';
   state.view = 'test-run';
   render();
 }
@@ -4526,6 +4571,11 @@ async function startLearn() {
             if (data.phase === 'awaiting_2fa' || data.type === 'awaiting_2fa') {
               show2faPrompt(data.runId, data.message);
             }
+            if (data.phase === 'awaiting_oauth_handoff' || data.type === 'awaiting_oauth_handoff') {
+              showOAuthHandoffPrompt(data.runId, data.message);
+            }
+            if (data.type === 'live_view_ready') openLiveView(data.runId);
+            if (data.type === 'live_frame') renderLiveFrame(data.runId, data.data);
           } catch (e) { /* partial JSON */ }
         }
       }
@@ -4574,6 +4624,94 @@ function show2faPrompt(runId, message) {
   };
   btn.addEventListener('click', submit);
   input.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+}
+
+// OAuth login handoff — shown when login fails on a page that also offers a
+// Google/GitHub/... sign-in button (the account likely has no real password).
+// "Take over" streams the actual paused browser live (via the server's CDP
+// screencast) so the user can finish the OAuth flow themselves; the test
+// resumes automatically once they click Done. Self-contained like
+// show2faPrompt, for the same reason (server is blocked while paused).
+function showOAuthHandoffPrompt(runId, message) {
+  if (!runId || document.getElementById('oauth-handoff-' + runId)) return;
+  const host = document.getElementById('learn-stream') || document.getElementById('test-stream') || document.getElementById('sec-stream') || document.body;
+  const box = document.createElement('div');
+  box.id = 'oauth-handoff-' + runId;
+  box.style.cssText = 'margin:12px 0;padding:14px;border:1px solid var(--accent,#6c5ce7);border-radius:8px;background:rgba(108,92,231,0.08)';
+  box.innerHTML = `
+    <div style="font-weight:600;margin-bottom:10px">🔑 ${message || 'Login failed — this app may need Google sign-in'}</div>
+    <div style="display:flex;gap:8px">
+      <button id="oauth-take-${runId}" class="btn btn-primary">Take over &amp; log in myself</button>
+      <button id="oauth-skip-${runId}" class="btn btn-ghost">Skip</button>
+    </div>`;
+  host.appendChild(box);
+  box.querySelector(`#oauth-skip-${runId}`).addEventListener('click', async () => {
+    box.innerHTML = '<div style="color:var(--text-muted)">Skipped — continuing with the normal error.</div>';
+    await fetch(`${API}/api/live-view/${encodeURIComponent(runId)}/decline`, { method: 'POST' }).catch(() => {});
+  });
+  box.querySelector(`#oauth-take-${runId}`).addEventListener('click', async () => {
+    box.innerHTML = '<div style="color:var(--accent,#6c5ce7)">Connecting…</div>';
+    const r = await fetch(`${API}/api/live-view/${encodeURIComponent(runId)}/accept`, { method: 'POST' }).catch(() => null);
+    if (!r || !r.ok) { box.innerHTML = '<div style="color:#e74c3c">Could not start the live view — the offer may have expired. The test will continue with the normal error.</div>'; return; }
+    // The canvas/controls get built by openLiveView() once the server confirms
+    // the screencast actually started (the live_view_ready SSE event) —
+    // starting it takes a moment, so don't build the UI before it's real.
+  });
+}
+
+// Built once live_view_ready arrives (screencast is actually running). Frame
+// size must match server.js startLiveView's maxWidth/maxHeight.
+const LIVE_VIEW_W = 1024, LIVE_VIEW_H = 768;
+function openLiveView(runId) {
+  const box = document.getElementById('oauth-handoff-' + runId);
+  if (!box) return;
+  box.innerHTML = `
+    <div style="font-weight:600;margin-bottom:8px">🔑 Log in yourself below, then click Done.</div>
+    <canvas id="live-canvas-${runId}" width="${LIVE_VIEW_W}" height="${LIVE_VIEW_H}" tabindex="0"
+      style="width:100%;max-width:${LIVE_VIEW_W}px;border:1px solid var(--border);border-radius:4px;cursor:pointer;outline:none;background:#000"></canvas>
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <button id="oauth-done-${runId}" class="btn btn-primary">Done — I'm logged in</button>
+    </div>`;
+  const canvas = box.querySelector(`#live-canvas-${runId}`);
+  const ctx2d = canvas.getContext('2d');
+  window._tpLiveViews = window._tpLiveViews || {};
+  window._tpLiveViews[runId] = { canvas, ctx2d };
+
+  const send = (payload) => fetch(`${API}/api/live-view/${encodeURIComponent(runId)}/input`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+  }).catch(() => {});
+  const toFrameCoords = (clientX, clientY) => {
+    const r = canvas.getBoundingClientRect();
+    return { x: (clientX - r.left) * (LIVE_VIEW_W / r.width), y: (clientY - r.top) * (LIVE_VIEW_H / r.height) };
+  };
+  canvas.addEventListener('mousedown', (e) => { canvas.focus(); const p = toFrameCoords(e.clientX, e.clientY); send({ type: 'mousedown', ...p }); });
+  canvas.addEventListener('mouseup', (e) => { const p = toFrameCoords(e.clientX, e.clientY); send({ type: 'mouseup', ...p }); });
+  canvas.addEventListener('mousemove', (e) => { const p = toFrameCoords(e.clientX, e.clientY); send({ type: 'mousemove', ...p }); });
+  canvas.addEventListener('keydown', (e) => {
+    e.preventDefault();
+    // Printable characters go as one Input.insertText (correct for Unicode);
+    // everything else (Enter/Tab/Backspace/...) goes as a real key event.
+    if (e.key.length === 1) { send({ type: 'text', text: e.key }); return; }
+    send({ type: 'keydown', key: e.key, code: e.code, keyCode: e.keyCode });
+  });
+  canvas.addEventListener('keyup', (e) => {
+    if (e.key.length === 1) return;
+    send({ type: 'keyup', key: e.key, code: e.code, keyCode: e.keyCode });
+  });
+
+  box.querySelector(`#oauth-done-${runId}`).addEventListener('click', async () => {
+    box.innerHTML = '<div style="color:var(--accent,#6c5ce7)">Continuing…</div>';
+    delete window._tpLiveViews[runId];
+    await fetch(`${API}/api/live-view/${encodeURIComponent(runId)}/done`, { method: 'POST' }).catch(() => {});
+  });
+}
+
+function renderLiveFrame(runId, base64Jpeg) {
+  const entry = window._tpLiveViews && window._tpLiveViews[runId];
+  if (!entry) return;
+  const img = new Image();
+  img.onload = () => entry.ctx2d.drawImage(img, 0, 0, entry.canvas.width, entry.canvas.height);
+  img.src = 'data:image/jpeg;base64,' + base64Jpeg;
 }
 
 function repeatableClause(on) {
@@ -4637,11 +4775,12 @@ async function runTest() {
   state.currentTest = { status: 'running' };
   render();
 
+  const isFlowTest = state.testMode === 'flow_e2e';
   try {
-    const res = await fetch(`${API}/api/test`, {
+    const res = await fetch(`${API}${isFlowTest ? '/api/test/flow' : '/api/test'}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ appId, scenario: scenarioToRun, email, password, apiKey: getApiKey(), freeRun: isFreeRun, userEmail: currentUser?.email, ...(hasSession ? { sessionState: sessionStateRaw } : {}) })
+      body: JSON.stringify({ appId, scenario: scenarioToRun, email, password, apiKey: getApiKey(), freeRun: isFreeRun, userEmail: currentUser?.email, ...(hasSession ? { sessionState: sessionStateRaw } : {}), ...(isFlowTest ? { paymentMode: 'stop-before-pay' } : {}) })
     });
 
     if (!res.ok) {
@@ -4692,6 +4831,18 @@ async function runTest() {
         // server-side until the operator submits the code.
         if (data.type === 'awaiting_2fa') {
           show2faPrompt(data.runId, data.message);
+          return;
+        }
+        if (data.type === 'awaiting_oauth_handoff') {
+          showOAuthHandoffPrompt(data.runId, data.message);
+          return;
+        }
+        if (data.type === 'live_view_ready') {
+          openLiveView(data.runId);
+          return;
+        }
+        if (data.type === 'live_frame') {
+          renderLiveFrame(data.runId, data.data);
           return;
         }
         // Heartbeat = "still active during a slow step." Update the transient
@@ -7156,7 +7307,8 @@ function _appReadyOptions() {
     { label: 'Security Test',    desc: 'Checks one user cannot see another\u2019s data (IDOR, sessions)',  feature: 'security',    tour: 'security',    go: function () { gatedNavigate('security', 'security'); } },
     { label: 'Flow Test',        desc: 'One flow through your app \u2014 say what should happen, it checks',  feature: 'scenario',    tour: 'scenario',    go: function () { navigateToScenario(); } },
     { label: 'Interactive Test', desc: 'Drive your app live with natural-language commands',            feature: 'interactive', tour: 'interactive', go: function () { gatedNavigate('chat', 'interactive'); } },
-    { label: 'Multi-Role',       desc: 'One flow across several user roles in sequence',                feature: 'multirole',   tour: 'multirole',   go: function () { gatedNavigate('multirole', 'multirole'); } }
+    { label: 'Multi-Role',       desc: 'One flow across several user roles in sequence',                feature: 'multirole',   tour: 'multirole',   go: function () { gatedNavigate('multirole', 'multirole'); } },
+    { label: 'Checkout & Booking Test', desc: 'Follows a booking/checkout flow end-to-end — reports where it breaks and what’s slow', feature: 'flow', tour: null, go: function () { navigateToFlowTest(); } }
   ];
 }
 

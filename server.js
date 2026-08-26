@@ -179,15 +179,15 @@ const PLAN_LIMITS = {
   // if TestPilot itself fails. The multirole + security endpoints reserve/refund
   // the credit the same way /api/test does. (Interactive chat = a live session,
   // not a discrete run — stays subscription-only.)
-  onerun:  { apps: 1,    runs: 1,    features: ['scenario', 'multirole', 'security'] },
+  onerun:  { apps: 1,    runs: 1,    features: ['scenario', 'multirole', 'security', 'flow'] },
   // Solo €10/mo: 1 app, unlimited runs, every feature. Recurring subscription.
-  solo:    { apps: 1,    runs: null, features: ['scenario', 'interactive', 'multirole', 'security'] },
-  starter: { apps: 3,    runs: null, features: ['scenario', 'interactive', 'multirole', 'security'] },
-  pro:     { apps: 10,   runs: null, features: ['scenario', 'interactive', 'multirole', 'security'] },
-  agency:  { apps: 999,  runs: null, features: ['scenario', 'interactive', 'multirole', 'security'] },
+  solo:    { apps: 1,    runs: null, features: ['scenario', 'interactive', 'multirole', 'security', 'flow'] },
+  starter: { apps: 3,    runs: null, features: ['scenario', 'interactive', 'multirole', 'security', 'flow'] },
+  pro:     { apps: 10,   runs: null, features: ['scenario', 'interactive', 'multirole', 'security', 'flow'] },
+  agency:  { apps: 999,  runs: null, features: ['scenario', 'interactive', 'multirole', 'security', 'flow'] },
   // Operator/superuser accounts — everything. Additive; no paying plan changes.
-  admin:   { apps: 9999, runs: null, features: ['scenario', 'interactive', 'multirole', 'security'] },
-  tester:  { apps: 9999, runs: null, features: ['scenario', 'interactive', 'multirole', 'security'] }
+  admin:   { apps: 9999, runs: null, features: ['scenario', 'interactive', 'multirole', 'security', 'flow'] },
+  tester:  { apps: 9999, runs: null, features: ['scenario', 'interactive', 'multirole', 'security', 'flow'] }
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -2044,6 +2044,112 @@ function awaitTwoFactorCode(runId, { timeoutMs = 5 * 60 * 1000 } = {}) {
   });
 }
 
+// ── OAuth login handoff: human takes over the live browser ─────
+// Some apps only work via a Google/GitHub/... button (see hasOAuthSignIn) —
+// no automated browser can drive that, and the account usually has no real
+// backend password at all. Instead of just failing, the run can PAUSE and
+// hand the human a live view of the SAME already-open page (CDP screencast)
+// so they finish the OAuth flow themselves; the run then resumes in that
+// now-authenticated page. Same pause/resume shape as the 2FA bridge above,
+// reused for two sequential waits: "will you take over" (short timeout, so
+// an unattended/background run doesn't stall long), then "are you done"
+// (longer, once a human has actually engaged).
+const pendingLiveView = new Map(); // runId -> { resolve, reject, timer }
+const activeLiveViews = new Map(); // runId -> CDPSession, for the input-relay endpoint to find
+
+function awaitLiveViewSignal(runId, { timeoutMs } = {}) {
+  return new Promise((resolve, reject) => {
+    const prev = pendingLiveView.get(runId);
+    if (prev) { clearTimeout(prev.timer); pendingLiveView.delete(runId); prev.reject(new Error('superseded')); }
+    const timer = setTimeout(() => { pendingLiveView.delete(runId); reject(new Error('timeout')); }, timeoutMs);
+    pendingLiveView.set(runId, { resolve, reject, timer });
+  });
+}
+
+// Starts a CDP screencast on `page` and streams frames to the frontend via
+// ctx.emit as `live_frame` events, acking each via Page.screencastFrameAck so
+// CDP's own flow control paces the stream — no separate throttling needed.
+async function startLiveView(page, runId, ctx) {
+  const cdp = await page.context().newCDPSession(page);
+  activeLiveViews.set(runId, cdp);
+  cdp.on('Page.screencastFrame', (frame) => {
+    ctx.emit({ type: 'live_frame', runId, data: frame.data });
+    cdp.send('Page.screencastFrameAck', { sessionId: frame.sessionId }).catch(() => {});
+  });
+  await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 60, maxWidth: 1024, maxHeight: 768, everyNthFrame: 1 });
+  return cdp;
+}
+
+async function stopLiveView(runId) {
+  const cdp = activeLiveViews.get(runId);
+  activeLiveViews.delete(runId);
+  if (!cdp) return;
+  await cdp.send('Page.stopScreencast').catch(() => {});
+  await cdp.detach().catch(() => {});
+}
+
+// Dispatches one relayed input event directly on the paused run's page via
+// its stashed CDP session. `text` covers printable typing (CDP's
+// Input.insertText handles Unicode/IME correctly, unlike synthesizing a
+// keyDown per character); keydown/keyup cover non-printable keys the login
+// flow needs (Enter, Tab, Backspace).
+async function dispatchLiveInput(runId, evt) {
+  const cdp = activeLiveViews.get(runId);
+  if (!cdp) return false;
+  try {
+    if (evt.type === 'mousemove' || evt.type === 'mousedown' || evt.type === 'mouseup') {
+      await cdp.send('Input.dispatchMouseEvent', {
+        type: evt.type === 'mousemove' ? 'mouseMoved' : evt.type === 'mousedown' ? 'mousePressed' : 'mouseReleased',
+        x: evt.x, y: evt.y, button: 'left', clickCount: evt.type === 'mousedown' ? 1 : 0,
+      });
+    } else if (evt.type === 'keydown' || evt.type === 'keyup') {
+      await cdp.send('Input.dispatchKeyEvent', {
+        type: evt.type === 'keydown' ? 'keyDown' : 'keyUp',
+        key: evt.key, code: evt.code, windowsVirtualKeyCode: evt.keyCode, nativeVirtualKeyCode: evt.keyCode,
+      });
+    } else if (evt.type === 'text') {
+      await cdp.send('Input.insertText', { text: evt.text });
+    } else {
+      return false;
+    }
+    return true;
+  } catch { return false; }
+}
+
+// Offers the human a live takeover when login failed on a page that also
+// shows an OAuth button. Returns a fresh {success:true,...} if the handoff
+// ended with the user actually logged in, or null to fall through to the
+// normal failure return (declined, timed out, or still not logged in after
+// "done" — never loops, matches the 2FA bridge's failure discipline).
+async function tryOAuthHandoff(page, ctx) {
+  ctx.emit({
+    type: 'awaiting_oauth_handoff',
+    runId: ctx.runId,
+    message: 'Login failed and this page also offers a "Sign in with Google" (or similar) button — this account may only work that way. Want to take over and log in yourself? TestPilot picks back up right after.',
+  });
+  try {
+    const decision = await awaitLiveViewSignal(ctx.runId, { timeoutMs: 60 * 1000 });
+    if (decision?.action !== 'accept') return null;
+  } catch { return null; } // declined, superseded, or nobody responded within 60s
+
+  try {
+    await startLiveView(page, ctx.runId, ctx);
+    ctx.emit({ type: 'live_view_ready', runId: ctx.runId });
+    await awaitLiveViewSignal(ctx.runId, { timeoutMs: 10 * 60 * 1000 }); // "I'm done" signal
+  } catch {
+    return null; // timed out waiting for "done"
+  } finally {
+    await stopLiveView(ctx.runId);
+  }
+
+  const freshScreenshot = await takeScreenshot(page, 'login-after-handoff');
+  const stillHasForm = await page.locator(LOGIN_FORM_SELECTOR).first().isVisible({ timeout: 2500 }).catch(() => false);
+  if (!stillHasForm) {
+    return { success: true, screenshot: freshScreenshot, message: `Logged in via manual handoff. Now at: ${page.url()}` };
+  }
+  return null; // still not logged in after the handoff — fall through to the normal error
+}
+
 // Detect a visible one-time-code / OTP / 2FA input. Runs AFTER step-1 auth, so a
 // code field here is almost certainly the 2FA step. Returns {selector, multi,
 // count} or null.
@@ -2152,6 +2258,26 @@ async function hasSignInAffordance(page) {
     'button:has-text("Sign in")', 'button:has-text("Log in")', 'button:has-text("Login")',
     'button:has-text("Iniciar sesión")', 'button:has-text("Acceder")', 'button:has-text("Entrar")',
     'a[href="/auth"]', 'a[href="/login"]', 'a[href="/signin"]', 'a[href="/sign-in"]',
+  ].join(', ');
+  return await page.locator(sel).first().isVisible({ timeout: 1500 }).catch(() => false);
+}
+
+// A generic "invalid credentials" error is the single most common cause of a
+// FALSE "your password is wrong" read: the account was created via an OAuth
+// button (Google/GitHub/Microsoft/...) and has no password on the backend at
+// all, so literally any password fails with the same message an app shows for
+// a genuinely wrong one — apps deliberately don't distinguish the two cases,
+// for security. When that OAuth button is visible right next to the form that
+// just failed, it's worth telling the user that up front instead of leaving
+// them to assume TestPilot mistyped a correct password.
+async function hasOAuthSignIn(page) {
+  const sel = [
+    'button:has-text("Sign in with Google")', 'button:has-text("Continue with Google")', 'button:has-text("Log in with Google")',
+    'button:has-text("Sign in with GitHub")', 'button:has-text("Continue with GitHub")',
+    'button:has-text("Sign in with Microsoft")', 'button:has-text("Continue with Microsoft")',
+    'button:has-text("Sign in with Apple")', 'button:has-text("Continue with Apple")',
+    'a:has-text("Sign in with Google")', 'a:has-text("Continue with Google")',
+    '[aria-label*="Sign in with Google" i]', '[aria-label*="Continue with Google" i]',
   ].join(', ');
   return await page.locator(sel).first().isVisible({ timeout: 1500 }).catch(() => false);
 }
@@ -2364,7 +2490,14 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
 
     if (formStillVisible) {
       if (hasError) {
-        return { success: false, screenshot: afterScreenshot, error: 'Login failed — the app showed an error and the sign-in form is still on screen. Check the credentials for this app.' };
+        const oauthVisible = await hasOAuthSignIn(page);
+        if (oauthVisible && ctx.runId && typeof ctx.emit === 'function') {
+          const handoffResult = await tryOAuthHandoff(page, ctx);
+          if (handoffResult) return handoffResult;
+        }
+        return { success: false, screenshot: afterScreenshot, error: oauthVisible
+          ? 'Login failed — the app showed an error and the sign-in form is still on screen. This account most likely has NO PASSWORD at all: this page also offers "Sign in with Google" (or similar), and apps show the exact same "invalid credentials" message whether the password is wrong OR the account was only ever created through that button, which never sets a password on the backend. If so, no password will ever work here — this app needs to be tested with a pre-authenticated session instead of email/password (see TestPilot support for the no-terminal way to do this).'
+          : 'Login failed — the app showed an error and the sign-in form is still on screen. Check the credentials for this app.' };
       }
       return { success: false, screenshot: afterScreenshot, error: `Login did not take — the sign-in form is still on screen after submitting (still at ${newUrl}). Either the credentials are wrong, or the username/email field on this app was not recognised. If it signs in with a magic link or SSO popup, capture a session in your browser and use "bring your own session".` };
     }
@@ -5239,6 +5372,48 @@ app.post('/api/2fa/:runId', (req, res) => {
   res.json({ ok: true });
 });
 
+// OAuth login handoff — accept/decline the takeover offer, signal "done",
+// and relay live input. All four resolve/reject the SAME pendingLiveView
+// entry that tryOAuthHandoff (server.js, near the 2FA bridge) is awaiting —
+// accept/decline answer the first wait, done answers the second.
+function resolveLiveView(runId, value) {
+  const p = pendingLiveView.get(runId);
+  if (!p) return false;
+  clearTimeout(p.timer);
+  pendingLiveView.delete(runId);
+  p.resolve(value);
+  return true;
+}
+
+app.post('/api/live-view/:runId/accept', (req, res) => {
+  if (!resolveLiveView(req.params.runId, { action: 'accept' })) {
+    return res.status(404).json({ error: 'No run is waiting for a takeover decision (it may have completed, been superseded, or timed out).' });
+  }
+  res.json({ ok: true });
+});
+
+app.post('/api/live-view/:runId/decline', (req, res) => {
+  const p = pendingLiveView.get(req.params.runId);
+  if (!p) return res.status(404).json({ error: 'No run is waiting for a takeover decision.' });
+  clearTimeout(p.timer);
+  pendingLiveView.delete(req.params.runId);
+  p.reject(new Error('declined'));
+  res.json({ ok: true });
+});
+
+app.post('/api/live-view/:runId/done', (req, res) => {
+  if (!resolveLiveView(req.params.runId, { action: 'done' })) {
+    return res.status(404).json({ error: 'No run is waiting — the handoff may have already ended or timed out.' });
+  }
+  res.json({ ok: true });
+});
+
+app.post('/api/live-view/:runId/input', async (req, res) => {
+  const ok = await dispatchLiveInput(req.params.runId, req.body || {});
+  if (!ok) return res.status(404).json({ error: 'No active live view for this run.' });
+  res.json({ ok: true });
+});
+
 // Clamp a recipe's recorded `navigate` URL to the app's own origin (H3) so a
 // recipe file on disk can never redirect a replayed run off-site. Keeps the
 // recorded path/query but forces the LIVE app's origin.
@@ -5373,6 +5548,25 @@ function requesterEmail(req) {
 // the Promise here, the upload/skip API endpoints resolve it. 5-min
 // timeout so an abandoned test doesn't pin a Chromium process forever.
 const pendingFileUploads = new Map(); // testId -> { resolve, requestId, multiple, timer }
+
+// End-to-End Flow Test: matches a click target that reads as the final
+// transactional-completion action of a booking/checkout/signup flow —
+// narrower than SWEEP_COMMIT_RE (which matches ANY commit-style action for
+// the deterministic sweep's confirm-before-destructive-click gate); this one
+// is specific to "this is the point of no return for money/reservation."
+// Used both to tag a step as a milestone in the report and, in
+// paymentMode 'stop-before-pay', to stop the run right before it.
+// Bare "book"/"reserve"/"confirm" (no "now") are included deliberately — real
+// apps commonly label the final CTA just "Book 3 Seats" or "Reserve Table",
+// not "Book Now". Same reasoning SWEEP_COMMIT_RE already uses for its own
+// bare `book\b`/`reservar` alternatives (server.js's deterministic sweep).
+const PAYMENT_COMMIT_RE = /\b(pay now|complete purchase|place order|complete order|confirm (order|booking|payment|reservation)|book now|reserve now|finalize booking|submit payment|book\b|reserve\b|checkout|purchase|pay\b|reservar( ahora)?|pagar( ahora)?|confirmar (pedido|reserva|pago)|finalizar reserva|completar (compra|pedido))\b/i;
+
+// A step taking longer than this is flagged as a friction point in the
+// summary — "slow enough that a real user might drop off here" — distinct
+// from an outright failure. Not user-configurable yet; revisit if real runs
+// show this needs to vary by app/step type.
+const FRICTION_THRESHOLD_MS = 15000;
 
 async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey) {
   const browser = await launchBrowser();
@@ -5543,6 +5737,11 @@ async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey)
     scenario,
     status: 'running',
     startedAt: new Date().toISOString(),
+    // Distinguishes e.g. the End-to-End Flow Test from a plain scenario run
+    // for the frontend renderer, mirroring how multirole stamps its own type
+    // at the call-site level instead of here — only set when the caller opts
+    // in via credentials.testType; every existing call site is unaffected.
+    ...(credentials?.testType ? { type: credentials.testType } : {}),
     // Owner stamped from credentials (passed by /api/test) so it survives a
     // queue delay + this overwrite of any placeholder row — used by #2 authz.
     userEmail: credentials?.ownerEmail || null,
@@ -6038,6 +6237,7 @@ What is your first action?`,
       }
 
       stepNum++;
+      const stepStartedAt = Date.now(); // flow-test friction detection reads steps[].durationMs
       conversation.push({ role: 'assistant', content: JSON.stringify(action) });
 
       // ── EXECUTE THE ACTION ────────────────────────────────────
@@ -6066,6 +6266,20 @@ What is your first action?`,
       if (forceBlockedDoneReason) {
         action = { action: 'done', summary: forceBlockedDoneReason };
         forceBlockedDoneReason = null;
+      }
+
+      // PAYMENT COMMIT GUARD (End-to-End Flow Test, paymentMode: 'stop-before-pay'):
+      // the flow test wants to know the checkout/booking is REACHABLE without
+      // actually spending real money on every run. If this click's target reads
+      // as the final pay/confirm/book action, convert it into a clean `done`
+      // instead of executing it — same conversion pattern as the two guards
+      // above. Only active when the caller opted in via credentials.paymentMode;
+      // every other test type (scenario/multirole/interactive/staging) is
+      // unaffected since they never set it.
+      if (credentials?.paymentMode === 'stop-before-pay' && action.action === 'click'
+          && PAYMENT_COMMIT_RE.test(String(action.target || ''))) {
+        result.reachedPaymentStep = true;
+        action = { action: 'done', summary: `Reached the final payment/booking step ("${action.target}") — stopped here without submitting, per stop-before-pay mode. The flow up to checkout appears to work.` };
       }
 
       try {
@@ -7237,16 +7451,25 @@ RESPOND ONLY JSON: {"confirmed":true,"detail":"the visible failure"} or {"confir
       // Record step. #3b: never persist the app login PASSWORD in the stored
       // step value (re-login edge case where the agent fills it as an action).
       const recordedValue = (credentials?.password && action.value === credentials.password) ? '••••••••' : (action.value || '');
+      const stepTarget = action.target || action.field || action.url || action.trigger || action.check || '';
       result.steps.push({
         step: stepNum,
         action: action.action,
-        target: action.target || action.field || action.url || action.trigger || action.check || '',
+        target: stepTarget,
         value: recordedValue,
         intent: agentIntent, // chain-of-thought line the agent wrote before the JSON
         outcome,
         status,
         screenshot,
-        url: (() => { try { return page.url(); } catch { return ''; } })()
+        url: (() => { try { return page.url(); } catch { return ''; } })(),
+        startedAt: new Date(stepStartedAt).toISOString(),
+        durationMs: Date.now() - stepStartedAt,
+        // End-to-End Flow Test milestone tag — set regardless of paymentMode so
+        // the report can point at "this is the checkout/booking step" even when
+        // the run didn't stop there (test-card mode, or a plain scenario test
+        // that happens to pass through a payment flow).
+        ...(action.action === 'click' && status === 'pass' && PAYMENT_COMMIT_RE.test(String(stepTarget))
+          ? { milestone: 'payment_commit' } : {}),
       });
 
       // ── Cleanup ledger (test-data teardown) ──────────────────────────────
@@ -7710,6 +7933,12 @@ Then the JSON action object on the next line.`;
       environment: fsum.environment,
       uncertain: fsum.uncertain,
       total: result.steps.length,
+      // End-to-End Flow Test friction/milestone reporting. Harmless on every
+      // other test type — an empty array when nothing crosses the threshold.
+      frictionPoints: result.steps
+        .filter(s => (s.durationMs || 0) > FRICTION_THRESHOLD_MS)
+        .map(s => ({ step: s.step, durationMs: s.durationMs, intent: s.intent, target: s.target })),
+      paymentMilestoneStep: result.steps.find(s => s.milestone === 'payment_commit')?.step ?? null,
     };
     // An UNCERTAIN verify means a check the agent tried but COULDN'T confirm
     // (content below the fold, a multi-condition check that can't be seen on
@@ -9672,6 +9901,95 @@ app.post('/api/test/multirole', async (req, res) => {
     saveTestResult(testId, aggregate);
     emitStep(testId, { type: 'error', message: `Multi-role error: ${err.message}` });
   });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// END-TO-END FLOW TEST — booking/checkout/payment/signup journeys.
+// Same engine as Scenario Test (runAgentTest); the differences are opt-in via
+// credentials.testType/paymentMode: per-step timing + friction flagging are
+// always on for a 'flow_e2e' run (see runAgentTest), and paymentMode controls
+// what happens when the flow reaches the final pay/confirm/book step.
+// v1 ships 'stop-before-pay' only — 'test-card' and 'human-handoff' are
+// follow-up increments (see the End-to-End Flow Test plan).
+// ═══════════════════════════════════════════════════════════════
+const FLOW_PAYMENT_MODES = ['stop-before-pay']; // grows as test-card / human-handoff ship
+app.post('/api/test/flow', async (req, res) => {
+  const user = requireUser(req, res);
+  if (!user) return;
+
+  if (user.plan === 'free') {
+    return res.status(402).json({ error: 'This feature requires a paid plan.', code: 'PLAN_FEATURE_LOCKED' });
+  }
+  const planFeatures = PLAN_LIMITS[user.plan]?.features || [];
+  if (!planFeatures.includes('flow')) {
+    return res.status(403).json({ error: 'End-to-End Flow Test requires a paid plan', code: 'PLAN_FEATURE_LOCKED' });
+  }
+
+  const { appId, scenario, email, password, apiKey, freeRun, sessionState: rawSessionState } = req.body || {};
+  let { paymentMode } = req.body || {};
+  paymentMode = FLOW_PAYMENT_MODES.includes(paymentMode) ? paymentMode : 'stop-before-pay';
+
+  const ss = parseSessionState(rawSessionState);
+  if (!ss.ok) return res.status(400).json({ error: ss.error, code: 'SESSION_STATE_INVALID' });
+  const sessionState = ss.sessionState;
+
+  const _sa = assessScenario(scenario);
+  if (!_sa.ok) {
+    return res.status(422).json({
+      code: 'SCENARIO_NOT_TESTABLE',
+      error: _sa.reason === 'too_short'
+        ? 'That scenario is too short to run. Describe the booking/checkout/signup journey to follow, and what "reached the end" looks like.'
+        : 'That scenario has nothing to check. Name the flow to follow end-to-end (e.g. "book a trip and reach checkout").',
+      hint: scenarioSuggestion(appId),
+    });
+  }
+
+  if (freeRun && isFreeBudgetExceeded()) {
+    return res.status(429).json({
+      error: 'Free runs paused for today — sign up to continue.',
+      code: 'FREE_DAILY_BUDGET_EXCEEDED',
+      resets_at_utc: utcDateString(new Date(Date.now() + 86_400_000)) + 'T00:00:00Z',
+    });
+  }
+
+  const effectiveApiKey = freeRun ? process.env.ANTHROPIC_SUPPORT_KEY : apiKey;
+  if (!effectiveApiKey) return res.status(400).json({ error: 'API key required' });
+
+  const appKnowledge = platformMaps.get(appId);
+  if (!appKnowledge) return res.status(404).json({ error: 'App not found. Learn it first.' });
+  if (!ownsApp(appId, user.email)) return res.status(403).json({ error: 'This app belongs to another account.', code: 'OWNERSHIP_MISMATCH' });
+
+  const _flowCredit = await reserveRunCreditOrDeny(res, user.plan, user.email, user.plan === 'onerun' ? await getUserByEmail(user.email) : null);
+  if (!_flowCredit.ok) return;
+
+  const testId = randomUUID();
+  const willQueue = !scanSlotFree();
+  res.json({ testId, status: willQueue ? 'queued' : 'started', ...(willQueue ? { queuePosition: scanWaiters.length + 1 } : {}) });
+  testResults.set(testId, { testId, appId, scenario, type: 'flow_e2e', status: willQueue ? 'queued' : 'starting', userEmail: user.email, userId: user.userId, startedAt: new Date().toISOString(), steps: [], bugs: [] });
+
+  (async () => {
+    await acquireScanSlot();
+    { const _r = testResults.get(testId); if (_r && _r.status === 'queued') _r.status = 'starting'; }
+    if (willQueue) emitStep(testId, { type: 'info', message: '▶ A runner just freed up — starting your flow test now…' });
+    try {
+      await runAgentTest(testId, appKnowledge, scenario,
+        { email, password, allowReplay: true, ownerEmail: user.email, ownerUserId: user.userId, sessionState, testType: 'flow_e2e', paymentMode },
+        effectiveApiKey);
+      const _r = testResults.get(testId);
+      if (_flowCredit.reserved && _r && !['completed', 'completed_with_bugs', 'completed_with_unverified'].includes(_r.status)) refundRunCredit(user.email);
+    } catch (e) {
+      if (_flowCredit.reserved) refundRunCredit(user.email);
+      const result = testResults.get(testId);
+      if (result) {
+        const cfg = classifyConfigError(e.message);
+        result.status = cfg ? 'config_error' : 'error';
+        result.error = cfg ? cfg.friendly : e.message;
+        if (cfg) result.rawError = e.message;
+      }
+    } finally {
+      releaseScanSlot();
+    }
+  })();
 });
 
 // ═══════════════════════════════════════════════════════════════
