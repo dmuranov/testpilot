@@ -71,6 +71,11 @@ const CAUSE_CATEGORY = {
   // No network call matched the assertion's pattern at all — could be a
   // wrong pattern, timing, or a real miss. Not positive evidence of either.
   state_assertion_uncertain: Category.UNCERTAIN,
+  // The assertion PASSED, but its own negative control didn't: the same
+  // pattern also matches a trivially blank/absent state, so the pass may not
+  // mean what it claims to. Informational, not a bug — the step's own
+  // WORKS verdict stands — but worth a human's eye on the check itself.
+  state_assertion_unproven: Category.UNCERTAIN,
 };
 
 /**

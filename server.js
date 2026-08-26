@@ -5706,6 +5706,53 @@ async function evaluateStateAssertion(assert, page, diag) {
   return { status: 'UNCERTAIN', expected: 'a recognized assert.type', actual: `unknown assert type "${type}"` };
 }
 
+// A NEGATIVE CONTROL, run automatically the instant a structured assertion
+// passes: does this same pattern also match a trivially blank/absent state —
+// an empty URL, an empty page, an empty response body — or a network check
+// with no status/body constraint at all (so it only proves a call HAPPENED,
+// not that it SUCCEEDED)? If so, the assertion just passed but doesn't
+// actually prove what it claims to: it would pass the same way if the app
+// were broken. Deliberately NOT a live fault-injection replay (re-firing the
+// real action a second time against a production app — e.g. a checkout call
+// — risks a real duplicate side effect, like a second order or charge); this
+// is pure regex/string logic against a synthetic sample, zero extra cost,
+// zero risk, run on every pass rather than cached from a one-time check.
+// Returns {wentRed: true|false|null, note}. null = not applicable (unknown
+// assert type) — never surfaced as a finding.
+function negativeControlCheck(assert) {
+  const type = assert?.type;
+
+  if (type === 'url_matches') {
+    const re = safeRegex(assert.pattern);
+    if (!re) return { wentRed: null, note: '' };
+    return re.test('')
+      ? { wentRed: false, note: 'this URL pattern also matches an empty string — it may not require anything specific about the destination.' }
+      : { wentRed: true, note: '' };
+  }
+
+  if (type === 'dom_text_contains') {
+    const re = safeRegex(assert.value);
+    const matchesBlank = re ? re.test('') : String(assert.value || '') === '';
+    return matchesBlank
+      ? { wentRed: false, note: 'this text check also matches an empty page — it may not require anything specific to be visible.' }
+      : { wentRed: true, note: '' };
+  }
+
+  if (type === 'network_response') {
+    if (assert.status == null && !assert.bodyContains) {
+      return { wentRed: false, note: 'this assertion only checks that a matching call happened — it would pass even if that call itself failed, since neither a status nor a body check is set.' };
+    }
+    if (assert.bodyContains) {
+      const re = safeRegex(assert.bodyContains);
+      const matchesBlank = re ? re.test('') : String(assert.bodyContains) === '';
+      if (matchesBlank) return { wentRed: false, note: 'the body check also matches an empty response body.' };
+    }
+    return { wentRed: true, note: '' };
+  }
+
+  return { wentRed: null, note: '' };
+}
+
 async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey) {
   const browser = await launchBrowser();
   // "Bring your own session": hydrate with a pasted storageState if provided,
@@ -7375,6 +7422,23 @@ Look at this turn's screenshot and the Buttons / Fields lists. Pick something el
                 const sa = await evaluateStateAssertion(action.assert, page, diag);
                 if (sa.status === 'WORKS') {
                   outcome = `✅ ${sa.actual}`;
+                  // Negative control: this assertion just passed — does it
+                  // actually PROVE anything, or would it pass the same way
+                  // against a blank/absent state? Shown to the user (never
+                  // counted as a bug — the WORKS verdict for THIS run stands)
+                  // so a weak check is visible instead of silently trusted.
+                  const nc = negativeControlCheck(action.assert);
+                  if (nc.wentRed === false) {
+                    result.findings.push(classifyFailure({
+                      cause: 'state_assertion_unproven',
+                      step: stepNum,
+                      check: action.check,
+                      description: `Verify (assert) passed, but its own negative control did not: ${nc.note}`,
+                      expected: sa.expected,
+                      actual: sa.actual,
+                      screenshot: verifyScreenshot,
+                    }));
+                  }
                 } else if (sa.status === 'BROKEN') {
                   const finding = classifyFailure({
                     cause: 'state_assertion_failed',
