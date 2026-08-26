@@ -44,6 +44,13 @@ const CAUSE_CATEGORY = {
   // ── app-side evidence ───────────────────────────────────────────
   vision_broken:      Category.APP_BUG,        // vision SAW a broken state
   app_error_visible:  Category.APP_BUG,        // an error/stacktrace rendered by the app
+  // A structured assertion (URL pattern / DOM text / network response) is
+  // deterministic evidence — a regex either matched reality or it didn't.
+  // Unlike vision_broken it does NOT start low-confidence: there's no single
+  // ambiguous model call to doubt here, so no second-opinion confirm pass is
+  // needed before it can count as a real defect. See server.js's structured
+  // verify path.
+  state_assertion_failed: Category.APP_BUG,
   // ── TestPilot couldn't do something ─────────────────────────────
   selector_miss:      Category.TOOL_LIMITATION,
   click_failed:       Category.TOOL_LIMITATION,
@@ -61,6 +68,9 @@ const CAUSE_CATEGORY = {
   timeout:            Category.ENVIRONMENT,
   // ── inconclusive ────────────────────────────────────────────────
   vision_uncertain:   Category.UNCERTAIN,
+  // No network call matched the assertion's pattern at all — could be a
+  // wrong pattern, timing, or a real miss. Not positive evidence of either.
+  state_assertion_uncertain: Category.UNCERTAIN,
 };
 
 /**

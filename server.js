@@ -5643,6 +5643,69 @@ const PAYMENT_COMMIT_RE = /\b(pay now|complete purchase|place order|complete ord
 // show this needs to vary by app/step type.
 const FRICTION_THRESHOLD_MS = 15000;
 
+// A pattern the agent sends might not be a valid regex, or might just be
+// intended as a plain substring — never let a malformed pattern throw and
+// take the run down with it.
+function safeRegex(pattern) {
+  if (!pattern) return null;
+  try { return new RegExp(pattern, 'i'); } catch { return null; }
+}
+
+// Structured, deterministic alternative to the vision judge for a verify
+// step that names a real state signature (action.assert — see the action
+// schema in runAgentTest's system prompt) instead of asking a model to
+// eyeball a screenshot. `diag.apiCalls` is the ring buffer of recent
+// first-party XHR/fetch responses populated in runAgentTest.
+// Returns {status: 'WORKS'|'BROKEN'|'UNCERTAIN', expected, actual}.
+async function evaluateStateAssertion(assert, page, diag) {
+  const type = assert?.type;
+
+  if (type === 'url_matches') {
+    const re = safeRegex(assert.pattern);
+    const url = page.url();
+    const expected = `URL matches ${assert.pattern}`;
+    if (!re) return { status: 'UNCERTAIN', expected, actual: 'the pattern given is not a valid regex' };
+    return re.test(url) ? { status: 'WORKS', expected, actual: url } : { status: 'BROKEN', expected, actual: url };
+  }
+
+  if (type === 'dom_text_contains') {
+    const re = safeRegex(assert.value);
+    const text = (await page.textContent('body').catch(() => '')) || '';
+    const hit = re ? re.test(text) : text.includes(String(assert.value || ''));
+    const expected = `page contains "${assert.value}"`;
+    if (hit) return { status: 'WORKS', expected, actual: 'found on the page' };
+    const snippet = text.replace(/\s+/g, ' ').trim().slice(0, 400);
+    return { status: 'BROKEN', expected, actual: `not found — page text was: "${snippet}"` };
+  }
+
+  if (type === 'network_response') {
+    const urlRe = safeRegex(assert.urlPattern);
+    const expectedParts = [`a call to ${assert.urlPattern}`];
+    if (assert.status != null) expectedParts.push(`status ${assert.status}`);
+    if (assert.bodyContains) expectedParts.push(`body containing "${assert.bodyContains}"`);
+    const expected = expectedParts.join(', ');
+    if (!urlRe) return { status: 'UNCERTAIN', expected, actual: 'the urlPattern given is not a valid regex' };
+
+    const matches = (diag.apiCalls || []).filter(c => urlRe.test(c.url) && (!assert.method || c.method === assert.method));
+    const call = matches[matches.length - 1]; // most recent match wins
+    if (!call) return { status: 'UNCERTAIN', expected, actual: 'no matching network call was observed during this run — wrong pattern, or it hasn\'t fired yet' };
+
+    if (assert.status != null && call.status !== assert.status) {
+      return { status: 'BROKEN', expected, actual: `${call.method} ${call.url} → ${call.status}` };
+    }
+    if (assert.bodyContains) {
+      let body = '';
+      try { body = await call.response.text(); } catch { /* body unreadable — fall through, treated as no match */ }
+      const bodyRe = safeRegex(assert.bodyContains);
+      const hit = bodyRe ? bodyRe.test(body) : body.includes(String(assert.bodyContains));
+      if (!hit) return { status: 'BROKEN', expected, actual: `${call.method} ${call.url} → ${call.status}, body: "${body.slice(0, 300)}"` };
+    }
+    return { status: 'WORKS', expected, actual: `${call.method} ${call.url} → ${call.status}` };
+  }
+
+  return { status: 'UNCERTAIN', expected: 'a recognized assert.type', actual: `unknown assert type "${type}"` };
+}
+
 async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey) {
   const browser = await launchBrowser();
   // "Bring your own session": hydrate with a pasted storageState if provided,
@@ -5665,7 +5728,7 @@ async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey)
   // (the trust engine keeps `bugs` = agent-CONFIRMED defects only) — this is
   // evidence a human/agent can weigh, not a verdict.
   const diagAppOrigin = (() => { try { return new URL(appKnowledge.url).origin; } catch { return null; } })();
-  const diag = { pageErrors: [], consoleErrors: [], failedRequests: [], httpErrors: [] };
+  const diag = { pageErrors: [], consoleErrors: [], failedRequests: [], httpErrors: [], apiCalls: [] };
   const DIAG_CAP = 120;
   const diagStep = () => result.steps.length;                 // step currently in progress
   const diagFirstParty = (u) => { try { return new URL(u).origin === diagAppOrigin; } catch { return false; } };
@@ -5703,6 +5766,25 @@ async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey)
       const key = 'H|' + method + '|' + u + '|' + s;
       if (diagSeenNet.has(key)) return; diagSeenNet.add(key);
       diag.httpErrors.push({ step: diagStep(), method, url: u.slice(0, 300), status: s, firstParty: diagFirstParty(u) });
+    } catch {}
+  });
+  // Ring buffer of recent first-party API calls (XHR/fetch, any status) for
+  // structured verify assertions (network_response, see the 'verify' case
+  // below) to search against — an order confirmation's proof is the API
+  // response that actually created it, not a screenshot of the page after.
+  // Stores the live Response object, not its body: reading a body is an
+  // async call with real cost, so it's only paid for the one call an
+  // assertion actually matches, not for every response all run.
+  const API_CALL_CAP = 40;
+  page.on('response', (resp) => {
+    try {
+      const req = resp.request();
+      const type = req.resourceType();
+      if (type !== 'xhr' && type !== 'fetch') return;
+      const u = resp.url();
+      if (u.startsWith('data:')) return;
+      diag.apiCalls.push({ step: diagStep(), method: req.method(), url: u, status: resp.status(), firstParty: diagFirstParty(u), response: resp });
+      if (diag.apiCalls.length > API_CALL_CAP) diag.apiCalls.shift();
     } catch {}
   });
 
@@ -5992,7 +6074,12 @@ AVAILABLE ACTIONS (respond with ONLY one JSON object):
 {"action": "scroll_to", "text": "Aceptar presupuesto"} — PREFERRED when you know what text/button you need below the fold; one step replaces many bare scrolls
 {"action": "wait_save"}
 {"action": "verify", "check": "what to verify on screen"}
+{"action": "verify", "check": "what this proves", "assert": {"type":"url_matches","pattern":"regex, e.g. /orders/\\\\d+"}}
+{"action": "verify", "check": "what this proves", "assert": {"type":"dom_text_contains","value":"exact or partial text/regex expected somewhere on the page, e.g. an order id"}}
+{"action": "verify", "check": "what this proves", "assert": {"type":"network_response","urlPattern":"regex matching the API call, e.g. /api/orders","status":201,"bodyContains":"optional text/regex expected in the response body"}}
 {"action": "done", "summary": "final result based on what actually happened"}
+
+ASSERT — use for a step whose real proof is APPLICATION STATE, not appearance: an order/payment/booking completing, a record actually persisting, anything where "the page looks right" could still be wrong (e.g. a confirmation screen rendered from stale local state while the actual save silently failed server-side). When the step you're verifying has a concrete state signature — a URL that only exists post-success, an id/reference visible in the DOM, or the actual API call that performed the action — attach "assert" and TestPilot checks that directly instead of judging a screenshot. Use plain "verify" (no assert) for anything whose correctness genuinely IS what's on screen (a label, a validation message, a layout). Don't force an assert where there's no real state signature to check.
 
 ═══════════════════════════════════════════════════════════════════
 HOW WEB FORMS BEHAVE — READ THIS, IT IS THE #1 SOURCE OF AGENT CONFUSION
@@ -7277,6 +7364,59 @@ Look at this turn's screenshot and the Buttons / Fields lists. Pick something el
             await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'auto' })).catch(() => {});
             await page.waitForTimeout(3000);
             const verifyScreenshot = await takeScreenshot(page, `${testId}-verify-${stepNum}`);
+
+            // STRUCTURED assertion path — a URL/DOM-text/network-response check
+            // named in action.assert (see the action schema above) is deterministic
+            // evidence, not a model's read of a screenshot. When present it fully
+            // REPLACES the vision judge for this step: no ambiguity to average
+            // against, so no reason to pay for (or trust less than) a vision call.
+            if (action.assert) {
+              try {
+                const sa = await evaluateStateAssertion(action.assert, page, diag);
+                if (sa.status === 'WORKS') {
+                  outcome = `✅ ${sa.actual}`;
+                } else if (sa.status === 'BROKEN') {
+                  const finding = classifyFailure({
+                    cause: 'state_assertion_failed',
+                    step: stepNum,
+                    check: action.check,
+                    description: `Verify (assert): ${action.check} — expected ${sa.expected}, got ${sa.actual}`,
+                    expected: sa.expected,
+                    actual: sa.actual,
+                    severity: 'medium',
+                    screenshot: verifyScreenshot,
+                  });
+                  result.findings.push(finding);
+                  if (isConfirmedAppBug(finding)) {
+                    result.bugs.push(finding);
+                    outcome = `❌ ${sa.actual} (state assertion)`;
+                  } else {
+                    outcome = `⚠️ Possible issue: ${sa.actual}`;
+                  }
+                } else {
+                  outcome = `❔ ${sa.actual}`;
+                  result.findings.push(classifyFailure({
+                    cause: 'state_assertion_uncertain',
+                    step: stepNum,
+                    check: action.check,
+                    description: sa.actual,
+                    expected: sa.expected,
+                    actual: sa.actual,
+                    screenshot: verifyScreenshot,
+                  }));
+                }
+              } catch (e) {
+                // The assertion check itself failed (bad selector call, page
+                // navigated away mid-check, etc.) — our side, not the app's.
+                outcome = `Verify (assert) could not run (TestPilot issue): ${e.message.substring(0, 60)}`;
+                result.findings.push(classifyFailure({
+                  cause: 'api_error', step: stepNum, check: action.check,
+                  description: `Assert check failed: ${e.message.substring(0, 120)}`,
+                }));
+              }
+              break;
+            }
+
             try {
               const imgBuf = await fs.readFile(verifyScreenshot.startsWith('/') ? `.${verifyScreenshot}` : verifyScreenshot);
               const verifyImg = pngImageBlock(imgBuf);
