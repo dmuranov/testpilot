@@ -3058,10 +3058,20 @@ function issueCard(test, item, kind) {
   const what = tpEsc(item.description || item.check || '');
   const where = tpWhere(st);
   const errs = tpErrsNear(test, item.step);
+  // Structured expected/actual (added alongside the free-text "detail" a
+  // vision verify already produced) — shown as its own two-line diff instead
+  // of folded into one blended sentence, so a reader can see what was CLAIMED
+  // vs what was literally ON SCREEN without parsing prose for it.
+  const diff = (item.expected || item.actual) ? `
+      <div style="font-size:12px;margin-top:8px;font-family:'DM Mono',monospace;line-height:1.6">
+        ${item.expected ? `<div><span style="color:var(--text-muted)">Expected:</span> ${tpEsc(item.expected)}</div>` : ''}
+        ${item.actual ? `<div><span style="color:var(--text-muted)">Actual:</span> ${tpEsc(item.actual)}</div>` : ''}
+      </div>` : '';
   return `
     <div style="background:var(--bg-hover,rgba(127,127,127,0.06));border:1px solid var(--border);border-left:3px solid ${sty.c};border-radius:var(--radius);padding:12px 14px;margin-bottom:10px">
       <div style="font-size:12.5px;font-weight:700;color:${sty.c}">${sty.label}${item.step != null ? ` · Step ${item.step}` : ''}</div>
       ${what ? `<div style="font-size:13px;color:var(--text);margin-top:6px;line-height:1.5"><strong>What:</strong> ${what}</div>` : ''}
+      ${diff}
       ${where ? `<div style="font-size:12px;color:var(--text-dim);margin-top:4px"><strong>Where:</strong> ${where}</div>` : ''}
       ${errs.length ? `<div style="margin-top:8px;padding:8px 10px;background:rgba(239,68,68,0.1);border-radius:6px;font-family:'DM Mono',monospace;font-size:11px;color:#ef4444;line-height:1.6">${errs.map(e => '🔴 ' + tpEsc(e)).join('<br>')}</div>` : ''}
       ${shot ? `<div style="margin-top:10px"><img src="${API}${shot}" onclick="showModal('${API}${shot}')" style="max-width:100%;max-height:220px;border-radius:6px;border:1px solid var(--border);cursor:zoom-in" loading="lazy" /><div style="font-size:10px;color:var(--text-muted);margin-top:3px">📸 Screenshot at this step — click to enlarge</div></div>` : ''}

@@ -7304,10 +7304,12 @@ Look at the screenshot and answer with EXACTLY ONE of three statuses:
 
 CRITICAL: Default to UNCERTAIN when in doubt. BROKEN requires you to SEE the broken state — not just the absence of confirmation. "I don't see X" is UNCERTAIN, not BROKEN. The downstream report turns BROKEN into a published bug; UNCERTAIN is informational only.
 
+Also give "expected" and "actual" as SEPARATE fields (not folded into detail): "expected" is what the check claims should be true, in your own words; "actual" is literally what the screenshot shows, whether or not it matches. The report shows these as a side-by-side diff, so keep both short and concrete — no hedging in "actual", just what's on screen.
+
 RESPOND ONLY JSON (one of):
-{"status":"WORKS","detail":"what you see that confirms it"}
-{"status":"BROKEN","detail":"what visible failure proves it's broken"}
-{"status":"UNCERTAIN","detail":"what you see, why this screenshot can't confirm either way"}` }
+{"status":"WORKS","expected":"what the check claims should be true","actual":"what's on screen that matches it","detail":"what you see that confirms it"}
+{"status":"BROKEN","expected":"what the check claims should be true","actual":"what's on screen instead","detail":"what visible failure proves it's broken"}
+{"status":"UNCERTAIN","expected":"what the check claims should be true","actual":"what's on screen (inconclusive)","detail":"why this screenshot can't confirm either way"}` }
                   ]
                 }]
               }), { label: `verify-${stepNum}` });
@@ -7321,6 +7323,10 @@ RESPOND ONLY JSON (one of):
                   detail: vRaw.substring(0, 200),
                 };
               }
+              // Fallback for older/malformed responses missing the new fields —
+              // never let a report render an empty diff row.
+              if (!vResult.expected) vResult.expected = action.check;
+              if (!vResult.actual) vResult.actual = vResult.detail || '';
               // Normalize. Accept legacy {passed: true/false} shape too.
               let vStatus = String(vResult.status || '').toUpperCase();
               if (!vStatus && typeof vResult.passed === 'boolean') {
@@ -7338,7 +7344,7 @@ RESPOND ONLY JSON (one of):
                 // confirm prompt. Agreement → CONFIRMED high-confidence app bug.
                 // Disagreement → keep it as a LOW-confidence "possible issue":
                 // still shown to the user, but it never counts as a defect.
-                let confirmed = false, confirmDetail = '';
+                let confirmed = false, confirmDetail = '', confirmActual = '';
                 try {
                   await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'auto' })).catch(() => {});
                   await page.waitForTimeout(2000);
@@ -7355,7 +7361,7 @@ RESPOND ONLY JSON (one of):
 
 Confirm with FRESH eyes. Is there POSITIVE, CURRENTLY-VISIBLE evidence that the APP ITSELF is broken — a rendered error message, a control stuck in a disabled state, a validation failure on screen? A missing confirmation, content below the fold, or a still-loading spinner is NOT proof of breakage.
 
-RESPOND ONLY JSON: {"confirmed":true,"detail":"the visible failure"} or {"confirmed":false,"detail":"why it isn't provably broken"}` }
+RESPOND ONLY JSON: {"confirmed":true,"actual":"the visible failure, plainly","detail":"the visible failure"} or {"confirmed":false,"actual":"what's actually on screen","detail":"why it isn't provably broken"}` }
                     ] }]
                   }), { label: `verify-confirm-${stepNum}` });
                   const cRaw = cResp.content[0].text.replace(/```json\n?|```\n?/g, '').trim();
@@ -7363,6 +7369,7 @@ RESPOND ONLY JSON: {"confirmed":true,"detail":"the visible failure"} or {"confir
                     const cj = JSON.parse(cRaw.match(/\{[\s\S]*\}/)?.[0] || cRaw);
                     confirmed = cj.confirmed === true;
                     confirmDetail = cj.detail || '';
+                    confirmActual = cj.actual || '';
                   } catch {
                     confirmed = /"?confirmed"?\s*[:=]\s*true/i.test(cRaw);
                     confirmDetail = cRaw.substring(0, 160);
@@ -7380,6 +7387,12 @@ RESPOND ONLY JSON: {"confirmed":true,"detail":"the visible failure"} or {"confir
                   step: stepNum,
                   check: action.check,
                   description: `Verify: ${action.check} — ${vResult.detail}`,
+                  // Structured expected/actual for the report's side-by-side diff
+                  // (issueCard, index.html) — a confirmed finding uses the fresher
+                  // confirm-pass read of "actual" when it gave one, since that's
+                  // the more scrutinized of the two looks.
+                  expected: vResult.expected,
+                  actual: (confirmed && confirmActual) || vResult.actual,
                   confirmDetail,
                   severity: 'medium',
                   screenshot: verifyScreenshot,
@@ -7398,7 +7411,9 @@ RESPOND ONLY JSON: {"confirmed":true,"detail":"the visible failure"} or {"confir
                 outcome = `❔ ${vResult.detail}`;
                 result.findings.push(classifyFailure({
                   cause: 'vision_uncertain', step: stepNum, check: action.check,
-                  description: vResult.detail, screenshot: verifyScreenshot,
+                  description: vResult.detail,
+                  expected: vResult.expected, actual: vResult.actual,
+                  screenshot: verifyScreenshot,
                 }));
               }
             } catch (e) {
