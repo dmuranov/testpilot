@@ -1929,19 +1929,11 @@ function getCurrentEmail() {
 }
 
 function hasFeature(feature) {
-  const plan = currentUser?.plan || 'free';
-  // Funnel rework: free + onerun get scenario only; everything else is paywalled.
-  const features = {
-    free:    ['scenario', 'security', 'sweep'],
-    onerun:  ['scenario', 'multirole', 'security', 'sweep', 'flow'],
-    solo:    ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe', 'sweep', 'flow'],
-    starter: ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe', 'sweep', 'flow'],
-    pro:     ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe', 'sweep', 'flow'],
-    agency:  ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe', 'sweep', 'flow'],
-    admin:   ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe', 'sweep', 'flow'],
-    tester:  ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe', 'sweep', 'flow']
-  };
-  return (features[plan] || features.free).includes(feature);
+  // Pricing v3: every plan gets every feature — the only axis left is app
+  // count (gatedLearn below) and run count (free/onerun's 1-run limit,
+  // enforced server-side via free_run_used / credits, not here).
+  const ALL_FEATURES = ['scenario', 'interactive', 'multirole', 'security', 'stagingsafe', 'sweep', 'flow'];
+  return ALL_FEATURES.includes(feature);
 }
 
 function gatedLearn() {

@@ -173,13 +173,20 @@ const PLAN_LIMITS = {
   // Adding those names to the array below would change what /api/plan reports
   // to the client, so the grants stay where they are and this comment carries
   // the truth.
-  free:    { apps: 1,    runs: 1,    features: ['scenario'] },
+  // Pricing v3: every plan, including Free and OneRun, gets every feature —
+  // the only axis left is app count and run count. Interactive Test (a live
+  // chat session, not a single discrete run) is included too: its credit is
+  // consumed the moment the session starts (see /api/chat/start), same
+  // moment-of-commit rule as every other run type gets applied to it.
+  free:    { apps: 1,    runs: 1,    features: ['scenario', 'interactive', 'multirole', 'flow'] },
   // OneRun: 1 app, ONE run credit per €5 (users.credits). The single credit
-  // unlocks ANY run type — scenario, multirole, OR security — one use, refunded
-  // if TestPilot itself fails. The multirole + security endpoints reserve/refund
-  // the credit the same way /api/test does. (Interactive chat = a live session,
-  // not a discrete run — stays subscription-only.)
-  onerun:  { apps: 1,    runs: 1,    features: ['scenario', 'multirole', 'security', 'flow'] },
+  // unlocks ANY run type — scenario, multirole, security, OR interactive —
+  // one use, refunded if TestPilot itself fails (interactive has no refund
+  // path: there's no "TestPilot itself failed" moment in a live chat, so its
+  // credit is a flat consume-on-start, not consume-then-maybe-refund).
+  // The multirole + security endpoints reserve/refund the credit the same way
+  // /api/test does.
+  onerun:  { apps: 1,    runs: 1,    features: ['scenario', 'interactive', 'multirole', 'security', 'flow'] },
   // Solo €10/mo: 1 app, unlimited runs, every feature. Recurring subscription.
   solo:    { apps: 1,    runs: null, features: ['scenario', 'interactive', 'multirole', 'security', 'flow'] },
   starter: { apps: 3,    runs: null, features: ['scenario', 'interactive', 'multirole', 'security', 'flow'] },
@@ -10457,15 +10464,23 @@ app.post('/api/test/multirole', async (req, res) => {
   const user = requireUser(req, res);
   if (!user) return;
 
-  // Funnel rework: free/onerun → 402 with the unified paywall copy. Other
-  // tiers fall through to the feature-list check (Starter doesn't have
-  // multirole either; that's still 403).
-  if (user.plan === 'free') {
-    return res.status(402).json({ error: 'This feature requires a paid plan.', code: 'PLAN_FEATURE_LOCKED' });
-  }
+  // Pricing v3: free gets multirole too, gated by the same free_run_used flag
+  // /api/test uses — checked here (before touching a browser), burned on
+  // start below, and refunded in the non-charged-status branch alongside the
+  // existing onerun refund. Not routed through reserveRunCreditOrDeny: that
+  // helper is also called by /api/security/api-intercept, which already has
+  // its own separate one-free-scan mechanism (freeSecurityUsed) — teaching it
+  // about free_run_used too would double-gate that endpoint.
   const planFeatures = PLAN_LIMITS[user.plan]?.features || [];
   if (!planFeatures.includes('multirole')) {
     return res.status(403).json({ error: 'Multi-role testing requires a paid plan', code: 'PLAN_FEATURE_LOCKED' });
+  }
+  let freeRunBurned = false;
+  if (user.plan === 'free') {
+    const dbUser = await getUserByEmail(user.email);
+    if (dbUser?.free_run_used) {
+      return res.status(402).json({ error: 'Free run already used. Choose a plan to continue.', code: 'FREE_RUN_USED' });
+    }
   }
 
   const { appId, roles, apiKey, freeRun, userEmail } = req.body || {};
@@ -10495,6 +10510,15 @@ app.post('/api/test/multirole', async (req, res) => {
   // it produced a verdict). onerun.features includes 'multirole' so it passed the gate.
   const _mrCredit = await reserveRunCreditOrDeny(res, user.plan, user.email, user.plan === 'onerun' ? await getUserByEmail(user.email) : null);
   if (!_mrCredit.ok) return;
+
+  // Free: burn the single free run now (mirrors /api/test's "mark used
+  // immediately on START" — see its comment for why: optimistic burn, refunded
+  // below if the run doesn't land on a charged status).
+  if (user.plan === 'free') {
+    freeRunBurned = true;
+    supabase('PATCH', 'users', { free_run_used: true }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
+    for (const [, s] of sessions) { if (s.email === user.email) s.free_run_used = true; }
+  }
 
   const testId = randomUUID();
   res.json({ testId, status: 'started', roleCount: roles.length });
@@ -10569,7 +10593,12 @@ app.post('/api/test/multirole', async (req, res) => {
       ? (allDone ? 'completed_with_bugs' : 'partial_with_bugs')
       : (allDone ? 'completed' : (blockedRoles.length ? 'blocked' : 'incomplete'));
     aggregate.completedAt = new Date().toISOString();
-    if (_mrCredit.reserved && !['completed', 'completed_with_bugs', 'partial_with_bugs'].includes(aggregate.status)) refundRunCredit(user.email);
+    const _mrCharged = ['completed', 'completed_with_bugs', 'partial_with_bugs'].includes(aggregate.status);
+    if (_mrCredit.reserved && !_mrCharged) refundRunCredit(user.email);
+    if (freeRunBurned && !_mrCharged) {
+      supabase('PATCH', 'users', { free_run_used: false }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
+      for (const [, s] of sessions) { if (s.email === user.email) s.free_run_used = false; }
+    }
     aggregate.summary = {
       roles: roleResults.length,
       bugs: aggregate.bugs.length,
@@ -10582,6 +10611,10 @@ app.post('/api/test/multirole', async (req, res) => {
     emitStep(testId, { type: 'summary', message: `Multi-role complete: ${aggregate.summary.passed_roles}/${roleResults.length} roles passed, ${aggregate.bugs.length} confirmed bug${aggregate.bugs.length === 1 ? '' : 's'}${blockedRoles.length ? `, ${blockedRoles.length} role(s) couldn't be tested` : ''}`, summary: aggregate.summary });
   }).catch(err => {
     if (_mrCredit.reserved) refundRunCredit(user.email);
+    if (freeRunBurned) {
+      supabase('PATCH', 'users', { free_run_used: false }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
+      for (const [, s] of sessions) { if (s.email === user.email) s.free_run_used = false; }
+    }
     aggregate.status = 'error';
     aggregate.error = err.message;
     aggregate.completedAt = new Date().toISOString();
@@ -10605,12 +10638,19 @@ app.post('/api/test/flow', async (req, res) => {
   const user = requireUser(req, res);
   if (!user) return;
 
-  if (user.plan === 'free') {
-    return res.status(402).json({ error: 'This feature requires a paid plan.', code: 'PLAN_FEATURE_LOCKED' });
-  }
+  // Pricing v3: free gets flow too — same free_run_used pattern as multirole
+  // above (see its comment for why this isn't routed through
+  // reserveRunCreditOrDeny).
   const planFeatures = PLAN_LIMITS[user.plan]?.features || [];
   if (!planFeatures.includes('flow')) {
     return res.status(403).json({ error: 'End-to-End Flow Test requires a paid plan', code: 'PLAN_FEATURE_LOCKED' });
+  }
+  let freeRunBurned = false;
+  if (user.plan === 'free') {
+    const dbUser = await getUserByEmail(user.email);
+    if (dbUser?.free_run_used) {
+      return res.status(402).json({ error: 'Free run already used. Choose a plan to continue.', code: 'FREE_RUN_USED' });
+    }
   }
 
   const { appId, scenario, email, password, apiKey, freeRun, sessionState: rawSessionState, savedSessionRole } = req.body || {};
@@ -10657,6 +10697,12 @@ app.post('/api/test/flow', async (req, res) => {
   const _flowCredit = await reserveRunCreditOrDeny(res, user.plan, user.email, user.plan === 'onerun' ? await getUserByEmail(user.email) : null);
   if (!_flowCredit.ok) return;
 
+  if (user.plan === 'free') {
+    freeRunBurned = true;
+    supabase('PATCH', 'users', { free_run_used: true }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
+    for (const [, s] of sessions) { if (s.email === user.email) s.free_run_used = true; }
+  }
+
   const testId = randomUUID();
   const willQueue = !scanSlotFree();
   res.json({ testId, status: willQueue ? 'queued' : 'started', ...(willQueue ? { queuePosition: scanWaiters.length + 1 } : {}) });
@@ -10671,9 +10717,18 @@ app.post('/api/test/flow', async (req, res) => {
         { email, password, allowReplay: true, ownerEmail: user.email, ownerUserId: user.userId, sessionState, indexedDB: flowIndexedDB, testType: 'flow_e2e', paymentMode },
         effectiveApiKey);
       const _r = testResults.get(testId);
-      if (_flowCredit.reserved && _r && !['completed', 'completed_with_bugs', 'completed_with_unverified'].includes(_r.status)) refundRunCredit(user.email);
+      const _flowCharged = _r && ['completed', 'completed_with_bugs', 'completed_with_unverified'].includes(_r.status);
+      if (_flowCredit.reserved && !_flowCharged) refundRunCredit(user.email);
+      if (freeRunBurned && !_flowCharged) {
+        supabase('PATCH', 'users', { free_run_used: false }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
+        for (const [, s] of sessions) { if (s.email === user.email) s.free_run_used = false; }
+      }
     } catch (e) {
       if (_flowCredit.reserved) refundRunCredit(user.email);
+      if (freeRunBurned) {
+        supabase('PATCH', 'users', { free_run_used: false }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
+        for (const [, s] of sessions) { if (s.email === user.email) s.free_run_used = false; }
+      }
       const result = testResults.get(testId);
       if (result) {
         const cfg = classifyConfigError(e.message);
@@ -10960,23 +11015,12 @@ function requireUser(req, res) {
   return null;
 }
 
-// Same as requireUser but also enforces a paid plan. Matches the 402
-// response shape used elsewhere (security/verdict, routes/netlify.js) so
-// the frontend's upgrade-modal handler treats it uniformly.
-function requirePaidUser(req, res) {
-  const user = requireUser(req, res);
-  if (!user) return null;
-  if (user.plan === 'free' || user.plan === 'onerun') {
-    res.status(402).json({ error: 'This feature requires a paid plan.', code: 'PLAN_FEATURE_LOCKED' });
-    return null;
-  }
-  return user;
-}
-
 // Helper: get the chat session AND verify the cookie owns it. Returns the
-// session or sends an HTTP error and returns null. Uses requirePaidUser
-// because Interactive Test is a Starter+ feature — server-side fence,
-// not just frontend hasFeature() gating.
+// session or sends an HTTP error and returns null. The plan/credit gate lives
+// at /api/chat/start (where a run credit is actually reserved) — once a
+// session exists, its owner already paid for it, so continuing to use it
+// (message/screenshot/end/reset) only needs requireUser + the ownership
+// check below, not requirePaidUser.
 function requireChatSession(req, res) {
   // Embed path: requests from the iframed chat UI (/chat?session=…) set
   // X-TP-Embed: 1. The session is owned by whoever knows the sessionId —
@@ -10997,7 +11041,7 @@ function requireChatSession(req, res) {
     return session;
   }
 
-  const user = requirePaidUser(req, res);
+  const user = requireUser(req, res);
   if (!user) return null;
   const session = chatSessions.get(req.params.sessionId);
   if (!session) {
@@ -11014,8 +11058,25 @@ function requireChatSession(req, res) {
 }
 
 app.post('/api/chat/start', async (req, res) => {
-  const user = requirePaidUser(req, res);
+  const user = requireUser(req, res);
   if (!user) return;
+
+  // Free/OneRun gate — mirrors /api/test's free_run_used check and
+  // reserveRunCreditOrDeny's onerun credit check, but consumed flat on
+  // start (no refund path): a live chat session has no "TestPilot itself
+  // failed" moment to refund against the way a discrete run does.
+  if (user.plan === 'free') {
+    const dbUser = await getUserByEmail(user.email);
+    if (dbUser?.free_run_used) {
+      return res.status(402).json({ error: 'Free run already used. Choose a plan to continue.', code: 'FREE_RUN_USED' });
+    }
+  } else if (user.plan === 'onerun') {
+    const dbUser = await getUserByEmail(user.email);
+    if (Number(dbUser?.credits || 0) <= 0) {
+      return res.status(402).json({ error: 'Your one-time run has been used. Buy another run, or subscribe to keep testing.', code: 'ONERUN_EXHAUSTED' });
+    }
+  }
+
   const { appId, email, password, apiKey, securityMode } = req.body;
   if (!apiKey) return res.status(400).json({ error: 'API key required' });
   const appKnowledge = platformMaps.get(appId);
@@ -11086,6 +11147,22 @@ app.post('/api/chat/start', async (req, res) => {
       securityMode: !!securityMode,
     });
     browser = null; // ownership transferred to chatSessions; don't close in catch
+
+    // Consume the free/onerun credit now — the session genuinely started
+    // (browser launched, page loaded, login attempted). Flat consume, no
+    // refund path: see the plan-gate comment above for why.
+    if (user.plan === 'free') {
+      supabase('PATCH', 'users', { free_run_used: true }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
+      for (const [, s] of sessions) { if (s.email === user.email) s.free_run_used = true; }
+    } else if (user.plan === 'onerun') {
+      const dbUser = await getUserByEmail(user.email);
+      const credits = Number(dbUser?.credits || 0);
+      if (credits > 0) {
+        await supabase('PATCH', 'users', { credits: credits - 1 }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
+        for (const [, s] of sessions) { if (s.email === user.email) s.credits = credits - 1; }
+      }
+    }
+
     res.json({ sessionId, screenshot, url: page.url(), loggedIn: loginResult.success });
   } catch (e) {
     console.error('Chat start error:', e.message);
@@ -11338,7 +11415,7 @@ app.post('/api/chat/:sessionId/reset', async (req, res) => {
 });
 
 app.get('/api/chat/sessions', (req, res) => {
-  const user = requirePaidUser(req, res);
+  const user = requireUser(req, res);
   if (!user) return;
   const list = [];
   for (const [id, s] of chatSessions) {
