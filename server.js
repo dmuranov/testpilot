@@ -3667,6 +3667,81 @@ async function clickButton(page, label, { skipEscape = false, frame = null } = {
     }
   } catch {}
 
+  // Strategy 1d: icon-class / image-alt fallback — for icon-only controls that
+  // carry NEITHER visible text NOR an aria-label/title (no accessible name at
+  // all), which defeats every strategy above. Common on icon-font buttons
+  // (<i class="fa-cart">), inline SVGs, and <img alt="cart">. The model's
+  // guessed label ("cart icon", "green bag icon top right") is tokenized —
+  // dropping generic visual/positional words that never appear in real class
+  // names — and matched against class/id/img-alt/img-src, excluding only
+  // invisible/tracking-pixel and full-page-sized elements, so it can't
+  // misfire as broadly as the has-text(*) strategies below it.
+  try {
+    const targetBox = await page.evaluate((lbl) => {
+      const diacritics = new RegExp('[̀-ͯ]', 'g');
+      const normTok = s => (s || '').normalize('NFD').replace(diacritics, '').toLowerCase();
+      const stop = new Set(['icon', 'icons', 'button', 'btn', 'click', 'top', 'right', 'left', 'bottom', 'corner', 'small', 'large', 'the', 'a', 'an', 'near', 'next', 'to', 'image']);
+      const tokens = normTok(lbl).split(/[^a-z0-9]+/).filter(t => t.length > 2 && !stop.has(t));
+      if (!tokens.length) return null;
+
+      const iconish = [...document.querySelectorAll('a, button, [role="button"], span, div, i, svg, img')];
+      let best = null, bestScore = -1;
+      for (const el of iconish) {
+        if (el.offsetParent === null) continue;
+        const rect = el.getBoundingClientRect();
+        // Skip invisible/tracking-pixel elements and full-page-sized
+        // containers (nav bars, body wrappers) — but NOT ordinary icon
+        // controls, which are often a wider clickable strip (icon + badge
+        // count + label), not a tiny square glyph. A real "cart" control
+        // measured on a live site was 303×58 — well past a naive icon-sized
+        // cap, which would have excluded exactly the element this exists to
+        // catch.
+        if (rect.width < 6 || rect.height < 6 || rect.width > 600 || rect.height > 300) continue;
+
+        const cls = el.getAttribute('class') || '';
+        const id = el.getAttribute('id') || '';
+        const alt = el.tagName === 'IMG' ? (el.getAttribute('alt') || '') : '';
+        const src = el.tagName === 'IMG' ? (el.getAttribute('src') || '') : '';
+        const hay = normTok([cls, id, alt, src].join(' '));
+        if (!hay) continue;
+
+        const hits = tokens.filter(t => hay.includes(t)).length;
+        if (hits === 0) continue;
+
+        let score = hits * 100;
+        const tag = el.tagName;
+        const clickable = tag === 'A' || tag === 'BUTTON' || el.getAttribute('role') === 'button' || !!el.onclick;
+        if (clickable) score += 50;
+        // Prefer the smallest matching element — the icon itself, not a large
+        // wrapping container that happens to share a class-name fragment.
+        score -= (rect.width * rect.height) / 5000;
+
+        if (score > bestScore) { bestScore = score; best = el; }
+      }
+      if (!best) return null;
+      // Click the nearest clickable ancestor if the matched node itself isn't
+      // one (e.g. an <svg>/<img> inside an <a>) — the leaf rarely owns the
+      // click handler.
+      let target = best;
+      if (target.tagName !== 'A' && target.tagName !== 'BUTTON' && target.getAttribute('role') !== 'button' && !target.onclick) {
+        const clickableAncestor = target.closest('a, button, [role="button"]');
+        if (clickableAncestor) target = clickableAncestor;
+      }
+      target.scrollIntoView({ block: 'center' });
+      const rect = target.getBoundingClientRect();
+      if (rect.width < 1 || rect.height < 1) return null;
+      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    }, label).catch(() => null);
+
+    if (targetBox) {
+      await page.waitForTimeout(150);
+      await page.mouse.click(targetBox.x, targetBox.y);
+      await page.waitForTimeout(1500);
+      await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+      return { success: true, navigated: page.url() !== urlBefore, url: page.url() };
+    }
+  } catch {}
+
   // Strategy 2: Playwright text locator with force click
   try {
     const el = page.getByText(label, { exact: false }).first();
