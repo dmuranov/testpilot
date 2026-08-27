@@ -6352,6 +6352,14 @@ What is your first action?`,
     const recentFailedClicks = new Map(); // normalized click target → {step,count}. Circuit-breaker: a not-found click (esp. a modal "×") must not spiral into dozens of identical failed retries.
     const reflectionCooldown = { lastTurn: -3 }; // throttle so the Opus rescue fires at most once per 3 turns
     const recentFills = new Map(); // normalized fieldKey:value → stepNum. Blocks redundant fills (same field + same value) at the EXECUTION LAYER. Whitespace evasion is defeated by stripping non-alphanumerics in the key. The earlier field-fill cap and cooldown were ROLLED BACK — they introduced multi-row regressions (Row 2's "Cantidad" normalizes to the same key as Row 1's, so legitimate fills on the second row got blocked as "duplicates"). Layer 1 dedup alone catches the actual fill-spam pattern without over-blocking.
+    // Rolling window of recent plain-scroll landing Y positions. Confirmed
+    // live: an agent hunting for a specific feedback panel oscillated
+    // scroll-down-680px / scroll-up-680px roughly ten times in a row (~20
+    // steps) without ever landing anywhere new — each individual scroll
+    // "succeeded" (it moved), so nothing caught that the AGENT was stuck.
+    // This catches revisiting the same Y position repeatedly and forces a
+    // strategy change instead of letting the oscillation keep paying out.
+    const recentScrollYs = [];
 
     // SCOPE GUARD (opt-in count enforcement). Some scenarios cap the number of
     // items to act on ("assign no more than 3", "do not act on more than 3
@@ -6578,6 +6586,7 @@ What is your first action?`,
             // falsely treated as a duplicate of the old page's field.
             recentFills.clear();
             recentFailedClicks.clear(); // a target absent here may exist on the new view
+            recentScrollYs.length = 0; // new page = new scroll context, old positions are meaningless here
             break;
           }
 
@@ -7191,7 +7200,21 @@ Look at this turn's screenshot and the Buttons / Fields lists. Pick something el
                 : `Reached bottom of page (y=${after}/${max}, 100%). NO MORE CONTENT BELOW. Do NOT scroll again — the thing you are looking for is either not on this page, is in a collapsed section, or requires a different view. Use scroll_to with a specific text target, navigate elsewhere, or call done with a partial summary.`;
               status = 'retry'; // signals to the agent that this didn't advance
             } else {
-              outcome = `Scrolled ${dir} ${moved}px (now at y=${after}/${max}, ${pct}% of page). ${pct >= 90 ? 'Near bottom — only ' + (max - after) + 'px remaining.' : ''}`;
+              // Loop guard: each scroll moved, but did it land somewhere NEW?
+              // Revisiting a Y position already seen recently means the agent
+              // is oscillating (down/up/down/...) rather than making progress
+              // — that looks fine per-step (each one "moved") but burns the
+              // step budget for zero new information.
+              recentScrollYs.push(after);
+              if (recentScrollYs.length > 6) recentScrollYs.shift();
+              const revisits = recentScrollYs.filter(y => Math.abs(y - after) < 20).length;
+              if (revisits >= 3) {
+                outcome = `You've scrolled back to this same position (y=${after}) ${revisits} times in a row without finding what you need — going up/down between the same spots is not working. STOP scrolling this way. Instead: use scroll_to with the EXACT text of what you're looking for (read the current screenshot for real visible text/labels, don't guess a plausible-sounding one), or move on / call done with a partial summary if it genuinely isn't reachable here.`;
+                status = 'retry';
+                recentScrollYs.length = 0; // reset — don't repeat this warning every subsequent identical scroll
+              } else {
+                outcome = `Scrolled ${dir} ${moved}px (now at y=${after}/${max}, ${pct}% of page). ${pct >= 90 ? 'Near bottom — only ' + (max - after) + 'px remaining.' : ''}`;
+              }
             }
             break;
           }
@@ -7254,7 +7277,19 @@ Look at this turn's screenshot and the Buttons / Fields lists. Pick something el
               await page.waitForTimeout(500);
               outcome = `Scrolled to "${target}" — now in viewport (matched via ${foundVia})`;
             } else {
-              outcome = `Could not find "${target}" on the page after trying ${tried.join(', ')}. The element is not on this route. Before giving up: (a) check the top-right toolbar / sidebar — global action buttons (e.g. "Nuevo …") often live there, try {"action":"click","label":"<exact toolbar label>"} directly; (b) try a shorter or different label; (c) navigate to the page where the action belongs (e.g. /quotes for "Nuevo presupuesto") and retry there. Do NOT silently swap to a different test step — if you change strategy, note it in your next reasoning so the report shows the workaround.`;
+              // Ground the NEXT guess in what's actually on the page instead
+              // of another plausible-sounding label. Confirmed live: an agent
+              // guessed "Question 1 Feedback", "Question 1", "Q1", "vague" for
+              // a scoring panel and all four failed, while real nearby text
+              // ("STAR", "82", "Key Strengths") DID resolve via this same
+              // scroll_to — it was pattern-matching an invented label instead
+              // of reading what the page actually calls the thing.
+              let realText = [];
+              try {
+                realText = await page.locator('h1,h2,h3,h4,h5,h6,label,strong,b,[class*="title" i],[class*="label" i],[class*="heading" i]').allInnerTexts();
+              } catch { /* best-effort — fall through with an empty sample */ }
+              const sample = [...new Set(realText.map(t => t.trim()).filter(t => t && t.length > 0 && t.length < 60))].slice(0, 15);
+              outcome = `Could not find "${target}" on the page after trying ${tried.join(', ')}. Stop guessing similar-sounding labels — here is what's ACTUALLY on the page right now: ${sample.length ? sample.map(s => `"${s}"`).join(', ') : '(no short headings/labels found this way — read the current screenshot for real visible text instead)'}. Pick your next scroll_to target from this real list or from the screenshot, not from another invented label. If nothing here is it: (a) check the top-right toolbar / sidebar — global action buttons often live there; (b) navigate to the page where the content actually belongs and retry there; (c) call done with a partial summary if it genuinely isn't reachable.`;
               status = 'retry';
             }
             break;
