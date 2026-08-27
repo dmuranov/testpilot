@@ -5778,9 +5778,16 @@ async function evaluateStateAssertion(assert, page, diag) {
 // a second time against a production app — e.g. a checkout call — risks a
 // real duplicate side effect, like a second order or charge); this reuses
 // state already captured, zero extra cost, zero risk, runs on every pass.
-// Returns {wentRed: true|false|null, note}. null = not applicable (unknown
-// assert type, or a before/after check skipped for expectChange:false) —
-// never surfaced as a finding.
+// Returns {wentRed: true|false|null, note, exempt}. exempt:true means the
+// control was skipped specifically because expectChange:false, NOT because
+// it ran and found nothing wrong — a WORKS verdict built on an exempted
+// assert and one built on a wentRed:true assert both read as a plain pass
+// in the report (correctly — expectChange:false is intentional, not a
+// demotion case), but they are not the same amount of evidence, and the
+// caller records which one happened (see runAgentTest's sanityCheck) so
+// that distinction isn't lost even where it isn't shown. wentRed:null with
+// exempt:false covers the other non-applicable cases (unknown assert type,
+// invalid regex).
 async function negativeControlCheck(assert, preActionState, diag) {
   const type = assert?.type;
   const expectChange = assert?.expectChange !== false;
@@ -5788,9 +5795,9 @@ async function negativeControlCheck(assert, preActionState, diag) {
   const baseline = haveBefore ? 'the state before this step\'s action' : 'an empty/blank state (no prior action to compare against this run)';
 
   if (type === 'url_matches') {
-    if (!expectChange) return { wentRed: null, note: '' };
+    if (!expectChange) return { wentRed: null, note: '', exempt: true };
     const re = safeRegex(assert.pattern);
-    if (!re) return { wentRed: null, note: '' };
+    if (!re) return { wentRed: null, note: '', exempt: false };
     const testUrl = haveBefore ? preActionState.url : '';
     return re.test(testUrl)
       ? { wentRed: false, note: `this URL pattern also matches ${baseline} (${JSON.stringify(testUrl)}) — it may not require anything the action actually caused.` }
@@ -5798,7 +5805,7 @@ async function negativeControlCheck(assert, preActionState, diag) {
   }
 
   if (type === 'dom_text_contains') {
-    if (!expectChange) return { wentRed: null, note: '' };
+    if (!expectChange) return { wentRed: null, note: '', exempt: true };
     const testText = haveBefore ? preActionState.text : '';
     return matchesText(assert.value, testText)
       ? { wentRed: false, note: `this text check also matches ${baseline} — it may already have been true before the action ran.` }
@@ -5809,7 +5816,7 @@ async function negativeControlCheck(assert, preActionState, diag) {
     if (assert.status == null && !assert.bodyContains) {
       return { wentRed: false, note: 'this assertion only checks that a matching call happened — it would pass even if that call itself failed, since neither a status nor a body check is set.' };
     }
-    if (!expectChange) return { wentRed: null, note: '' };
+    if (!expectChange) return { wentRed: null, note: '', exempt: true };
     if (haveBefore) {
       const priorCalls = (diag.apiCalls || []).slice(0, preActionState.apiCallCount);
       const { matched, call } = await matchNetworkCall(assert, priorCalls);
@@ -5820,7 +5827,7 @@ async function negativeControlCheck(assert, preActionState, diag) {
     return { wentRed: true, note: '' };
   }
 
-  return { wentRed: null, note: '' };
+  return { wentRed: null, note: '', exempt: false };
 }
 
 async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey) {
@@ -6542,6 +6549,18 @@ What is your first action?`,
       let outcome = '';
       let status = 'pass';
       let screenshot = null;
+      // Set only for a verify+assert step. Distinguishes evidence QUALITY
+      // behind an identical "passed" outcome — 'verified' (control ran and
+      // the assertion discriminated), 'unproven' (control ran and it didn't
+      // — also becomes a visible finding), 'exempt' (expectChange:false, the
+      // control was never run at all because it doesn't apply), or null (no
+      // assert / not applicable). "Exempted" and "verified" read identically
+      // in the report (both just a normal WORKS outcome, no demotion — see
+      // the discussion that led here) but are NOT the same amount of
+      // evidence, and that distinction is worth keeping even where it isn't
+      // surfaced, so a later audit of real runs can see how often
+      // expectChange:false actually fires instead of that being invisible.
+      let sanityCheck = null;
 
       // SCOPE GUARD: if the scenario capped the count and we've already acted
       // on that many DISTINCT items, convert this state-changing action into a
@@ -7552,6 +7571,7 @@ Look at this turn's screenshot and the Buttons / Fields lists. Pick something el
                   // counted as a bug — the WORKS verdict for THIS run stands)
                   // so a weak check is visible instead of silently trusted.
                   const nc = await negativeControlCheck(action.assert, preActionState, diag);
+                  sanityCheck = nc.wentRed === true ? 'verified' : nc.wentRed === false ? 'unproven' : nc.exempt ? 'exempt' : null;
                   if (nc.wentRed === false) {
                     result.findings.push(classifyFailure({
                       cause: 'state_assertion_unproven',
@@ -7882,6 +7902,13 @@ RESPOND ONLY JSON: {"confirmed":true,"actual":"the visible failure, plainly","de
         url: (() => { try { return page.url(); } catch { return ''; } })(),
         startedAt: new Date(stepStartedAt).toISOString(),
         durationMs: Date.now() - stepStartedAt,
+        // 'verified' | 'unproven' | 'exempt' | null — evidence quality behind
+        // a verify+assert WORKS outcome. Not shown in the report as its own
+        // badge (an exempt and a verified assert both read as a plain pass,
+        // correctly), but kept on the record so a later audit can see how
+        // often expectChange:false actually fires instead of that being
+        // invisible.
+        ...(sanityCheck ? { sanityCheck } : {}),
         // End-to-End Flow Test milestone tag — set regardless of paymentMode so
         // the report can point at "this is the checkout/booking step" even when
         // the run didn't stop there (test-card mode, or a plain scenario test
