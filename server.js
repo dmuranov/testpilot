@@ -3800,6 +3800,10 @@ async function crawlApp(appId, url, credentials, description, apiKey, onProgress
   // storageState if provided, so SSO/MFA/CAPTCHA-walled apps can be crawled.
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, ...(credentials?.sessionState ? { storageState: credentials.sessionState } : {}) });
   const page = await context.newPage();
+  // Cookies/localStorage came from newContext's storageState above — IndexedDB
+  // (Firebase Auth and similar) needs its own restore path; see
+  // indexedDBRestoreData's comment for why this exists at all.
+  if (credentials?.indexedDB?.length) await page.addInitScript(indexedDBRestoreData, credentials.indexedDB);
 
   // ── SPA HASH-ROUTER AWARENESS ──────────────────────────────────────────────
   // Hash-router apps (Angular HashLocationStrategy, React HashRouter) keep the
@@ -5880,6 +5884,10 @@ async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey)
   // skipping login entirely for SSO/MFA/CAPTCHA-walled apps.
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, ...(credentials?.sessionState ? { storageState: credentials.sessionState } : {}) });
   const page = await context.newPage();
+  // Cookies/localStorage came from newContext's storageState above — IndexedDB
+  // (Firebase Auth and similar) needs its own restore path; see
+  // indexedDBRestoreData's comment for why this exists at all.
+  if (credentials?.indexedDB?.length) await page.addInitScript(indexedDBRestoreData, credentials.indexedDB);
   // #4 PERF: cap the default action timeout. A non-actionable element (e.g. an
   // animated Radix dropdown option) would otherwise hang on Playwright's 30s
   // default per bare click()/fill(); 2-3 stacked = the observed ~100s/step.
@@ -9127,9 +9135,12 @@ app.post('/api/test', async (req, res) => {
   // credentials or pasting a session every run. An explicit pasted
   // sessionState still wins (an operator override); savedSessionRole only
   // fills in when nothing was pasted.
+  let savedIndexedDB = null;
   if (!sessionState && savedSessionRole && appId) {
-    sessionState = resolveSavedSession(appId, savedSessionRole, ownerEmail);
-    if (!sessionState) return res.status(400).json({ error: `No saved login found for role "${savedSessionRole}" on this app — it may have been deleted. Capture it again.`, code: 'SAVED_SESSION_NOT_FOUND' });
+    const resolved = resolveSavedSession(appId, savedSessionRole, ownerEmail);
+    if (!resolved) return res.status(400).json({ error: `No saved login found for role "${savedSessionRole}" on this app — it may have been deleted. Capture it again.`, code: 'SAVED_SESSION_NOT_FOUND' });
+    sessionState = resolved.sessionState;
+    savedIndexedDB = resolved.indexedDB;
   }
 
   // Plan + free-run gate. Look up the user's persisted plan/free_run_used so
@@ -9244,7 +9255,7 @@ app.post('/api/test', async (req, res) => {
     { const _r = testResults.get(testId); if (_r && _r.status === 'queued') _r.status = 'starting'; }
     if (willQueue) emitStep(testId, { type: 'info', message: '▶ A runner just freed up — starting your scan now…' });
     try {
-      await runAgentTest(testId, appKnowledge, scenario, { email, password, allowReplay: true, ownerEmail, ownerUserId, sessionState }, effectiveApiKey);
+      await runAgentTest(testId, appKnowledge, scenario, { email, password, allowReplay: true, ownerEmail, ownerUserId, sessionState, indexedDB: savedIndexedDB }, effectiveApiKey);
     } catch (e) {
       const result = testResults.get(testId);
       if (result) {
@@ -9617,6 +9628,10 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
     ...(credentials?.sessionState ? { storageState: credentials.sessionState } : {}),
   });
   const page = await context.newPage();
+  // Cookies/localStorage came from newContext's storageState above — IndexedDB
+  // (Firebase Auth and similar) needs its own restore path; see
+  // indexedDBRestoreData's comment for why this exists at all.
+  if (credentials?.indexedDB?.length) await page.addInitScript(indexedDBRestoreData, credentials.indexedDB);
 
   // Live error capture. Counters are read before/after each click so a fault
   // is attributed to the control that actually caused it.
@@ -10096,9 +10111,12 @@ app.post('/api/sweep', async (req, res) => {
   if (!ss.ok) return res.status(400).json({ error: ss.error, code: 'SESSION_STATE_INVALID' });
   // Saved login — same resolution as /api/test: an explicit pasted
   // sessionState still wins, savedSessionRole fills in otherwise.
+  let ssIndexedDB = null;
   if (!ss.sessionState && savedSessionRole) {
-    ss.sessionState = resolveSavedSession(appId, savedSessionRole, sessionUser.email);
-    if (!ss.sessionState) return res.status(400).json({ error: `No saved login found for role "${savedSessionRole}" on this app — it may have been deleted. Capture it again.`, code: 'SAVED_SESSION_NOT_FOUND' });
+    const resolved = resolveSavedSession(appId, savedSessionRole, sessionUser.email);
+    if (!resolved) return res.status(400).json({ error: `No saved login found for role "${savedSessionRole}" on this app — it may have been deleted. Capture it again.`, code: 'SAVED_SESSION_NOT_FOUND' });
+    ss.sessionState = resolved.sessionState;
+    ssIndexedDB = resolved.indexedDB;
   }
 
   // One at a time per person.
@@ -10140,7 +10158,7 @@ app.post('/api/sweep', async (req, res) => {
   (async () => {
     await acquireScanSlot();
     try {
-      await runSweep(sweepId, appKnowledge, { email, password, sessionState: ss.sessionState }, { ownerEmail: sessionUser.email, apiKey });
+      await runSweep(sweepId, appKnowledge, { email, password, sessionState: ss.sessionState, indexedDB: ssIndexedDB }, { ownerEmail: sessionUser.email, apiKey });
     } catch (e) {
       const r = sweepResults.get(sweepId);
       if (r) { r.status = 'error'; r.error = e.message; }
@@ -10516,9 +10534,12 @@ app.post('/api/test/flow', async (req, res) => {
   const ss = parseSessionState(rawSessionState);
   if (!ss.ok) return res.status(400).json({ error: ss.error, code: 'SESSION_STATE_INVALID' });
   let sessionState = ss.sessionState;
+  let flowIndexedDB = null;
   if (!sessionState && savedSessionRole) {
-    sessionState = resolveSavedSession(appId, savedSessionRole, user.email);
-    if (!sessionState) return res.status(400).json({ error: `No saved login found for role "${savedSessionRole}" on this app — it may have been deleted. Capture it again.`, code: 'SAVED_SESSION_NOT_FOUND' });
+    const resolved = resolveSavedSession(appId, savedSessionRole, user.email);
+    if (!resolved) return res.status(400).json({ error: `No saved login found for role "${savedSessionRole}" on this app — it may have been deleted. Capture it again.`, code: 'SAVED_SESSION_NOT_FOUND' });
+    sessionState = resolved.sessionState;
+    flowIndexedDB = resolved.indexedDB;
   }
 
   const _sa = assessScenario(scenario);
@@ -10561,7 +10582,7 @@ app.post('/api/test/flow', async (req, res) => {
     if (willQueue) emitStep(testId, { type: 'info', message: '▶ A runner just freed up — starting your flow test now…' });
     try {
       await runAgentTest(testId, appKnowledge, scenario,
-        { email, password, allowReplay: true, ownerEmail: user.email, ownerUserId: user.userId, sessionState, testType: 'flow_e2e', paymentMode },
+        { email, password, allowReplay: true, ownerEmail: user.email, ownerUserId: user.userId, sessionState, indexedDB: flowIndexedDB, testType: 'flow_e2e', paymentMode },
         effectiveApiKey);
       const _r = testResults.get(testId);
       if (_flowCredit.reserved && _r && !['completed', 'completed_with_bugs', 'completed_with_unverified'].includes(_r.status)) refundRunCredit(user.email);
@@ -12102,12 +12123,18 @@ app.post('/api/saved-sessions/:appId/capture', async (req, res) => {
         return;
       }
       const sessionState = await ctx.storageState();
+      // storageState() only sees cookies + localStorage — plenty of auth
+      // SDKs (Firebase Auth among them) persist the actual session in
+      // IndexedDB instead, which is otherwise silently lost on replay. See
+      // extractIndexedDB's comment for the confirmed-live failure this fixes.
+      const indexedDBData = await extractIndexedDB(page);
       const key = savedSessionKey(sessionUser.email, appId, role);
       savedSessions.set(key, {
         owner: canonicalEmail(sessionUser.email),
         appId,
         role,
         sessionStateEnc: encryptSecret(JSON.stringify(sessionState)),
+        ...(indexedDBData.length ? { indexedDBEnc: encryptSecret(JSON.stringify(indexedDBData)) } : {}),
         capturedAt: new Date().toISOString(),
       });
       persistSavedSessions();
@@ -12122,13 +12149,117 @@ app.post('/api/saved-sessions/:appId/capture', async (req, res) => {
   })();
 });
 
-// Resolve a saved (appId, role) to a live sessionState, decrypted server-side
-// only — never sent back to the browser. Learn/Test/Sweep start routes call
-// this when the request carries savedSessionRole instead of raw credentials.
+// Playwright's storageState() only captures cookies + localStorage — no
+// concept of IndexedDB at all. Firebase Auth (and plenty of other modern
+// auth SDKs) persists the actual signed-in session there, not in cookies.
+// Confirmed live on cvmagician.com: a captured saved-session had intact
+// cookies and localStorage and looked perfectly valid, but replaying it into
+// a fresh context still landed logged out, because the IndexedDB data
+// Firebase's SDK actually checks on load was never captured at all. This
+// reads out every object store's records (plus enough schema to recreate
+// each store faithfully) so it can be reinjected on replay via
+// indexedDBRestoreData. Runs inside the page via page.evaluate.
+async function extractIndexedDB(page) {
+  try {
+    return await page.evaluate(async () => {
+      if (!window.indexedDB || !indexedDB.databases) return [];
+      const dbInfos = await indexedDB.databases();
+      const out = [];
+      for (const { name } of dbInfos) {
+        if (!name) continue;
+        try {
+          const db = await new Promise((resolve, reject) => {
+            const req = indexedDB.open(name);
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+            req.onblocked = () => reject(new Error('blocked'));
+          });
+          const stores = [];
+          for (const storeName of Array.from(db.objectStoreNames)) {
+            const tx = db.transaction(storeName, 'readonly');
+            const store = tx.objectStore(storeName);
+            const indexes = Array.from(store.indexNames).map((idxName) => {
+              const idx = store.index(idxName);
+              return { name: idx.name, keyPath: idx.keyPath, unique: idx.unique, multiEntry: idx.multiEntry };
+            });
+            const records = await new Promise((resolve) => {
+              const items = [];
+              const cursorReq = store.openCursor();
+              cursorReq.onsuccess = (e) => {
+                const cursor = e.target.result;
+                if (cursor) {
+                  // Skip anything that won't survive a JSON round-trip
+                  // (e.g. a Blob) rather than losing the whole store.
+                  try { JSON.stringify(cursor.value); items.push({ key: cursor.key, value: cursor.value }); } catch {}
+                  cursor.continue();
+                } else resolve(items);
+              };
+              cursorReq.onerror = () => resolve(items);
+            });
+            stores.push({ name: storeName, keyPath: store.keyPath, autoIncrement: !!store.autoIncrement, indexes, records });
+          }
+          out.push({ name, version: db.version, stores });
+          db.close();
+        } catch { /* one DB failing to read shouldn't lose the others */ }
+      }
+      return out;
+    });
+  } catch { return []; }
+}
+
+// Runs via page.addInitScript, so it executes in the BROWSER before the
+// app's own scripts on every navigation — must be self-contained (only
+// closes over its own `idbData` argument, nothing from server.js scope).
+// Recreates each database (matching the captured version exactly, so it
+// lines up with whatever version the app's own code expects) and replays
+// every record. A sessionStorage marker stops it from re-running on later
+// same-tab navigations within the run, so it doesn't clobber a token the
+// app itself refreshed mid-run with the stale captured one.
+function indexedDBRestoreData(idbData) {
+  try { if (!Array.isArray(idbData) || !idbData.length) return; } catch { return; }
+  try { if (sessionStorage.getItem('__tp_idb_restored__')) return; sessionStorage.setItem('__tp_idb_restored__', '1'); } catch {}
+  if (!window.indexedDB) return;
+  for (const dbInfo of idbData) {
+    try {
+      const openReq = indexedDB.open(dbInfo.name, dbInfo.version);
+      openReq.onupgradeneeded = () => {
+        const db = openReq.result;
+        for (const store of dbInfo.stores) {
+          if (db.objectStoreNames.contains(store.name)) continue;
+          const os = db.createObjectStore(store.name, { keyPath: store.keyPath || undefined, autoIncrement: !!store.autoIncrement });
+          for (const idx of (store.indexes || [])) {
+            try { os.createIndex(idx.name, idx.keyPath, { unique: idx.unique, multiEntry: idx.multiEntry }); } catch {}
+          }
+        }
+      };
+      openReq.onsuccess = () => {
+        const db = openReq.result;
+        for (const store of dbInfo.stores) {
+          try {
+            const tx = db.transaction(store.name, 'readwrite');
+            const os = tx.objectStore(store.name);
+            for (const rec of store.records) {
+              try { if (store.keyPath) os.put(rec.value); else os.put(rec.value, rec.key); } catch {}
+            }
+          } catch {}
+        }
+      };
+    } catch {}
+  }
+}
+
+// Resolve a saved (appId, role) to a live {sessionState, indexedDB}, decrypted
+// server-side only — never sent back to the browser. Learn/Test/Sweep start
+// routes call this when the request carries savedSessionRole instead of raw
+// credentials.
 function resolveSavedSession(appId, role, ownerEmail) {
   const rec = savedSessions.get(savedSessionKey(ownerEmail, appId, role));
   if (!rec) return null;
-  try { return JSON.parse(decryptSecret(rec.sessionStateEnc)); } catch { return null; }
+  let sessionState;
+  try { sessionState = JSON.parse(decryptSecret(rec.sessionStateEnc)); } catch { return null; }
+  let indexedDB = [];
+  try { if (rec.indexedDBEnc) indexedDB = JSON.parse(decryptSecret(rec.indexedDBEnc)); } catch { indexedDB = []; }
+  return { sessionState, indexedDB };
 }
 
 // Capture a reusable Playwright session by logging in once (with the 2FA
