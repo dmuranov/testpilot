@@ -5669,6 +5669,23 @@ const pendingFileUploads = new Map(); // testId -> { resolve, requestId, multipl
 // Spanish coverage itself had real gaps (comprar, proceder al pago).
 const PAYMENT_COMMIT_RE = /\b(pay now|complete purchase|place order|complete order|confirm (order|booking|payment|reservation)|book now|reserve now|finalize booking|submit payment|book\b|reserve\b|checkout|purchase|pay\b|reservar( ahora)?|pagar( ahora)?|comprar( ahora)?|confirmar (pedido|reserva|pago|compra)|finalizar (reserva|compra)|completar (compra|pedido)|proceder al pago|paga( ora)?|acquista( ora)?|prenota( ora)?|conferma (prenotazione|ordine|pagamento|acquisto)|completa (l'ordine|l'acquisto|ordine|acquisto)|effettua( il)? pagamento|procedi al pagamento)\b/i;
 
+// FAIL-SAFE FALLBACK for PAYMENT_COMMIT_RE — confirmed live on YesWeGooo: its
+// real checkout breadcrumb is "Aggiungi opzioni" → "Conferma dati" →
+// "Effettua pagamento", which the phrase list above does happen to catch,
+// but its actual step-3 SUBMIT BUTTON text couldn't be confirmed at all
+// (checkout requires a login this session never created one for) — meaning
+// even careful manual verification only checked a step LABEL, not the
+// button that actually matters. A finite phrase list will always miss
+// wording nobody's checked yet on some future site, and a miss there means
+// the click just goes through — fails OPEN. This is the second, structural
+// signal: once the URL itself looks like the payment step (much harder for
+// an unfamiliar site's wording to dodge on both signals at once than text
+// alone), a click that isn't obviously a safe non-committing action (back,
+// cancel, edit, add an option, log in) is treated as commit-suspicious and
+// stopped too — fails safe instead of silently proceeding.
+const CHECKOUT_URL_HINT_RE = /[/_-](pagamento|payment|pay|paiement|zahlung|kasse|pago)([/?_-]|$)/i;
+const SAFE_NONCOMMIT_CLICK_RE = /\b(back|indietro|atr[aá]s|cancel|annulla|cancelar|edit|modifica|editar|add|aggiungi|añadir|change|cambia|cambiar|login|accedi|log ?in|iniciar sesi[oó]n|sign ?in)\b/i;
+
 // A step taking longer than this is flagged as a friction point in the
 // summary — "slow enough that a real user might drop off here" — distinct
 // from an outright failure. Not user-configurable yet; revisit if real runs
@@ -6630,15 +6647,24 @@ What is your first action?`,
       // above. Only active when the caller opted in via credentials.paymentMode;
       // every other test type (scenario/multirole/interactive/staging) is
       // unaffected since they never set it.
-      if (credentials?.paymentMode === 'stop-before-pay' && action.action === 'click'
-          && PAYMENT_COMMIT_RE.test(String(action.target || ''))) {
-        result.reachedPaymentStep = true;
-        // Scope the claim precisely, in the artifact itself — not just
-        // something the presenter has to remember to caveat out loud. This
-        // proves the journey REACHES the payment step cleanly. It says
-        // NOTHING about whether payment itself would succeed (no charge was
-        // attempted, nothing on the gateway side was exercised).
-        action = { action: 'done', summary: `Reached the final payment/booking step ("${action.target}") and stopped there without submitting, per stop-before-pay mode. This confirms the journey reaches checkout cleanly — it does NOT confirm payment itself would succeed, since no charge was attempted.` };
+      if (credentials?.paymentMode === 'stop-before-pay' && action.action === 'click') {
+        const targetText = String(action.target || '');
+        const textSaysCommit = PAYMENT_COMMIT_RE.test(targetText);
+        // Structural fallback: on a URL that itself looks like the payment
+        // step, an unrecognised button is guilty until proven safe, not the
+        // other way round — see CHECKOUT_URL_HINT_RE's comment.
+        const onPaymentUrl = (() => { try { return CHECKOUT_URL_HINT_RE.test(new URL(page.url()).pathname); } catch { return false; } })();
+        const looksSafe = SAFE_NONCOMMIT_CLICK_RE.test(targetText);
+        if (textSaysCommit || (onPaymentUrl && !looksSafe)) {
+          result.reachedPaymentStep = true;
+          // Scope the claim precisely, in the artifact itself — not just
+          // something the presenter has to remember to caveat out loud. This
+          // proves the journey REACHES the payment step cleanly. It says
+          // NOTHING about whether payment itself would succeed (no charge was
+          // attempted, nothing on the gateway side was exercised).
+          const why = textSaysCommit ? `("${targetText}")` : `(unrecognised button text "${targetText}" on what looks like the payment step by URL)`;
+          action = { action: 'done', summary: `Reached the final payment/booking step ${why} and stopped there without submitting, per stop-before-pay mode. This confirms the journey reaches checkout cleanly — it does NOT confirm payment itself would succeed, since no charge was attempted.` };
+        }
       }
 
       if (action.action !== 'verify' && action.action !== 'done') {
