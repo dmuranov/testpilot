@@ -2140,7 +2140,7 @@ async function dispatchLiveInput(runId, evt) {
 // (frontend sees no difference — same live_frame/live_view_ready events),
 // then switches back once the popup closes (OAuth done or cancelled).
 // Returns an unsubscribe function.
-function watchForPopups(originalPage, runId, ctx) {
+function watchForPopups(originalPage, runId, ctx, hostname) {
   const context = originalPage.context();
   const onNewPage = async (popup) => {
     try {
@@ -2158,12 +2158,16 @@ function watchForPopups(originalPage, runId, ctx) {
         console.log(`[live-view] ${runId} startLiveView(popup) FAILED: ${err.message} — falling back to original page`);
         await startLiveView(originalPage, runId, ctx);
       }
-      ctx.emit({ type: 'live_view_ready', runId });
+      // Keep showing the ORIGINAL app's hostname even while the live view is
+      // actually displaying the OAuth popup (accounts.google.com etc.) — the
+      // box identifies which TEST this handoff belongs to, not which page
+      // happens to be on screen at this instant.
+      ctx.emit({ type: 'live_view_ready', runId, hostname });
       popup.once('close', async () => {
         if (originalPage.isClosed()) return;
         await stopLiveView(runId);
         await startLiveView(originalPage, runId, ctx).catch(err => console.log(`[live-view] ${runId} startLiveView(original, after popup close) FAILED: ${err.message}`));
-        ctx.emit({ type: 'live_view_ready', runId });
+        ctx.emit({ type: 'live_view_ready', runId, hostname });
       });
     } catch (err) { console.log(`[live-view] ${runId} onNewPage handler error: ${err.message}`); }
   };
@@ -2177,20 +2181,30 @@ function watchForPopups(originalPage, runId, ctx) {
 // normal failure return (declined, timed out, or still not logged in after
 // "done" — never loops, matches the 2FA bridge's failure discipline).
 async function tryOAuthHandoff(page, ctx) {
+  // Two runs against DIFFERENT apps can each need a handoff at the same
+  // time (a running test hits a login wall while a separate saved-session
+  // capture is also mid-flight) — both boxes land in the SAME shared
+  // overlay (getLiveOverlayHost, index.html). Confirmed live: a user typed
+  // into one app's login while a completely different app's ("Nexus") own
+  // handoff prompt sat stacked underneath it, unlabeled — nothing on either
+  // box said which app it was for. Every event below carries the hostname
+  // so the frontend can label its box unambiguously.
+  const hostname = (() => { try { return new URL(page.url()).hostname; } catch { return ''; } })();
   ctx.emit({
     type: 'awaiting_oauth_handoff',
     runId: ctx.runId,
-    message: 'Login failed and this page also offers a "Sign in with Google" (or similar) button — this account may only work that way. Want to take over and log in yourself? TestPilot picks back up right after.',
+    hostname,
+    message: `Login failed on ${hostname || 'this app'} and this page also offers a "Sign in with Google" (or similar) button — this account may only work that way. Want to take over and log in yourself? TestPilot picks back up right after.`,
   });
   try {
     const decision = await awaitLiveViewSignal(ctx.runId, { timeoutMs: 60 * 1000 });
     if (decision?.action !== 'accept') return null;
   } catch { return null; } // declined, superseded, or nobody responded within 60s
 
-  const unwatchPopups = watchForPopups(page, ctx.runId, ctx);
+  const unwatchPopups = watchForPopups(page, ctx.runId, ctx, hostname);
   try {
     await startLiveView(page, ctx.runId, ctx);
-    ctx.emit({ type: 'live_view_ready', runId: ctx.runId });
+    ctx.emit({ type: 'live_view_ready', runId: ctx.runId, hostname });
     await awaitLiveViewSignal(ctx.runId, { timeoutMs: 10 * 60 * 1000 }); // "I'm done" signal
   } catch {
     return null; // timed out waiting for "done"

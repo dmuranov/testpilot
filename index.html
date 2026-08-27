@@ -3722,8 +3722,8 @@ function showCaptureLoginForm(appId) {
       let d; try { d = JSON.parse(ev.data); } catch { return; }
       const runId = d.runId || captureId;
       if (d.type === 'awaiting_2fa') { show2faPrompt(runId, d.message); return; }
-      if (d.type === 'awaiting_oauth_handoff') { showOAuthHandoffPrompt(runId, d.message); return; }
-      if (d.type === 'live_view_ready') { openLiveView(runId); return; }
+      if (d.type === 'awaiting_oauth_handoff') { showOAuthHandoffPrompt(runId, d.message, d.hostname); return; }
+      if (d.type === 'live_view_ready') { openLiveView(runId, d.hostname); return; }
       if (d.type === 'live_frame') { renderLiveFrame(runId, d.data); return; }
       if (d.type === 'done') { tpToast(d.message || 'Login saved'); delete state.savedLogins[appId]; loadSavedLogins(appId); closeLiveOverlay(runId); es.close(); }
       if (d.type === 'error') { tpToast(d.message || 'Capture failed', 'error'); closeLiveOverlay(runId); es.close(); }
@@ -3894,8 +3894,8 @@ function streamSweep(sweepId) {
     // log push, same reason as the other streams — live_frame in particular
     // would otherwise flood the log with raw base64 on every frame.
     if (d.type === 'awaiting_2fa') { show2faPrompt(d.runId, d.message); return; }
-    if (d.type === 'awaiting_oauth_handoff') { showOAuthHandoffPrompt(d.runId, d.message); return; }
-    if (d.type === 'live_view_ready') { openLiveView(d.runId); return; }
+    if (d.type === 'awaiting_oauth_handoff') { showOAuthHandoffPrompt(d.runId, d.message, d.hostname); return; }
+    if (d.type === 'live_view_ready') { openLiveView(d.runId, d.hostname); return; }
     if (d.type === 'live_frame') { renderLiveFrame(d.runId, d.data); return; }
     state.sweep.log = state.sweep.log || [];
     if (d.message) state.sweep.log.push(d);
@@ -4653,8 +4653,8 @@ async function startLearn() {
             // single frame (this is what happened before this fix — a wall
             // of base64 flooding the crawl log). Handle and skip entirely,
             // same shape as the /api/test stream's handling below.
-            if (data.type === 'awaiting_oauth_handoff') { showOAuthHandoffPrompt(data.runId, data.message); continue; }
-            if (data.type === 'live_view_ready') { openLiveView(data.runId); continue; }
+            if (data.type === 'awaiting_oauth_handoff') { showOAuthHandoffPrompt(data.runId, data.message, data.hostname); continue; }
+            if (data.type === 'live_view_ready') { openLiveView(data.runId, data.hostname); continue; }
             if (data.type === 'live_frame') { renderLiveFrame(data.runId, data.data); continue; }
 
             state.learnProgress.push(data);
@@ -4751,7 +4751,14 @@ function getLiveOverlayHost() {
   if (!overlay) {
     overlay = document.createElement('div');
     overlay.id = 'tp-live-overlay';
-    overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:flex-start;justify-content:center;overflow:auto;background:rgba(0,0,0,0.65);padding:24px';
+    // flex-direction:column so two simultaneous handoffs (a running test
+    // hits a login wall while a separate saved-session capture is ALSO
+    // mid-flight, each for a DIFFERENT app) stack cleanly top-to-bottom.
+    // Confirmed live: the default row layout put a 1280px-wide live-view
+    // canvas for one app next to another app's prompt box, overlapping and
+    // crowding each other — the user typed into the wrong one because
+    // neither was labeled and they visually blurred together.
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;gap:16px;overflow:auto;background:rgba(0,0,0,0.65);padding:24px';
     document.body.appendChild(overlay);
   }
   return overlay;
@@ -4762,12 +4769,16 @@ function closeLiveOverlay(runId) {
   if (overlay && !overlay.firstElementChild) overlay.remove();
 }
 
-function showOAuthHandoffPrompt(runId, message) {
+function showOAuthHandoffPrompt(runId, message, hostname) {
   if (!runId || document.getElementById('oauth-handoff-' + runId)) return;
   const box = document.createElement('div');
   box.id = 'oauth-handoff-' + runId;
   box.style.cssText = 'width:100%;max-width:720px;margin:auto;padding:14px;border:1px solid var(--accent,#6c5ce7);border-radius:8px;background:var(--bg-elevated,#15151c)';
+  // A visible app-name badge, not just prose in the message — scannable at a
+  // glance when more than one handoff is stacked at once (see getLiveOverlayHost).
+  const badge = hostname ? `<div style="display:inline-block;font-family:'DM Mono',monospace;font-size:11px;color:var(--accent,#6c5ce7);background:rgba(108,92,231,0.12);border-radius:4px;padding:2px 8px;margin-bottom:8px">${tpEsc(hostname)}</div>` : '';
   box.innerHTML = `
+    ${badge}
     <div style="font-weight:600;margin-bottom:10px">🔑 ${message || 'Login failed — this app may need Google sign-in'}</div>
     <div style="display:flex;gap:8px">
       <button id="oauth-take-${runId}" class="btn btn-primary">Take over &amp; log in myself</button>
@@ -4801,11 +4812,16 @@ function showOAuthHandoffPrompt(runId, message) {
 // wrong point on the real page (confirmed live: clicking "Accept All" on a
 // cookie banner did nothing when this was 1024x768 against a 1280x800 page).
 const LIVE_VIEW_W = 1280, LIVE_VIEW_H = 800;
-function openLiveView(runId) {
+function openLiveView(runId, hostname) {
   const box = document.getElementById('oauth-handoff-' + runId);
   if (!box) return;
   box.style.maxWidth = LIVE_VIEW_W + 'px'; // was 720px, sized for the prompt's buttons — too narrow for the canvas
+  // Same app-name badge as showOAuthHandoffPrompt — stays labeled once this
+  // box turns into the live canvas, still critical when a second handoff for
+  // a DIFFERENT app is stacked right below it (getLiveOverlayHost).
+  const badge = hostname ? `<div style="display:inline-block;font-family:'DM Mono',monospace;font-size:11px;color:var(--accent,#6c5ce7);background:rgba(108,92,231,0.12);border-radius:4px;padding:2px 8px;margin-bottom:8px">${tpEsc(hostname)}</div>` : '';
   box.innerHTML = `
+    ${badge}
     <div style="font-weight:600;margin-bottom:8px">🔑 Log in yourself below, then click Done.</div>
     <canvas id="live-canvas-${runId}" width="${LIVE_VIEW_W}" height="${LIVE_VIEW_H}" tabindex="0"
       style="width:100%;max-width:${LIVE_VIEW_W}px;border:1px solid var(--border);border-radius:4px;cursor:pointer;outline:none;background:#000"></canvas>
@@ -5012,11 +5028,11 @@ async function runTest() {
           return;
         }
         if (data.type === 'awaiting_oauth_handoff') {
-          showOAuthHandoffPrompt(data.runId, data.message);
+          showOAuthHandoffPrompt(data.runId, data.message, data.hostname);
           return;
         }
         if (data.type === 'live_view_ready') {
-          openLiveView(data.runId);
+          openLiveView(data.runId, data.hostname);
           return;
         }
         if (data.type === 'live_frame') {
