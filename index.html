@@ -3792,6 +3792,9 @@ function renderSweep() {
     </div>` : ''}
 
     ${items.length ? `
+    <div style="display:flex;justify-content:flex-end;margin-top:14px">
+      <button class="btn btn-ghost btn-sm" onclick="downloadSweepReport()">📥 Download Report</button>
+    </div>
     ${s.coverage ? `
     <div class="card" style="margin-top:14px;border-left:3px solid ${s.coverage.pagesChecked < s.coverage.pagesInApp ? '#f59e0b' : 'var(--green)'}">
       <div style="padding:12px 14px;font-size:13px;line-height:1.6">
@@ -6714,6 +6717,137 @@ ${othersHtml}` : ''}
 </div>
 
 
+</body>
+</html>`;
+
+  const blob = new Blob([html], { type: 'text/html' });
+  const url = URL.createObjectURL(blob);
+  const win = window.open(url, '_blank');
+  if (win) setTimeout(() => win.print(), 1500);
+}
+
+// Check Everything had no download path at all — only the Test/Security
+// reports did. Same blob-open-print pattern as downloadTestReport, same
+// report styling, adapted for a sweep's shape (items across pages, coverage,
+// grouped defects) instead of a linear step log.
+function downloadSweepReport() {
+  const s = state.sweep;
+  if (!s || !(s.items || []).length) return;
+  const app = (state.apps || []).find(a => a.appId === s.appId) || {};
+  const appName = app.summary?.appName || app.url || s.appId || 'App';
+  const scanDate = new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' });
+  const items = s.items || [];
+  const counts = items.reduce((a, i) => { a[i.verdict] = (a[i.verdict] || 0) + 1; return a; }, {});
+  const statusColor = (counts.broken || 0) > 0 || (counts.crashed || 0) > 0 ? '#dc2626' : '#16a34a';
+  const badgeLabel = { works: '✅ works', broken: '❌ broken', crashed: '❌ crashed', no_effect: '⚠️ nothing happened', skipped: '⏭ skipped', unreachable: '⏭ unreachable' };
+
+  const defectsHtml = (s.defects || []).map((d, i) => `
+    <div class="vuln-card">
+      <div class="vuln-header">
+        <span class="vuln-id">ISSUE-${String(i + 1).padStart(2, '0')}</span>
+        <span class="vuln-title">${d.verdict === 'crashed' ? 'CRASHED — ' : ''}${escapeHtml(d.detail || '')}</span>
+      </div>
+      <div class="vuln-desc">Seen on ${d.controls} control${d.controls === 1 ? '' : 's'}, page${d.pages.length === 1 ? '' : 's'}: ${d.pages.map(p => escapeHtml(p)).join(', ')}${d.appWide ? ' — happens across the app, not caused by any one button' : ''}</div>
+      ${d.evidence ? `<div class="vuln-screenshot">${escapeHtml(d.evidence)}</div>` : ''}
+    </div>`).join('');
+
+  const itemsHtml = items.map(i => `<tr class="step-row ${i.verdict === 'works' ? 'pass' : (i.verdict === 'broken' || i.verdict === 'crashed') ? 'fail' : 'bug'}">
+    <td class="step-num">${escapeHtml(i.kind || '')}</td>
+    <td class="step-action">${escapeHtml(i.label || '')}<br><span class="step-meta">${escapeHtml(i.page || '')}</span></td>
+    <td class="step-status" style="width:auto;white-space:nowrap">${badgeLabel[i.verdict] || i.verdict}</td>
+    <td class="step-outcome">${escapeHtml(i.detail || '')}${i.evidence ? `<br><span class="step-meta">${escapeHtml(i.evidence)}</span>` : ''}</td>
+  </tr>`).join('');
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>TestPilot Check Everything Report — ${appName}</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 13px; color: #1a1a1a; background: #fff; padding: 48px; max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 22px; font-weight: 800; color: #080808; margin-bottom: 4px; }
+  h2 { font-size: 15px; font-weight: 700; color: #080808; margin: 32px 0 12px; padding-bottom: 6px; border-bottom: 2px solid #c8f040; }
+  .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 32px; padding-bottom: 24px; border-bottom: 3px solid #080808; }
+  .logo { font-size: 24px; font-weight: 900; letter-spacing: -1px; }
+  .logo span { color: #c8f040; background: #080808; padding: 2px 6px; }
+  .meta-table { width: 100%; border-collapse: collapse; margin-bottom: 24px; }
+  .meta-table td { padding: 7px 12px; border: 1px solid #e5e5e5; font-size: 13px; }
+  .meta-table td:first-child { font-weight: 600; background: #f9f9f9; width: 140px; color: #555; }
+  .stats { display: flex; gap: 16px; margin: 20px 0 28px; }
+  .stat { flex: 1; text-align: center; padding: 16px; border: 1px solid #e5e5e5; border-radius: 4px; }
+  .stat-num { font-size: 28px; font-weight: 800; }
+  .stat-label { font-size: 11px; color: #666; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat.green .stat-num { color: #16a34a; }
+  .stat.red .stat-num { color: #dc2626; }
+  .stat.yellow .stat-num { color: #d97706; }
+  .summary-box { background: #f9fafb; border-left: 4px solid #c8f040; padding: 16px 20px; margin-bottom: 24px; font-size: 13px; line-height: 1.8; color: #333; }
+  .vuln-card { border: 1px solid #fca5a5; border-radius: 4px; margin-bottom: 16px; overflow: hidden; }
+  .vuln-header { display: flex; align-items: center; gap: 12px; padding: 12px 16px; background: #fff5f5; border-bottom: 1px solid #fca5a5; }
+  .vuln-id { font-weight: 800; font-size: 12px; font-family: monospace; color: #dc2626; }
+  .vuln-title { font-weight: 600; font-size: 13px; flex: 1; }
+  .vuln-desc { padding: 12px 16px; line-height: 1.6; color: #444; }
+  .vuln-screenshot { padding: 0 16px 12px; font-size: 11px; color: #888; }
+  .no-vulns { background: #f0fdf4; border: 1px solid #86efac; border-radius: 4px; padding: 16px 20px; color: #16a34a; font-weight: 600; }
+  .steps-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .steps-table th { background: #080808; color: #c8f040; padding: 8px 12px; text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .steps-table td { padding: 8px 12px; border-bottom: 1px solid #f0f0f0; vertical-align: top; }
+  .step-row.pass { background: #fff; }
+  .step-row.fail { background: #fff5f5; }
+  .step-row.bug { background: #fffbeb; }
+  .step-num { font-family: monospace; color: #999; width: 70px; }
+  .step-action { font-family: monospace; font-size: 11px; max-width: 260px; }
+  .step-meta { color: #888; font-size: 10px; }
+  .step-outcome { color: #555; max-width: 280px; }
+  .footer { margin-top: 48px; padding-top: 20px; border-top: 1px solid #e5e5e5; display: flex; justify-content: space-between; align-items: center; color: #999; font-size: 11px; }
+  .footer-logo { font-weight: 800; font-size: 14px; color: #080808; }
+  .footer-logo span { color: #c8f040; background: #080808; padding: 1px 4px; }
+  @media print { body { padding: 24px; } }
+</style>
+</head>
+<body>
+<div class="header">
+  <div>
+    <div class="logo">Test<span>Pilot</span></div>
+    <div style="font-size:12px;color:#666;margin-top:4px">Check Everything Report</div>
+  </div>
+  <div style="text-align:right">
+    <div style="font-size:20px;font-weight:800;color:${statusColor}">${(counts.broken || 0) + (counts.crashed || 0)} BROKEN</div>
+    <div style="font-size:12px;color:#666;margin-top:2px">${scanDate}</div>
+  </div>
+</div>
+
+<table class="meta-table">
+  <tr><td>App</td><td>${escapeHtml(appName)}</td></tr>
+  <tr><td>URL</td><td>${escapeHtml(app.url || '—')}</td></tr>
+  <tr><td>Date</td><td>${scanDate}</td></tr>
+  <tr><td>Controls Checked</td><td>${items.length}</td></tr>
+</table>
+
+<div class="stats">
+  <div class="stat green"><div class="stat-num">${counts.works || 0}</div><div class="stat-label">Working</div></div>
+  <div class="stat red"><div class="stat-num">${(counts.broken || 0) + (counts.crashed || 0)}</div><div class="stat-label">Broken</div></div>
+  <div class="stat yellow"><div class="stat-num">${counts.no_effect || 0}</div><div class="stat-label">Nothing Happened</div></div>
+  <div class="stat"><div class="stat-num">${(counts.skipped || 0) + (counts.unreachable || 0)}</div><div class="stat-label">Skipped</div></div>
+</div>
+
+${s.coverage ? `<div class="summary-box">${s.coverage.pagesChecked < s.coverage.pagesInApp
+  ? `<strong>This was not the whole app.</strong> Checked ${s.coverage.controlsChecked} controls on ${s.coverage.pagesChecked} of ${s.coverage.pagesInApp} pages, then stopped because ${escapeHtml(s.coverage.stoppedBecause)}.`
+  : `Checked ${s.coverage.controlsChecked} controls across all ${s.coverage.pagesInApp} pages of the app.`}</div>` : ''}
+
+<h2>What Went Wrong (${(s.defects || []).length})</h2>
+${(s.defects || []).length > 0 ? defectsHtml : `<div class="no-vulns">✓ No problems found in this check.</div>`}
+
+<h2>Every Control It Touched</h2>
+<table class="steps-table">
+  <thead><tr><th>Kind</th><th>Control / Page</th><th>Result</th><th>Detail</th></tr></thead>
+  <tbody>${itemsHtml}</tbody>
+</table>
+
+<div class="footer">
+  <div class="footer-logo">Test<span>Pilot</span></div>
+  <div>Generated automatically by TestPilot — AI-powered testing for any web app · testpilotapp.dev</div>
+</div>
 </body>
 </html>`;
 

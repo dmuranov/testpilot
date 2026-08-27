@@ -5871,12 +5871,20 @@ async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey)
   });
   page.on('requestfailed', (req) => {
     try {
+      // net::ERR_ABORTED — the browser cancelled this itself, almost always
+      // navigation superseding a speculative/prefetch request (e.g. Next.js's
+      // RSC prefetch on every <Link>). Not real evidence of anything broken;
+      // see the identical guard in runSweep's requestfailed handler for the
+      // confirmed-live false-positive this caused (21/30 controls flagged
+      // "broken" in one cvmagician.com sweep, none actually broken).
+      const failure = (req.failure() && req.failure().errorText) || '';
+      if (failure === 'net::ERR_ABORTED') return;
       if (diag.failedRequests.length >= DIAG_CAP) return;
       const u = req.url();
       if (u.startsWith('data:') || u.startsWith('blob:')) return;
       const key = 'F|' + req.method() + '|' + u;
       if (diagSeenNet.has(key)) return; diagSeenNet.add(key);
-      diag.failedRequests.push({ step: diagStep(), method: req.method(), url: u.slice(0, 300), failure: (req.failure() && req.failure().errorText) || '', firstParty: diagFirstParty(u) });
+      diag.failedRequests.push({ step: diagStep(), method: req.method(), url: u.slice(0, 300), failure, firstParty: diagFirstParty(u) });
     } catch {}
   });
   page.on('response', (resp) => {
@@ -9542,7 +9550,21 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
     } catch {}
   });
   page.on('pageerror', (e) => { if (diag.console.length < 300) diag.console.push('pageerror: ' + String(e && e.message).slice(0, 250)); });
-  page.on('requestfailed', (r) => { try { if (firstParty(r.url()) && diag.failed.length < 300) diag.failed.push(r.url().slice(0, 200)); } catch {} });
+  page.on('requestfailed', (r) => {
+    try {
+      // net::ERR_ABORTED means the BROWSER cancelled this request — almost
+      // always a benign side effect of navigation superseding a speculative
+      // fetch, not a real failure. Confirmed live: Next.js fires an RSC
+      // prefetch (?_rsc=...) on essentially every <Link>, which routinely
+      // gets aborted the instant the real navigation supersedes it — one
+      // cvmagician.com sweep flagged 21 of 30 controls "broken" this way,
+      // none of which were actually broken (manually confirmed working).
+      // Only a request that failed to even REACH the server (DNS, refused,
+      // timeout, TLS) is real evidence something's wrong.
+      if ((r.failure()?.errorText || '') === 'net::ERR_ABORTED') return;
+      if (firstParty(r.url()) && diag.failed.length < 300) diag.failed.push(r.url().slice(0, 200));
+    } catch {}
+  });
   page.on('response', (r) => { try { if (r.status() >= 400 && firstParty(r.url()) && diag.http.length < 300) diag.http.push(r.status() + ' ' + r.url().slice(0, 180)); } catch {} });
   // A target="_blank" link opens a NEW tab, so the page under test never
   // changes and an honest link looked dead. Count what the context opens —
