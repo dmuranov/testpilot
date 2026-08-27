@@ -5762,7 +5762,18 @@ const PAYMENT_COMMIT_RE = /\b(pay now|complete purchase|place order|complete ord
 // alone), a click that isn't obviously a safe non-committing action (back,
 // cancel, edit, add an option, log in) is treated as commit-suspicious and
 // stopped too — fails safe instead of silently proceeding.
-const CHECKOUT_URL_HINT_RE = /[/_-](pagamento|payment|pay|paiement|zahlung|kasse|pago)([/?_-]|$)/i;
+// "checkout" was missing from this list entirely — confirmed live on
+// practicesoftwaretesting.com's real /checkout URL (Angular Toolshop demo):
+// its Spanish payment step's actual commit button is a bare "Confirmar",
+// with no trailing object noun ("pedido"/"pago"/"compra"), which
+// PAYMENT_COMMIT_RE's confirmar (pedido|reserva|pago|compra) alternative
+// deliberately does not match a bare "confirm" (a loose bare-confirm text
+// match risks firing early on unrelated confirm dialogs elsewhere in a
+// flow). With both signals silent the guard failed open on a real site.
+// /checkout is the single most common English checkout URL slug (default on
+// Shopify, WooCommerce, Sylius, OpenCart, and this app) — its absence here
+// was the actual gap, not the text list.
+const CHECKOUT_URL_HINT_RE = /[/_-](pagamento|payment|pay|paiement|zahlung|kasse|pago|checkout)([/?_-]|$)/i;
 const SAFE_NONCOMMIT_CLICK_RE = /\b(back|indietro|atr[aá]s|cancel|annulla|cancelar|edit|modifica|editar|add|aggiungi|añadir|change|cambia|cambiar|login|accedi|log ?in|iniciar sesi[oó]n|sign ?in)\b/i;
 
 // A step taking longer than this is flagged as a friction point in the
