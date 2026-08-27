@@ -10477,8 +10477,14 @@ app.post('/api/test/multirole', async (req, res) => {
   }
   let freeRunBurned = false;
   if (user.plan === 'free') {
+    // Check the in-memory session (user IS the live sessions-Map object for
+    // the cookie path, mutated synchronously on burn — see below) OR the DB
+    // row. Checking only the DB row was a real bug: its write is
+    // fire-and-forget (not awaited, so a fast second request could race
+    // ahead of it) — confirmed live by firing two multirole requests back to
+    // back and watching both return 200 before this fix.
     const dbUser = await getUserByEmail(user.email);
-    if (dbUser?.free_run_used) {
+    if (user.free_run_used || dbUser?.free_run_used) {
       return res.status(402).json({ error: 'Free run already used. Choose a plan to continue.', code: 'FREE_RUN_USED' });
     }
   }
@@ -10647,8 +10653,14 @@ app.post('/api/test/flow', async (req, res) => {
   }
   let freeRunBurned = false;
   if (user.plan === 'free') {
+    // Check the in-memory session (user IS the live sessions-Map object for
+    // the cookie path, mutated synchronously on burn — see below) OR the DB
+    // row. Checking only the DB row was a real bug: its write is
+    // fire-and-forget (not awaited, so a fast second request could race
+    // ahead of it) — confirmed live by firing two multirole requests back to
+    // back and watching both return 200 before this fix.
     const dbUser = await getUserByEmail(user.email);
-    if (dbUser?.free_run_used) {
+    if (user.free_run_used || dbUser?.free_run_used) {
       return res.status(402).json({ error: 'Free run already used. Choose a plan to continue.', code: 'FREE_RUN_USED' });
     }
   }
@@ -11066,13 +11078,16 @@ app.post('/api/chat/start', async (req, res) => {
   // start (no refund path): a live chat session has no "TestPilot itself
   // failed" moment to refund against the way a discrete run does.
   if (user.plan === 'free') {
+    // Check the in-memory session too — see the identical comment on the
+    // multirole gate for why the DB-only check was a real, confirmed bug.
     const dbUser = await getUserByEmail(user.email);
-    if (dbUser?.free_run_used) {
+    if (user.free_run_used || dbUser?.free_run_used) {
       return res.status(402).json({ error: 'Free run already used. Choose a plan to continue.', code: 'FREE_RUN_USED' });
     }
   } else if (user.plan === 'onerun') {
     const dbUser = await getUserByEmail(user.email);
-    if (Number(dbUser?.credits || 0) <= 0) {
+    const liveCredits = user.credits != null ? user.credits : dbUser?.credits;
+    if (Number(liveCredits || 0) <= 0) {
       return res.status(402).json({ error: 'Your one-time run has been used. Buy another run, or subscribe to keep testing.', code: 'ONERUN_EXHAUSTED' });
     }
   }
