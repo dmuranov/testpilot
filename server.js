@@ -5661,13 +5661,40 @@ const pendingFileUploads = new Map(); // testId -> { resolve, requestId, multipl
 // apps commonly label the final CTA just "Book 3 Seats" or "Reserve Table",
 // not "Book Now". Same reasoning SWEEP_COMMIT_RE already uses for its own
 // bare `book\b`/`reservar` alternatives (server.js's deterministic sweep).
-const PAYMENT_COMMIT_RE = /\b(pay now|complete purchase|place order|complete order|confirm (order|booking|payment|reservation)|book now|reserve now|finalize booking|submit payment|book\b|reserve\b|checkout|purchase|pay\b|reservar( ahora)?|pagar( ahora)?|confirmar (pedido|reserva|pago)|finalizar reserva|completar (compra|pedido))\b/i;
+// A guard that fails open is worse than no guard — it silently stops
+// protecting the run the instant the button text isn't in a language it
+// covers, while the caller keeps believing stop-before-pay mode is active.
+// Was English + partial Spanish only; ITALIAN was entirely missing (e.g.
+// "Paga ora", "Conferma prenotazione") before this app was even tested, and
+// Spanish coverage itself had real gaps (comprar, proceder al pago).
+const PAYMENT_COMMIT_RE = /\b(pay now|complete purchase|place order|complete order|confirm (order|booking|payment|reservation)|book now|reserve now|finalize booking|submit payment|book\b|reserve\b|checkout|purchase|pay\b|reservar( ahora)?|pagar( ahora)?|comprar( ahora)?|confirmar (pedido|reserva|pago|compra)|finalizar (reserva|compra)|completar (compra|pedido)|proceder al pago|paga( ora)?|acquista( ora)?|prenota( ora)?|conferma (prenotazione|ordine|pagamento|acquisto)|completa (l'ordine|l'acquisto|ordine|acquisto)|effettua( il)? pagamento|procedi al pagamento)\b/i;
 
 // A step taking longer than this is flagged as a friction point in the
 // summary — "slow enough that a real user might drop off here" — distinct
 // from an outright failure. Not user-configurable yet; revisit if real runs
 // show this needs to vary by app/step type.
 const FRICTION_THRESHOLD_MS = 15000;
+
+// Blazor Server's default reconnect UI when its SignalR circuit drops — a
+// framework convention (id/class prefix `components-reconnect-*`), not
+// something most apps customize. Distinguishing this from a real broken page
+// matters: a vision judge or a dom_text_contains assert has no way to tell
+// "the app rendered wrong" from "TestPilot's own connection to a Blazor
+// Server app's WebSocket dropped for a moment" — both just look like a
+// frozen/wrong screen. The latter is an environment blip, not an app defect,
+// and Blazor Server apps in particular route ALL interactivity (not just
+// data) through that same circuit, so a verify landing mid-reconnect is a
+// real, not-hypothetical risk on a Blazor Server target.
+async function detectBlazorReconnectOverlay(page) {
+  try {
+    return await page.evaluate(() => {
+      const el = document.getElementById('components-reconnect-modal');
+      if (!el) return false;
+      const cls = el.className || '';
+      return /components-reconnect-(show|failed|rejected)/.test(cls);
+    });
+  } catch { return false; }
+}
 
 // A pattern the agent sends might not be a valid regex, or might just be
 // intended as a plain substring — never let a malformed pattern throw and
@@ -6606,7 +6633,12 @@ What is your first action?`,
       if (credentials?.paymentMode === 'stop-before-pay' && action.action === 'click'
           && PAYMENT_COMMIT_RE.test(String(action.target || ''))) {
         result.reachedPaymentStep = true;
-        action = { action: 'done', summary: `Reached the final payment/booking step ("${action.target}") — stopped here without submitting, per stop-before-pay mode. The flow up to checkout appears to work.` };
+        // Scope the claim precisely, in the artifact itself — not just
+        // something the presenter has to remember to caveat out loud. This
+        // proves the journey REACHES the payment step cleanly. It says
+        // NOTHING about whether payment itself would succeed (no charge was
+        // attempted, nothing on the gateway side was exercised).
+        action = { action: 'done', summary: `Reached the final payment/booking step ("${action.target}") and stopped there without submitting, per stop-before-pay mode. This confirms the journey reaches checkout cleanly — it does NOT confirm payment itself would succeed, since no charge was attempted.` };
       }
 
       if (action.action !== 'verify' && action.action !== 'done') {
@@ -7562,7 +7594,38 @@ Look at this turn's screenshot and the Buttons / Fields lists. Pick something el
             // Also scroll to top so the screenshot starts from a consistent
             // position; otherwise verify might miss what's above the fold.
             await page.evaluate(() => window.scrollTo({ top: 0, behavior: 'auto' })).catch(() => {});
-            await page.waitForTimeout(3000);
+            await page.waitForTimeout(1500);
+            // Extra settle for server-round-trip UIs (Blazor Server/SignalR
+            // and similar — a click triggers a WebSocket round-trip rather
+            // than a plain HTTP request networkidle would catch, since
+            // individual WS message frames aren't tracked as network
+            // requests). Take two DOM snapshots a beat apart; if the page is
+            // STILL changing, give it one more beat before screenshotting
+            // instead of capturing mid-update and reading a transitional
+            // state as broken — this is the top flakiness risk on that kind
+            // of target, not an edge case.
+            try {
+              const before = await page.evaluate(() => document.body.innerText.length + '|' + document.body.innerText.slice(0, 200));
+              await page.waitForTimeout(800);
+              const after = await page.evaluate(() => document.body.innerText.length + '|' + document.body.innerText.slice(0, 200));
+              if (before !== after) await page.waitForTimeout(1500);
+            } catch { /* best-effort — fall through to the screenshot either way */ }
+            // Blazor Server's SignalR circuit can drop and reconnect within a
+            // couple seconds — normal, not an app defect. Give it a moment to
+            // recover before treating whatever's on screen as evidence.
+            if (await detectBlazorReconnectOverlay(page)) {
+              await page.waitForTimeout(3000);
+              if (await detectBlazorReconnectOverlay(page)) {
+                const stuckShot = await takeScreenshot(page, `${testId}-verify-${stepNum}-reconnect`);
+                outcome = `TestPilot's connection to the app dropped (Blazor Server reconnect overlay) and did not recover in time — this is a connectivity issue, not a confirmed app defect.`;
+                result.findings.push(classifyFailure({
+                  cause: 'api_error', step: stepNum, check: action.check,
+                  description: 'Verify landed on a Blazor Server reconnect overlay (dropped SignalR circuit) that did not clear within the settle window.',
+                  screenshot: stuckShot,
+                }));
+                break;
+              }
+            }
             const verifyScreenshot = await takeScreenshot(page, `${testId}-verify-${stepNum}`);
 
             // STRUCTURED assertion path — a URL/DOM-text/network-response check
