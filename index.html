@@ -7107,7 +7107,7 @@ init();
     </div>
     <!-- Footer -->
     <div style="padding:16px 24px;border-top:1px solid rgba(200,240,64,0.08);display:flex;gap:10px;flex-shrink:0;background:#0f0f0f">
-      <button onclick="declineTerms()" style="flex:1;background:transparent;border:1px solid #333;color:#666;font-family:'Syne',sans-serif;font-weight:600;font-size:13px;padding:12px;border-radius:2px;cursor:pointer">
+      <button onclick="declineTerms()" style="flex:1;background:transparent;border:1px solid #333;color:#d8d8d8;font-family:'Syne',sans-serif;font-weight:600;font-size:13px;padding:12px;border-radius:2px;cursor:pointer">
         Decline & Logout
       </button>
       <button id="terms-accept-btn" onclick="acceptTerms()" disabled style="flex:2;background:#333;border:none;color:#555;font-family:'Syne',sans-serif;font-weight:800;font-size:13px;padding:12px;border-radius:2px;cursor:not-allowed;transition:all 0.3s">
@@ -7231,7 +7231,7 @@ function tpConfirm(message) {
   <div id="tour-bubble" style="position:absolute;pointer-events:auto;background:#111;border:1px solid rgba(200,240,64,0.3);border-radius:4px;padding:16px 18px;width:300px;box-shadow:0 14px 44px rgba(0,0,0,0.65)">
     <div id="tour-count" style="font-family:'DM Mono',monospace;font-size:10px;color:#c8f040;letter-spacing:1px;margin-bottom:7px"></div>
     <div id="tour-title" style="font-family:'Syne',sans-serif;font-size:14px;font-weight:800;color:#f4f2ee;margin-bottom:6px"></div>
-    <div id="tour-text" style="font-family:'DM Mono',monospace;font-size:11.5px;color:#9a9a9a;line-height:1.65"></div>
+    <div id="tour-text" style="font-family:'DM Mono',monospace;font-size:11.5px;color:#d8d8d8;line-height:1.65"></div>
     <div style="display:flex;align-items:center;justify-content:space-between;margin-top:14px">
       <button onclick="endTour(true)" style="background:transparent;border:1px solid #3a3a3a;color:#999;font-family:'DM Mono',monospace;font-size:10.5px;padding:6px 12px;border-radius:2px;cursor:pointer" onmouseover="this.style.borderColor='#666';this.style.color='#ddd'" onmouseout="this.style.borderColor='#3a3a3a';this.style.color='#999'">Skip guide</button>
       <button id="tour-next" onclick="tourNext()" style="background:#c8f040;border:none;color:#080808;font-family:'Syne',sans-serif;font-weight:700;font-size:11.5px;padding:7px 14px;border-radius:2px;cursor:pointer">Next &rarr;</button>
@@ -7658,10 +7658,10 @@ function showAppReady(message, guide) {
         (ok ? 'background:rgba(200,240,64,0.06);border:1px solid rgba(200,240,64,0.25);'
             : 'background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.07);');
       row.innerHTML =
-        '<span style="font-family:\'Syne\',sans-serif;font-size:13px;font-weight:700;color:' + (ok ? '#f4f2ee' : '#666') + '">' +
+        '<span style="font-family:\'Syne\',sans-serif;font-size:13px;font-weight:700;color:' + (ok ? '#f4f2ee' : '#d8d8d8') + '">' +
         opt.label + (ok ? '' : ' <span style="font-size:9px;font-weight:700;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.3);border-radius:2px;padding:1px 5px;margin-left:4px">\uD83D\uDD12 Upgrade</span>') +
         '</span>' +
-        '<span style="font-family:\'DM Mono\',monospace;font-size:11px;color:' + (ok ? '#8a8a8a' : '#555') + ';line-height:1.5">' + opt.desc + '</span>';
+        '<span style="font-family:\'DM Mono\',monospace;font-size:11px;color:' + (ok ? '#8a8a8a' : '#d8d8d8') + ';line-height:1.5">' + opt.desc + '</span>';
       row.onclick = function () {
         closeAppReady();
         opt.go();

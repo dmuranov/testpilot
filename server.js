@@ -1574,7 +1574,7 @@ app.get('/app', (req, res) => {
       body{background:#080808;color:#f4f2ee;font-family:sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
       .box{text-align:center;padding:48px 40px;border:1px solid rgba(200,240,64,0.12);max-width:400px;width:90%;background:#111}
       h1{font-size:26px;font-weight:800;margin-bottom:6px}h1 span{color:#c8f040}
-      p{font-size:12px;color:#666;margin-bottom:28px;font-family:monospace;letter-spacing:0.5px}
+      p{font-size:12px;color:#d8d8d8;margin-bottom:28px;font-family:monospace;letter-spacing:0.5px}
       input{width:100%;background:#080808;border:1px solid rgba(200,240,64,0.25);color:#fff;padding:13px 16px;font-size:14px;font-family:monospace;outline:none;margin-bottom:10px;border-radius:2px;-webkit-appearance:none}
       input:focus{border-color:#c8f040}
       button{width:100%;background:#c8f040;color:#080808;font-weight:800;font-size:14px;padding:13px;border:none;cursor:pointer;border-radius:2px;font-family:inherit;touch-action:manipulation}
