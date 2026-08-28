@@ -9068,7 +9068,9 @@ async function reserveRunCreditOrDeny(res, userPlan, ownerEmail, dbUser) {
     return { ok: false, reserved: false };
   }
   await supabase('PATCH', 'users', { credits: credits - 1 }, `?email=eq.${encodeURIComponent(ownerEmail)}`).catch(() => {});
-  for (const [, s] of sessions) { if (s.email === ownerEmail) s.credits = credits - 1; }
+  let _reserveDirty = false;
+  for (const [, s] of sessions) { if (s.email === ownerEmail) { s.credits = credits - 1; _reserveDirty = true; } }
+  if (_reserveDirty) saveSessions();
   return { ok: true, reserved: true };
 }
 async function refundRunCredit(ownerEmail) {
@@ -9076,7 +9078,9 @@ async function refundRunCredit(ownerEmail) {
     const row = await getUserByEmail(ownerEmail);
     const cur = Number(row?.credits || 0);
     await supabase('PATCH', 'users', { credits: cur + 1 }, `?email=eq.${encodeURIComponent(ownerEmail)}`);
-    for (const [, s] of sessions) { if (s.email === ownerEmail) s.credits = cur + 1; }
+    let _refundDirty = false;
+    for (const [, s] of sessions) { if (s.email === ownerEmail) { s.credits = cur + 1; _refundDirty = true; } }
+    if (_refundDirty) saveSessions();
   } catch {}
 }
 
