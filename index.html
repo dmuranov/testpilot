@@ -1960,7 +1960,7 @@ function showFunnelPaywall(reason) {
     host.innerHTML = `
       <div style="background:#0f0f0f;border:1px solid rgba(200,240,64,0.2);border-radius:6px;padding:32px;max-width:780px;width:100%;max-height:90vh;overflow-y:auto;font-family:-apple-system,BlinkMacSystemFont,sans-serif;color:#f4f2ee">
         <div id="fp-title" style="font-size:22px;font-weight:800;margin-bottom:6px"></div>
-        <div id="fp-sub" style="font-size:13px;color:#8a8a8a;margin-bottom:24px;font-family:monospace"></div>
+        <div id="fp-sub" style="font-size:13px;color:#d8d8d8;margin-bottom:24px;font-family:monospace"></div>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:20px">
           <div onclick="funnelCheckout('onerun')" style="background:#080808;border:1px solid #2a2a2a;border-radius:5px;padding:18px 16px;cursor:pointer">
             <div style="font-size:11px;font-family:monospace;color:#c8f040;letter-spacing:1px;margin-bottom:6px">ONE RUN</div>
@@ -1969,26 +1969,26 @@ function showFunnelPaywall(reason) {
           </div>
           <div onclick="funnelCheckout('solo')" style="background:#080808;border:1px solid rgba(200,240,64,0.5);border-radius:5px;padding:18px 16px;cursor:pointer">
             <div style="font-size:11px;font-family:monospace;color:#c8f040;letter-spacing:1px;margin-bottom:6px">SOLO</div>
-            <div style="font-size:24px;font-weight:800">€10<span style="font-size:11px;color:#8a8a8a;font-weight:400">/mo</span></div>
+            <div style="font-size:24px;font-weight:800">€10<span style="font-size:11px;color:#d8d8d8;font-weight:400">/mo</span></div>
             <div style="font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace">1 app · unlimited runs · every feature</div>
           </div>
           <div onclick="funnelCheckout('starter')" style="background:#080808;border:1px solid #2a2a2a;border-radius:5px;padding:18px 16px;cursor:pointer">
             <div style="font-size:11px;font-family:monospace;color:#c8f040;letter-spacing:1px;margin-bottom:6px">STARTER</div>
-            <div style="font-size:24px;font-weight:800">€29<span style="font-size:11px;color:#8a8a8a;font-weight:400">/mo</span></div>
+            <div style="font-size:24px;font-weight:800">€29<span style="font-size:11px;color:#d8d8d8;font-weight:400">/mo</span></div>
             <div style="font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace">3 apps · unlimited runs · every feature</div>
           </div>
           <div onclick="funnelCheckout('pro')" style="background:#080808;border:1px solid #2a2a2a;border-radius:5px;padding:18px 16px;cursor:pointer">
             <div style="font-size:11px;font-family:monospace;color:#c8f040;letter-spacing:1px;margin-bottom:6px">PRO</div>
-            <div style="font-size:24px;font-weight:800">€149<span style="font-size:11px;color:#8a8a8a;font-weight:400">/mo</span></div>
+            <div style="font-size:24px;font-weight:800">€149<span style="font-size:11px;color:#d8d8d8;font-weight:400">/mo</span></div>
             <div style="font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace">10 apps · unlimited runs · every feature</div>
           </div>
           <div onclick="funnelCheckout('agency')" style="background:#080808;border:1px solid #2a2a2a;border-radius:5px;padding:18px 16px;cursor:pointer">
             <div style="font-size:11px;font-family:monospace;color:#c8f040;letter-spacing:1px;margin-bottom:6px">AGENCY</div>
-            <div style="font-size:24px;font-weight:800">€249<span style="font-size:11px;color:#8a8a8a;font-weight:400">/mo</span></div>
+            <div style="font-size:24px;font-weight:800">€249<span style="font-size:11px;color:#d8d8d8;font-weight:400">/mo</span></div>
             <div style="font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace">unlimited apps · every feature</div>
           </div>
         </div>
-        <button onclick="closeFunnelPaywall()" style="background:transparent;color:#8a8a8a;border:1px solid #333;font-weight:400;font-size:13px;padding:10px;border-radius:3px;width:100%;cursor:pointer;font-family:inherit">Maybe later</button>
+        <button onclick="closeFunnelPaywall()" style="background:transparent;color:#d8d8d8;border:1px solid #333;font-weight:400;font-size:13px;padding:10px;border-radius:3px;width:100%;cursor:pointer;font-family:inherit">Maybe later</button>
       </div>`;
     document.body.appendChild(host);
   }
@@ -7133,11 +7133,11 @@ function applyWelcomeCopy() {
       '<div style="font-size:13px;color:#c8c8c4;line-height:1.7">You have <strong style="color:#f4f2ee">one free test run</strong> waiting. No API key, no card, nothing to set up &mdash; describe what to test in plain english and watch the agent do it on your app.</div>' +
     '</div>' +
     '<div style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.07);padding:16px 18px;border-radius:2px">' +
-      '<div style="font-family:\'DM Mono\',monospace;font-size:11px;color:#8a8a8a;letter-spacing:1px;margin-bottom:10px">// 02 &mdash; AFTER THAT</div>' +
+      '<div style="font-family:\'DM Mono\',monospace;font-size:11px;color:#d8d8d8;letter-spacing:1px;margin-bottom:10px">// 02 &mdash; AFTER THAT</div>' +
       '<div style="font-size:13px;color:#a8a8a8;line-height:1.7">To keep testing you add your own Anthropic API key (about &euro;0.10&ndash;&euro;0.50 per run, paid straight to Anthropic), or pick a plan. We will show you how when you get there.</div>' +
     '</div>' +
     '<div style="background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.07);padding:16px 18px;border-radius:2px">' +
-      '<div style="font-family:\'DM Mono\',monospace;font-size:11px;color:#8a8a8a;letter-spacing:1px;margin-bottom:10px">// 03 &mdash; HELP US IMPROVE</div>' +
+      '<div style="font-family:\'DM Mono\',monospace;font-size:11px;color:#d8d8d8;letter-spacing:1px;margin-bottom:10px">// 03 &mdash; HELP US IMPROVE</div>' +
       '<div style="font-size:13px;color:#a8a8a8;line-height:1.7">TestPilot is in early access. If anything breaks or could be better, tell us via <strong style="color:#c8c8c4">Support</strong> in the sidebar.</div>' +
     '</div>';
 }
@@ -7661,7 +7661,7 @@ function showAppReady(message, guide) {
         '<span style="font-family:\'Syne\',sans-serif;font-size:13px;font-weight:700;color:' + (ok ? '#f4f2ee' : '#d8d8d8') + '">' +
         opt.label + (ok ? '' : ' <span style="font-size:9px;font-weight:700;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.3);border-radius:2px;padding:1px 5px;margin-left:4px">\uD83D\uDD12 Upgrade</span>') +
         '</span>' +
-        '<span style="font-family:\'DM Mono\',monospace;font-size:11px;color:' + (ok ? '#8a8a8a' : '#d8d8d8') + ';line-height:1.5">' + opt.desc + '</span>';
+        '<span style="font-family:\'DM Mono\',monospace;font-size:11px;color:' + (ok ? '#d8d8d8' : '#d8d8d8') + ';line-height:1.5">' + opt.desc + '</span>';
       row.onclick = function () {
         closeAppReady();
         opt.go();
