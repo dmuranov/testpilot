@@ -10523,7 +10523,9 @@ app.post('/api/test/multirole', async (req, res) => {
   if (user.plan === 'free') {
     freeRunBurned = true;
     supabase('PATCH', 'users', { free_run_used: true }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
-    for (const [, s] of sessions) { if (s.email === user.email) s.free_run_used = true; }
+    let _mrDirty = false;
+    for (const [, s] of sessions) { if (s.email === user.email) { s.free_run_used = true; _mrDirty = true; } }
+    if (_mrDirty) saveSessions();
   }
 
   const testId = randomUUID();
@@ -10603,7 +10605,9 @@ app.post('/api/test/multirole', async (req, res) => {
     if (_mrCredit.reserved && !_mrCharged) refundRunCredit(user.email);
     if (freeRunBurned && !_mrCharged) {
       supabase('PATCH', 'users', { free_run_used: false }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
-      for (const [, s] of sessions) { if (s.email === user.email) s.free_run_used = false; }
+      let _mrDirty2 = false;
+      for (const [, s] of sessions) { if (s.email === user.email) { s.free_run_used = false; _mrDirty2 = true; } }
+      if (_mrDirty2) saveSessions();
     }
     aggregate.summary = {
       roles: roleResults.length,
@@ -10619,7 +10623,9 @@ app.post('/api/test/multirole', async (req, res) => {
     if (_mrCredit.reserved) refundRunCredit(user.email);
     if (freeRunBurned) {
       supabase('PATCH', 'users', { free_run_used: false }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
-      for (const [, s] of sessions) { if (s.email === user.email) s.free_run_used = false; }
+      let _mrDirty3 = false;
+      for (const [, s] of sessions) { if (s.email === user.email) { s.free_run_used = false; _mrDirty3 = true; } }
+      if (_mrDirty3) saveSessions();
     }
     aggregate.status = 'error';
     aggregate.error = err.message;
@@ -10712,7 +10718,9 @@ app.post('/api/test/flow', async (req, res) => {
   if (user.plan === 'free') {
     freeRunBurned = true;
     supabase('PATCH', 'users', { free_run_used: true }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
-    for (const [, s] of sessions) { if (s.email === user.email) s.free_run_used = true; }
+    let _flowDirty = false;
+    for (const [, s] of sessions) { if (s.email === user.email) { s.free_run_used = true; _flowDirty = true; } }
+    if (_flowDirty) saveSessions();
   }
 
   const testId = randomUUID();
@@ -10733,13 +10741,17 @@ app.post('/api/test/flow', async (req, res) => {
       if (_flowCredit.reserved && !_flowCharged) refundRunCredit(user.email);
       if (freeRunBurned && !_flowCharged) {
         supabase('PATCH', 'users', { free_run_used: false }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
-        for (const [, s] of sessions) { if (s.email === user.email) s.free_run_used = false; }
+        let _flowDirty2 = false;
+        for (const [, s] of sessions) { if (s.email === user.email) { s.free_run_used = false; _flowDirty2 = true; } }
+        if (_flowDirty2) saveSessions();
       }
     } catch (e) {
       if (_flowCredit.reserved) refundRunCredit(user.email);
       if (freeRunBurned) {
         supabase('PATCH', 'users', { free_run_used: false }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
-        for (const [, s] of sessions) { if (s.email === user.email) s.free_run_used = false; }
+        let _flowDirty3 = false;
+        for (const [, s] of sessions) { if (s.email === user.email) { s.free_run_used = false; _flowDirty3 = true; } }
+        if (_flowDirty3) saveSessions();
       }
       const result = testResults.get(testId);
       if (result) {
@@ -11168,13 +11180,17 @@ app.post('/api/chat/start', async (req, res) => {
     // refund path: see the plan-gate comment above for why.
     if (user.plan === 'free') {
       supabase('PATCH', 'users', { free_run_used: true }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
-      for (const [, s] of sessions) { if (s.email === user.email) s.free_run_used = true; }
+      let _chatDirty = false;
+      for (const [, s] of sessions) { if (s.email === user.email) { s.free_run_used = true; _chatDirty = true; } }
+      if (_chatDirty) saveSessions();
     } else if (user.plan === 'onerun') {
       const dbUser = await getUserByEmail(user.email);
       const credits = Number(dbUser?.credits || 0);
       if (credits > 0) {
         await supabase('PATCH', 'users', { credits: credits - 1 }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
-        for (const [, s] of sessions) { if (s.email === user.email) s.credits = credits - 1; }
+        let _chatCreditDirty = false;
+        for (const [, s] of sessions) { if (s.email === user.email) { s.credits = credits - 1; _chatCreditDirty = true; } }
+        if (_chatCreditDirty) saveSessions();
       }
     }
 
