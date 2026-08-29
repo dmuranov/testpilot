@@ -1,0 +1,10 @@
+{
+  "name": "TestPilot",
+  "short_name": "TestPilot",
+  "icons": [
+    { "src": "/brand/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ],
+  "theme_color": "#080808",
+  "background_color": "#080808",
+  "display": "standalone"
+}

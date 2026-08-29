@@ -1570,6 +1570,8 @@ app.get('/app', (req, res) => {
     return res.send(`<!DOCTYPE html><html><head><title>TestPilot</title>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/png" href="/brand/favicon-32.png">
+    <link rel="apple-touch-icon" href="/brand/apple-touch-icon.png">
     <style>
       *{margin:0;padding:0;box-sizing:border-box}
       body{background:#080808;color:#f4f2ee;font-family:sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
