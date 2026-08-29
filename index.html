@@ -7062,10 +7062,10 @@ init();
     <!-- Header -->
     <div style="background:#0f0f0f;border-bottom:1px solid rgba(200,240,64,0.12);padding:20px 24px;flex-shrink:0">
       <div style="font-family:'Syne',sans-serif;font-size:18px;font-weight:800;color:#f4f2ee">Terms of Service</div>
-      <div style="font-family:'DM Mono',monospace;font-size:11px;color:#555;margin-top:3px">// scroll to the bottom to accept</div>
+      <div style="font-family:'DM Mono',monospace;font-size:11px;color:#d8d8d8;margin-top:3px">// scroll to the bottom to accept</div>
     </div>
     <!-- Scrollable content -->
-    <div id="terms-scroll" onscroll="checkTermsScroll()" style="overflow-y:auto;padding:24px;flex:1;font-family:'DM Mono',monospace;font-size:12px;color:#888;line-height:1.8">
+    <div id="terms-scroll" onscroll="checkTermsScroll()" style="overflow-y:auto;padding:24px;flex:1;font-family:'DM Mono',monospace;font-size:12px;color:#d8d8d8;line-height:1.8">
       <p style="color:#c8f040;margin-bottom:16px;font-size:11px;letter-spacing:1px">// VERSION 1.0 — EFFECTIVE APRIL 2026</p>
 
       <p style="margin-bottom:16px">By using TestPilot, you agree to the following terms. Please read them carefully.</p>
@@ -7102,7 +7102,7 @@ init();
       <p style="color:#f4f2ee;font-weight:600;margin-bottom:8px">8. GOVERNING LAW</p>
       <p style="margin-bottom:24px">These Terms are governed by the laws of Spain. Disputes are subject to the courts of Madrid, Spain.</p>
 
-      <p style="color:#555;font-size:11px">Full Terms of Service: <a href="/terms.html" target="_blank" style="color:#c8f040">testpilotapp.dev/terms.html</a></p>
+      <p style="color:#d8d8d8;font-size:11px">Full Terms of Service: <a href="/terms.html" target="_blank" style="color:#c8f040">testpilotapp.dev/terms.html</a></p>
       <div style="height:40px"></div><!-- scroll target -->
     </div>
     <!-- Footer -->
@@ -7110,7 +7110,7 @@ init();
       <button onclick="declineTerms()" style="flex:1;background:transparent;border:1px solid #333;color:#d8d8d8;font-family:'Syne',sans-serif;font-weight:600;font-size:13px;padding:12px;border-radius:2px;cursor:pointer">
         Decline & Logout
       </button>
-      <button id="terms-accept-btn" onclick="acceptTerms()" disabled style="flex:2;background:#333;border:none;color:#555;font-family:'Syne',sans-serif;font-weight:800;font-size:13px;padding:12px;border-radius:2px;cursor:not-allowed;transition:all 0.3s">
+      <button id="terms-accept-btn" onclick="acceptTerms()" disabled style="flex:2;background:#333;border:none;color:#999;font-family:'Syne',sans-serif;font-weight:800;font-size:13px;padding:12px;border-radius:2px;cursor:not-allowed;transition:all 0.3s">
         ↓ Scroll to read all terms
       </button>
     </div>
@@ -7605,10 +7605,10 @@ function maybeStartLearnTour() {
   <div style="background:#111;border:1px solid rgba(200,240,64,0.2);max-width:480px;width:100%;border-radius:4px;overflow:hidden">
     <div style="background:#0f0f0f;border-bottom:1px solid rgba(200,240,64,0.1);padding:18px 24px;display:flex;align-items:center;justify-content:space-between">
       <div id="app-ready-title" style="font-family:'Syne',sans-serif;font-size:16px;font-weight:800;color:#f4f2ee">Your app is <span style="color:#c8f040">ready to test</span></div>
-      <button onclick="closeAppReady()" style="background:none;border:none;color:#555;font-size:22px;cursor:pointer;line-height:1;padding:0" onmouseover="this.style.color='#f4f2ee'" onmouseout="this.style.color='#555'">&times;</button>
+      <button onclick="closeAppReady()" style="background:none;border:none;color:#d8d8d8;font-size:22px;cursor:pointer;line-height:1;padding:0" onmouseover="this.style.color='#f4f2ee'" onmouseout="this.style.color='#d8d8d8'">&times;</button>
     </div>
     <div style="padding:24px;display:flex;flex-direction:column;gap:16px">
-      <p id="app-ready-sub" style="font-size:12px;color:#888;font-family:'DM Mono',monospace;line-height:1.7;margin:0"></p>
+      <p id="app-ready-sub" style="font-size:12px;color:#d8d8d8;font-family:'DM Mono',monospace;line-height:1.7;margin:0"></p>
       <p id="app-ready-lead" style="font-size:13px;color:#aaa;font-family:'DM Mono',monospace;line-height:1.7;margin:0">Now choose the test you want to run &mdash; from the menu on the <strong style="color:#c8f040">left</strong>, or straight from here:</p>
       <div id="app-ready-choices" style="display:flex;flex-direction:column;gap:8px"></div>
     </div>
@@ -7693,7 +7693,7 @@ function closeAppReady() {
   <div style="background:#111;border:1px solid rgba(200,240,64,0.2);max-width:440px;width:100%;border-radius:4px;overflow:hidden">
     <div style="background:#0f0f0f;border-bottom:1px solid rgba(200,240,64,0.1);padding:18px 24px;display:flex;align-items:center;justify-content:space-between">
       <div style="font-family:'Syne',sans-serif;font-size:16px;font-weight:800;color:#f4f2ee">First, <span style="color:#c8f040">learn an app</span></div>
-      <button onclick="document.getElementById('learn-first-overlay').style.display='none'" style="background:none;border:none;color:#555;font-size:22px;cursor:pointer;line-height:1;padding:0" onmouseover="this.style.color='#f4f2ee'" onmouseout="this.style.color='#555'">×</button>
+      <button onclick="document.getElementById('learn-first-overlay').style.display='none'" style="background:none;border:none;color:#d8d8d8;font-size:22px;cursor:pointer;line-height:1;padding:0" onmouseover="this.style.color='#f4f2ee'" onmouseout="this.style.color='#d8d8d8'">×</button>
     </div>
     <div style="padding:24px;display:flex;flex-direction:column;gap:16px">
       <p style="font-size:13px;color:#aaa;font-family:'DM Mono',monospace;line-height:1.7">TestPilot needs to learn your app before it can test it. Give it a URL and credentials — it will crawl every page, form and button automatically.</p>
@@ -7701,7 +7701,7 @@ function closeAppReady() {
         <span style="font-size:20px;flex-shrink:0">🎁</span>
         <div>
           <div style="font-family:'Syne',sans-serif;font-size:13px;font-weight:700;color:#f4f2ee;margin-bottom:4px">Learn an app — get a free test run</div>
-          <div style="font-family:'DM Mono',monospace;font-size:11px;color:#888;line-height:1.6">Once your app is learned, you get <strong style="color:#c8f040">1 free flow test</strong> on us — up to 100 words, no API key needed. See exactly what TestPilot can do before committing your own key.</div>
+          <div style="font-family:'DM Mono',monospace;font-size:11px;color:#d8d8d8;line-height:1.6">Once your app is learned, you get <strong style="color:#c8f040">1 free flow test</strong> on us — up to 100 words, no API key needed. See exactly what TestPilot can do before committing your own key.</div>
         </div>
       </div>
       <button onclick="document.getElementById('learn-first-overlay').style.display='none';gatedLearn()" class="btn btn-primary" style="width:100%;justify-content:center">
@@ -7716,7 +7716,7 @@ function closeAppReady() {
   <div style="background:#111;border:1px solid rgba(200,240,64,0.25);max-width:480px;width:100%;border-radius:4px;overflow:hidden">
     <div style="background:#0f0f0f;border-bottom:1px solid rgba(200,240,64,0.12);padding:20px 24px;display:flex;align-items:center;justify-content:space-between">
       <div style="font-family:'Syne',sans-serif;font-size:18px;font-weight:800;color:#f4f2ee">Free run <span style="color:#c8f040">complete</span></div>
-      <button onclick="document.getElementById('free-run-nudge').style.display='none'" style="background:none;border:none;color:#555;font-size:24px;cursor:pointer;line-height:1;padding:0" onmouseover="this.style.color='#f4f2ee'" onmouseout="this.style.color='#555'">×</button>
+      <button onclick="document.getElementById('free-run-nudge').style.display='none'" style="background:none;border:none;color:#d8d8d8;font-size:24px;cursor:pointer;line-height:1;padding:0" onmouseover="this.style.color='#f4f2ee'" onmouseout="this.style.color='#d8d8d8'">×</button>
     </div>
     <div style="padding:24px;display:flex;flex-direction:column;gap:16px">
       <div style="font-size:13px;color:#c8c8c4;line-height:1.7">You've used your free test run. To keep testing, add your own Claude API key — it takes 2 minutes and costs <strong style="color:#f4f2ee">€0.10–€0.50 per test</strong>, paid directly to Anthropic.</div>
@@ -7744,9 +7744,9 @@ function closeAppReady() {
     <div style="background:#0f0f0f;border-bottom:1px solid rgba(200,240,64,0.12);padding:20px 24px;display:flex;align-items:center;justify-content:space-between">
       <div>
         <div style="font-family:'Syne',sans-serif;font-size:18px;font-weight:800;color:#f4f2ee">Welcome to <span style="color:#c8f040">TestPilot</span></div>
-        <div style="font-family:'DM Mono',monospace;font-size:11px;color:#555;margin-top:3px">// a few things before you start</div>
+        <div style="font-family:'DM Mono',monospace;font-size:11px;color:#d8d8d8;margin-top:3px">// a few things before you start</div>
       </div>
-      <button onclick="closeWelcome()" style="background:none;border:none;color:#555;font-size:24px;cursor:pointer;line-height:1;padding:0;transition:color 0.15s" onmouseover="this.style.color='#f4f2ee'" onmouseout="this.style.color='#555'">×</button>
+      <button onclick="closeWelcome()" style="background:none;border:none;color:#d8d8d8;font-size:24px;cursor:pointer;line-height:1;padding:0;transition:color 0.15s" onmouseover="this.style.color='#f4f2ee'" onmouseout="this.style.color='#d8d8d8'">×</button>
     </div>
     <!-- Body -->
     <div id="welcome-body" style="padding:28px 24px;display:flex;flex-direction:column;gap:20px">
@@ -7754,7 +7754,7 @@ function closeAppReady() {
       <div style="background:rgba(200,240,64,0.05);border:1px solid rgba(200,240,64,0.12);padding:16px 18px;border-radius:2px">
         <div style="font-family:'DM Mono',monospace;font-size:11px;color:#c8f040;letter-spacing:1px;margin-bottom:10px">// 01 — GET YOUR CLAUDE API KEY</div>
         <div style="font-size:13px;color:#c8c8c4;line-height:1.7;margin-bottom:12px">TestPilot uses Claude AI to browse and test your app. You need to connect your own Anthropic API key — this keeps your costs transparent and under your control.</div>
-        <div style="font-size:12px;color:#888;font-family:'DM Mono',monospace;margin-bottom:12px">Typical test run costs <strong style="color:#f4f2ee">€0.10–€0.50</strong> in Claude API fees.</div>
+        <div style="font-size:12px;color:#d8d8d8;font-family:'DM Mono',monospace;margin-bottom:12px">Typical test run costs <strong style="color:#f4f2ee">€0.10–€0.50</strong> in Claude API fees.</div>
         <a href="https://console.anthropic.com/settings/keys" target="_blank" style="display:inline-flex;align-items:center;gap:6px;background:#c8f040;color:#080808;font-family:'Syne',sans-serif;font-weight:700;font-size:12px;padding:8px 16px;text-decoration:none;border-radius:2px">
           Get API Key at console.anthropic.com →
         </a>
