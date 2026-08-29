@@ -2835,6 +2835,7 @@ function renderAppDetail() {
         <div style="font-size:12px;color:var(--text-muted);font-family:'JetBrains Mono',monospace;margin-top:2px">${app.url}</div>
       </div>
       <div style="display:flex;gap:8px">
+        ${isSuperAdminUser() ? `<button class="btn btn-ghost" onclick="openSiteReport()">📊 Site Report</button>` : ''}
         <button class="btn btn-ghost" onclick="showGuideChooser()">🧭 Guide Me</button>
         <button class="btn btn-primary" onclick="startTestForApp('${app.appId}')">▶ Run Test</button>
         <button class="btn btn-ghost" onclick="relearn('${app.appId}')">🔄 Re-learn</button>
@@ -6896,6 +6897,188 @@ ${(s.defects || []).length > 0 ? defectsHtml : `<div class="no-vulns">✓ No pro
   const url = URL.createObjectURL(blob);
   const win = window.open(url, '_blank');
   if (win) setTimeout(() => win.print(), 1500);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SITE REPORT — superadmin-only. Surfaces what the Learn crawl already
+// computes (route tree, console/network diagnostics, link audit, coverage)
+// instead of discarding it. Mirrors downloadSweepReport()'s structure and
+// styling rather than inventing a second report format. Data only exists on
+// state.selectedApp when the crawl that produced it ran under the super
+// admin account (server.js gates diagnostics/linkAudit/coverage collection
+// the same way) — the button that calls this is hidden for everyone else.
+// ═══════════════════════════════════════════════════════════════
+const TP_SUPER_ADMIN_EMAIL = 'danijel.muranovic@gmail.com';
+function isSuperAdminUser() {
+  return (currentUser?.email || '').trim().toLowerCase() === TP_SUPER_ADMIN_EMAIL;
+}
+
+function openSiteReport() {
+  const app = state.selectedApp;
+  if (!app) return;
+  const appName = app.summary?.appName || app.url || app.appId || 'App';
+  const scanDate = new Date(app.crawledAt || Date.now()).toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' });
+  const pages = Object.entries(app.pages || {});
+  const cov = app.coverage || null;
+  const deadRoutes = pages.filter(([, p]) => p.error === '404');
+  const linkAudit = app.linkAudit || [];
+  const isBroken = (l) => l.blocked || l.status === null || l.status === undefined || l.status >= 400;
+  const brokenLinks = linkAudit.filter(isBroken);
+  const brokenFirstParty = brokenLinks.filter(l => l.firstParty);
+  const brokenExternal = brokenLinks.filter(l => !l.firstParty);
+  const diag = app.diagnostics || { console: [], pageErrors: [], http: [] };
+  const errorEntries = [
+    ...(diag.console || []).map(c => ({ path: c.path, firstParty: c.firstParty, text: `[${c.level}] ${c.text}` })),
+    ...(diag.pageErrors || []).map(c => ({ path: c.path, firstParty: c.firstParty, text: `[uncaught] ${c.text}` }))
+  ];
+  const errorsByPage = {};
+  for (const e of errorEntries) { const k = e.path || '(unknown page)'; (errorsByPage[k] = errorsByPage[k] || []).push(e); }
+  const hasReportData = !!(cov || app.diagnostics || app.linkAudit);
+
+  // ── Route tree ── nested by depth/parentPath. Two capture paths (the home
+  // page and Phase-1 nav pages) don't record an explicit parentPath — both
+  // are conceptually children of the home page, so fall back to it.
+  const homeEntry = pages.find(([, d]) => d.depth === 0);
+  const homePathKey = homeEntry ? homeEntry[0] : null;
+  const byParent = {};
+  for (const [p, data] of pages) {
+    if (data.error === '404') continue;
+    let parent = data.parentPath || null;
+    if (!parent && (data.depth || 0) > 0) parent = homePathKey;
+    const key = parent || '__root__';
+    (byParent[key] = byParent[key] || []).push([p, data]);
+  }
+  function renderRouteNode([p, data]) {
+    const thumb = data.screenshot
+      ? `<img src="${location.origin}${data.screenshot}" class="route-thumb" loading="lazy" alt="" onerror="this.style.display='none'" />`
+      : `<div class="route-thumb route-thumb-empty"></div>`;
+    const children = byParent[p] || [];
+    return `<li class="route-node">
+      <div class="route-row">
+        ${thumb}
+        <div>
+          <div class="route-name">${escapeHtml(data.name || p)}</div>
+          <div class="route-path">${escapeHtml(p)}</div>
+        </div>
+      </div>
+      ${children.length ? `<ul class="route-children">${children.map(renderRouteNode).join('')}</ul>` : ''}
+    </li>`;
+  }
+  const routeTreeHtml = (byParent.__root__ || []).map(renderRouteNode).join('') || '<li class="route-node"><div class="route-row"><div class="route-name">No pages recorded</div></div></li>';
+
+  const linkRowHtml = (l) => `<tr>
+    <td class="link-url">${escapeHtml(l.url)}</td>
+    <td class="link-status">${l.blocked ? 'blocked' : (l.status ?? (l.error || 'error'))}</td>
+    <td class="link-pages">${(l.pages || []).slice(0, 4).map(escapeHtml).join(', ')}${(l.pages || []).length > 4 ? ` +${l.pages.length - 4} more` : ''}</td>
+  </tr>`;
+
+  const coverageHtml = cov ? `<div class="summary-box">${
+    (cov.hitPageCap || (cov.stopReason && cov.stopReason !== 'completed'))
+      ? `<strong>This was not the whole site.</strong> Found ${cov.pagesFound} page${cov.pagesFound === 1 ? '' : 's'} (limit ${cov.maxPages}), stopped because <em>${escapeHtml(cov.stopReason)}</em>. Re-run Learn to pick up where it left off, or a smaller/simpler site will finish inside the same limits.`
+      : `Full crawl completed — found ${cov.pagesFound} page${cov.pagesFound === 1 ? '' : 's'}, nothing left to discover within the ${cov.maxPages}-page / ${cov.maxDepth}-deep limits.`
+  }</div>` : '';
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>TestPilot Site Report — ${escapeHtml(appName)}</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 13px; color: #1a1a1a; background: #fff; padding: 48px; max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 22px; font-weight: 800; color: #080808; margin-bottom: 4px; }
+  h2 { font-size: 15px; font-weight: 700; color: #080808; margin: 32px 0 12px; padding-bottom: 6px; border-bottom: 2px solid #c8f040; }
+  .header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 32px; padding-bottom: 24px; border-bottom: 3px solid #080808; }
+  .logo { font-size: 24px; font-weight: 900; letter-spacing: -1px; }
+  .logo span { color: #c8f040; background: #080808; padding: 2px 6px; }
+  .meta-table { width: 100%; border-collapse: collapse; margin-bottom: 24px; }
+  .meta-table td { padding: 7px 12px; border: 1px solid #e5e5e5; font-size: 13px; }
+  .meta-table td:first-child { font-weight: 600; background: #f9f9f9; width: 140px; color: #555; }
+  .stats { display: flex; gap: 16px; margin: 20px 0 28px; }
+  .stat { flex: 1; text-align: center; padding: 16px; border: 1px solid #e5e5e5; border-radius: 4px; }
+  .stat-num { font-size: 28px; font-weight: 800; }
+  .stat-label { font-size: 11px; color: #666; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat.green .stat-num { color: #16a34a; }
+  .stat.red .stat-num { color: #dc2626; }
+  .summary-box { background: #f9fafb; border-left: 4px solid #c8f040; padding: 16px 20px; margin-bottom: 24px; font-size: 13px; line-height: 1.8; color: #333; }
+  .no-vulns { background: #f0fdf4; border: 1px solid #86efac; border-radius: 4px; padding: 16px 20px; color: #16a34a; font-weight: 600; }
+  .route-tree, .route-children { list-style: none; }
+  .route-children { padding-left: 28px; border-left: 2px solid #eee; margin-top: 8px; }
+  .route-node { margin-bottom: 8px; }
+  .route-row { display: flex; align-items: center; gap: 10px; padding: 6px; border: 1px solid #eee; border-radius: 4px; }
+  .route-thumb { width: 48px; height: 32px; object-fit: cover; border-radius: 2px; border: 1px solid #e5e5e5; flex-shrink: 0; background: #f5f5f5; }
+  .route-thumb-empty { background: repeating-linear-gradient(45deg, #f5f5f5, #f5f5f5 4px, #eee 4px, #eee 8px); }
+  .route-name { font-weight: 600; font-size: 12.5px; }
+  .route-path { font-family: monospace; font-size: 11px; color: #888; }
+  .dead-row, .err-row { border: 1px solid #fca5a5; border-radius: 4px; padding: 10px 14px; margin-bottom: 8px; background: #fff5f5; font-size: 12px; }
+  .dead-row .path, .err-page { font-family: monospace; font-weight: 700; color: #dc2626; }
+  .link-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 8px; }
+  .link-table th { background: #080808; color: #c8f040; padding: 7px 10px; text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .link-table td { padding: 7px 10px; border-bottom: 1px solid #f0f0f0; vertical-align: top; }
+  .link-url { font-family: monospace; font-size: 11px; word-break: break-all; max-width: 380px; }
+  .link-status { font-weight: 700; color: #dc2626; white-space: nowrap; }
+  .link-pages { color: #666; font-size: 11px; }
+  .err-line { font-family: monospace; font-size: 11px; color: #444; margin-top: 4px; }
+  .footer { margin-top: 48px; padding-top: 20px; border-top: 1px solid #e5e5e5; display: flex; justify-content: space-between; align-items: center; color: #999; font-size: 11px; }
+  .footer-logo { font-weight: 800; font-size: 14px; color: #080808; }
+  .footer-logo span { color: #c8f040; background: #080808; padding: 1px 4px; }
+  @media print { body { padding: 24px; } }
+</style>
+</head>
+<body>
+<div class="header">
+  <div>
+    <div class="logo">Test<span>Pilot</span></div>
+    <div style="font-size:12px;color:#666;margin-top:4px">Site Report</div>
+  </div>
+  <div style="text-align:right">
+    <div style="font-size:20px;font-weight:800;color:${(deadRoutes.length + brokenLinks.length) > 0 ? '#dc2626' : '#16a34a'}">${deadRoutes.length + brokenLinks.length} ISSUE${(deadRoutes.length + brokenLinks.length) === 1 ? '' : 'S'}</div>
+    <div style="font-size:12px;color:#666;margin-top:2px">${scanDate}</div>
+  </div>
+</div>
+
+<table class="meta-table">
+  <tr><td>App</td><td>${escapeHtml(appName)}</td></tr>
+  <tr><td>URL</td><td>${escapeHtml(app.url || '—')}</td></tr>
+  <tr><td>Crawled</td><td>${scanDate}</td></tr>
+  <tr><td>Pages Mapped</td><td>${pages.length}</td></tr>
+</table>
+
+<div class="stats">
+  <div class="stat"><div class="stat-num">${pages.length}</div><div class="stat-label">Pages Found</div></div>
+  <div class="stat ${deadRoutes.length ? 'red' : 'green'}"><div class="stat-num">${deadRoutes.length}</div><div class="stat-label">Dead Routes</div></div>
+  <div class="stat ${brokenLinks.length ? 'red' : 'green'}"><div class="stat-num">${brokenLinks.length}</div><div class="stat-label">Broken Links</div></div>
+  <div class="stat ${errorEntries.length ? 'red' : 'green'}"><div class="stat-num">${errorEntries.length}</div><div class="stat-label">Console Errors</div></div>
+</div>
+
+${coverageHtml}
+${!hasReportData ? `<div class="summary-box">This app was crawled before the Site Report existed, or by an account it isn't scoped to — only the route tree below is available. Re-run Learn to fill in the rest.</div>` : ''}
+
+<h2>Route Tree (${pages.length})</h2>
+<ul class="route-tree">${routeTreeHtml}</ul>
+
+<h2>Dead Routes (${deadRoutes.length})</h2>
+${deadRoutes.length ? deadRoutes.map(([p, d]) => `<div class="dead-row"><span class="path">${escapeHtml(p)}</span> — ${escapeHtml(d.name || '')} returned a 404</div>`).join('') : `<div class="no-vulns">✓ No dead routes found.</div>`}
+
+<h2>Broken Links — First-Party (${brokenFirstParty.length})</h2>
+${brokenFirstParty.length ? `<table class="link-table"><thead><tr><th>URL</th><th>Status</th><th>Found On</th></tr></thead><tbody>${brokenFirstParty.map(linkRowHtml).join('')}</tbody></table>` : `<div class="no-vulns">✓ No broken first-party links.</div>`}
+
+<h2>Broken Links — External (${brokenExternal.length})</h2>
+${brokenExternal.length ? `<table class="link-table"><thead><tr><th>URL</th><th>Status</th><th>Found On</th></tr></thead><tbody>${brokenExternal.map(linkRowHtml).join('')}</tbody></table>` : `<div class="no-vulns">✓ No broken external links.</div>`}
+
+<h2>Console Errors (${errorEntries.length})</h2>
+${Object.keys(errorsByPage).length ? Object.entries(errorsByPage).map(([p, errs]) => `<div class="err-row"><span class="err-page">${escapeHtml(p)}</span>${errs.slice(0, 12).map(e => `<div class="err-line">${e.firstParty === false ? '[3rd-party] ' : ''}${escapeHtml(e.text)}</div>`).join('')}${errs.length > 12 ? `<div class="err-line">…and ${errs.length - 12} more</div>` : ''}</div>`).join('') : `<div class="no-vulns">✓ No console errors captured.</div>`}
+
+<div class="footer">
+  <div class="footer-logo">Test<span>Pilot</span></div>
+  <div>Generated automatically by TestPilot — AI-powered testing for any web app · testpilotapp.dev</div>
+</div>
+</body>
+</html>`;
+
+  const blob = new Blob([html], { type: 'text/html' });
+  const url = URL.createObjectURL(blob);
+  window.open(url, '_blank');
 }
 
 // ═══════════════════════════════════════════════════════════════

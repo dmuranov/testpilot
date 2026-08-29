@@ -8,6 +8,7 @@ import { detectUndisclosedRename, renameDisclosureNote, terminalVerifyDiagnostic
 import psl from 'psl';
 import { loadRecipe, saveRecipe, shouldCaptureRun, isReplayableAction, replayStepHeld, stepIdentity, recipeKey, EMAIL_TOKEN, PASSWORD_TOKEN } from './routes/recipes.js';
 import { assertPublicUrl } from './routes/ssrf.js';
+import { auditLinks } from './routes/link-audit.js';
 import { scanExposedFiles, tokenFileMatches, metaTagMatches } from './security-exposure.js';
 import express from 'express';
 import cors from 'cors';
@@ -2878,6 +2879,24 @@ async function capturePageKnowledge(page) {
     } catch { /* unreadable frame → treat as black box */ }
   }
 
+  // Full, unfiltered <a href> pass for the Site Report link audit — separate
+  // from `knowledge.links` above, which is visibility-filtered and text-only
+  // (built for the exploration algorithm's own decisions, not for finding
+  // every dead link). Resolved to absolute here while `location.href` is
+  // still the right base; deduped and HTTP-checked later, after the crawl.
+  try {
+    knowledge.allLinks = await page.evaluate(() => {
+      const out = [];
+      for (const a of document.querySelectorAll('a[href]')) {
+        const href = a.getAttribute('href') || '';
+        if (!href || /^(mailto:|tel:|javascript:)/i.test(href)) continue;
+        if (/^#(?!\/)/.test(href)) continue; // pure same-page anchor; '#/x' hash-routes are kept
+        try { out.push(new URL(href, location.href).href); } catch {}
+      }
+      return out;
+    });
+  } catch { knowledge.allLinks = []; }
+
   return knowledge;
 }
 
@@ -3887,6 +3906,55 @@ async function crawlApp(appId, url, credentials, description, apiKey, onProgress
   // indexedDBRestoreData's comment for why this exists at all.
   if (credentials?.indexedDB?.length) await page.addInitScript(indexedDBRestoreData, credentials.indexedDB);
 
+  // ── SITE REPORT DIAGNOSTICS (superadmin-only, see isSuperAdmin below) ────
+  // Mirrors the sweep's error-capture (see runSweep's `diag`/`firstParty`
+  // around line 9735) but deliberately does NOT filter out third-party
+  // console/network noise — a broken third-party script is exactly the kind
+  // of thing the free Site Report should surface. Each entry is tagged
+  // firstParty instead, and the UI groups by that. Attributed to whichever
+  // route was open when explorePage() last set currentCrawlPath below.
+  // Gated to the super admin's own crawls only for now — every other user's
+  // Learn behaves exactly as before (no extra listeners, no extra requests).
+  let currentCrawlPath = '';
+  const learnDiag = { console: [], pageErrors: [], http: [] };
+  let learnAppOrigin = null;
+  try { learnAppOrigin = new URL(url).origin; } catch {}
+  const learnFirstParty = (u) => { try { return new URL(u).origin === learnAppOrigin; } catch { return false; } };
+  const siteReportEnabled = isSuperAdmin(ownerEmail);
+  if (siteReportEnabled) {
+    page.on('console', (m) => {
+      try {
+        if (learnDiag.console.length >= 300) return;
+        if (m.type() !== 'error' && m.type() !== 'warning') return;
+        let src = '';
+        try { const loc = m.location(); src = (loc && loc.url) || ''; } catch {}
+        learnDiag.console.push({ path: currentCrawlPath, level: m.type(), text: String(m.text()).slice(0, 250), firstParty: src ? learnFirstParty(src) : true });
+      } catch {}
+    });
+    page.on('pageerror', (e) => {
+      if (learnDiag.pageErrors.length < 300) learnDiag.pageErrors.push({ path: currentCrawlPath, text: String(e && e.message).slice(0, 250), firstParty: true });
+    });
+    page.on('requestfailed', (r) => {
+      try {
+        // net::ERR_ABORTED = the browser cancelled the request (usually a
+        // superseded prefetch), not a real failure — see the sweep's identical
+        // guard for the cvmagician.com false-positive case this fixes.
+        if ((r.failure()?.errorText || '') === 'net::ERR_ABORTED') return;
+        if (learnDiag.http.length < 300) learnDiag.http.push({ path: currentCrawlPath, status: null, url: r.url().slice(0, 200), firstParty: learnFirstParty(r.url()) });
+      } catch {}
+    });
+    page.on('response', (r) => {
+      try {
+        if (r.status() < 400 || learnDiag.http.length >= 300) return;
+        learnDiag.http.push({ path: currentCrawlPath, status: r.status(), url: r.url().slice(0, 200), firstParty: learnFirstParty(r.url()) });
+      } catch {}
+    });
+    // A target="_blank" link during discovery opens a new tab and leaves the
+    // crawled page unchanged — close it immediately so it can't leak or keep
+    // firing requests attributed to whatever route is explored next.
+    context.on('page', (p) => { p.close().catch(() => {}); });
+  }
+
   // ── SPA HASH-ROUTER AWARENESS ──────────────────────────────────────────────
   // Hash-router apps (Angular HashLocationStrategy, React HashRouter) keep the
   // real route in the URL fragment ("#/login") while pathname stays "/". Keying
@@ -3918,7 +3986,8 @@ async function crawlApp(appId, url, credentials, description, apiKey, onProgress
     formRecipes: {},
     interactions: {},
     failedPaths: [],
-    summary: null
+    summary: null,
+    diagnostics: learnDiag
   };
 
   try {
@@ -4317,6 +4386,7 @@ App description: ${appKnowledge.description || '(none)'}`;
       const currentPath = routeKey(page.url());
       if (crawledPaths.has(currentPath)) return;
       crawledPaths.add(currentPath);
+      currentCrawlPath = currentPath;
       recordDiscovery('page');
 
       const elapsed = Math.round((Date.now() - crawlStartTime) / 1000);
@@ -5246,6 +5316,52 @@ App description: ${appKnowledge.description || '(none)'}`;
     globalBrain.totalAppsCrawled++;
     await saveGlobalBrain();
     onProgress?.({ phase: 'crawl', message: `🧠 Brain updated: ${Object.keys(globalBrain.buttonPatterns).length} button patterns, ${Object.keys(globalBrain.wordMeanings).length} word meanings learned` });
+
+    if (siteReportEnabled) {
+      // ── SITE REPORT: coverage note ──────────────────────────────────────
+      // A silent MAX_PAGES/time cap reads as "your site only has 40 pages" —
+      // the report needs to say plainly when the crawl stopped early rather
+      // than have discovery run out look identical to full coverage.
+      appKnowledge.coverage = {
+        pagesFound: crawledPaths.size,
+        maxPages: MAX_PAGES,
+        maxDepth: MAX_DEPTH,
+        hitPageCap: crawledPaths.size >= MAX_PAGES,
+        stopReason: stopReason || 'completed',
+        elapsedMs: Date.now() - crawlStartTime
+      };
+
+      // ── SITE REPORT: link audit ─────────────────────────────────────────
+      // Every <a href> collected per-page in capturePageKnowledge (knowledge.
+      // allLinks), aggregated here across the whole crawl, deduped, and HEAD-
+      // checked — including links the crawl itself never followed (e.g. a
+      // page reachable only from a footer or a collapsed mobile menu).
+      onProgress?.({ phase: 'analysis', message: '🔗 Auditing links...' });
+      try {
+        const linkMap = new Map(); // absolute URL -> Set(page paths it appears on)
+        for (const [pagePath, pg] of Object.entries(appKnowledge.pages)) {
+          for (const href of (pg.allLinks || [])) {
+            if (!linkMap.has(href)) {
+              if (linkMap.size >= 300) continue; // new-URL cap; existing URLs still gain page attributions below
+              linkMap.set(href, new Set());
+            }
+            linkMap.get(href).add(pagePath);
+          }
+          delete pg.allLinks; // aggregated above — don't duplicate it in every stored page entry
+        }
+        appKnowledge.linkAudit = await auditLinks(linkMap, { appOrigin: learnAppOrigin, cap: 300 });
+        const broken = appKnowledge.linkAudit.filter(l => l.blocked || l.status === null || l.status >= 400).length;
+        onProgress?.({ phase: 'analysis', message: `🔗 Checked ${appKnowledge.linkAudit.length} links — ${broken} broken` });
+      } catch (e) {
+        appKnowledge.linkAudit = [];
+        onProgress?.({ phase: 'analysis', message: `⚠️ Link audit failed: ${String(e && e.message || e).substring(0, 60)}` });
+      }
+    } else {
+      // Site Report is superadmin-only for now — drop the per-page raw link
+      // collection rather than store it unused.
+      for (const pg of Object.values(appKnowledge.pages)) delete pg.allLinks;
+    }
+    await saveProgress();
 
     // AI Analysis — generate deep understanding
     onProgress?.({ phase: 'analysis', message: 'AI analyzing app structure and generating workflows...' });
