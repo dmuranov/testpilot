@@ -954,6 +954,36 @@ async function ssLoadReports() {
     margin-bottom: 6px;
   }
 
+  .nav-section-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: 0 8px;
+    margin-bottom: 6px;
+    border: none;
+    background: none;
+    cursor: pointer;
+    font-family: inherit;
+  }
+
+  .nav-section-toggle span {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    color: var(--text-muted);
+  }
+
+  .nav-section-toggle:hover span { color: var(--text-dim); }
+
+  .nav-chevron {
+    width: 12px;
+    height: 12px;
+    color: var(--text-muted);
+    transition: transform 0.15s;
+    flex-shrink: 0;
+  }
+
   .nav-btn {
     display: flex;
     align-items: center;
@@ -2145,6 +2175,7 @@ function clearCredentials(appId) {
 // ═══════════════════════════════════════════════════════════════
 let state = {
   view: 'apps',        // apps | learn | app-detail | test-run | test-detail | history | chat | multi | multirole | security
+  testingNavOpen: null, // null = follow saved/default; true/false = explicit user toggle this session
   apps: [],
   tests: [],
   selectedApp: null,
@@ -2205,7 +2236,20 @@ let state = {
 // ═══════════════════════════════════════════════════════════════
 // RENDER ENGINE
 // ═══════════════════════════════════════════════════════════════
+const TESTING_NAV_VIEWS = ['security', 'test-run', 'sweep', 'chat', 'multirole', 'staging-safe', 'widget', 'schedules', 'history'];
+function isTestingNavOpen() {
+  if (TESTING_NAV_VIEWS.includes(state.view)) return true;
+  if (state.testingNavOpen !== null) return state.testingNavOpen;
+  try { return localStorage.getItem('tp-testing-nav-open') === '1'; } catch (e) { return false; }
+}
+function toggleTestingNav() {
+  state.testingNavOpen = !isTestingNavOpen();
+  try { localStorage.setItem('tp-testing-nav-open', state.testingNavOpen ? '1' : '0'); } catch (e) {}
+  render();
+}
+
 function render() {
+  const testingNavOpen = isTestingNavOpen();
   document.getElementById('app').innerHTML = `
     <button class="hamburger" onclick="toggleSidebar()">☰</button>
     <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
@@ -2236,7 +2280,11 @@ function render() {
         </button>
       </div>
       <div class="nav-section" id="nav-testing">
-        <label>Testing</label>
+        <button class="nav-section-toggle" onclick="toggleTestingNav()" aria-expanded="${testingNavOpen}">
+          <span>Testing</span>
+          <svg class="nav-chevron" style="transform:rotate(${testingNavOpen ? '0deg' : '-90deg'})" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+        </button>
+        <div class="nav-section-items" style="display:${testingNavOpen ? 'block' : 'none'}">
         <button class="nav-btn ${state.view === 'security' ? 'active' : ''}" onclick="gatedNavigate('security', 'security')" data-tooltip="Multi-tenant security testing. Logs in as two different users and checks that User A's data is invisible to User B. Tests IDOR, URL manipulation, session leakage and API access.">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
           Security Test ${!hasFeature('security') ? '<span style="font-size:9px;font-weight:700;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.3);border-radius:2px;padding:1px 5px;margin-left:4px">🔒 Agency</span>' : ''}
@@ -2291,6 +2339,7 @@ function render() {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
           Support
         </button>
+        </div>
       </div>
       <div style="margin-top:auto;padding:12px;border-top:1px solid var(--border)">
         ${currentUser ? `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
