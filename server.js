@@ -3996,6 +3996,7 @@ async function crawlApp(appId, url, credentials, description, apiKey, onProgress
     if (!safe.ok) throw new Error(`Blocked target URL: ${safe.error}`);
     onProgress?.({ phase: 'navigating', message: `Opening ${url}...` });
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    currentCrawlPath = routeKey(page.url());
     await page.waitForTimeout(2000);
 
     // Login — skipped entirely if a sessionState was provided ("bring your own
@@ -4680,6 +4681,7 @@ App description: ${appKnowledge.description || '(none)'}`;
     const homeKnow = await capturePageKnowledge(page);
     const homeScreenshot = await takeScreenshot(page, `crawl-${appId}-home`, true);
     const homePath = routeKey(page.url());
+    currentCrawlPath = homePath;
     crawledPaths.add(homePath);
     recordDiscovery('page');
     appKnowledge.pages[homePath] = { ...homeKnow, screenshot: homeScreenshot, name: 'Home/Dashboard', depth: 0 };
@@ -4974,6 +4976,7 @@ App description: ${appKnowledge.description || '(none)'}`;
             : `${realPath}#${text.toLowerCase().replace(/\s+/g, '-')}`;
         }
 
+        currentCrawlPath = arrivedPath;
         if (!crawledPaths.has(arrivedPath)) {
           crawledPaths.add(arrivedPath);
           recordDiscovery('page');
@@ -5022,6 +5025,7 @@ App description: ${appKnowledge.description || '(none)'}`;
       onProgress?.({ phase: 'crawl', message: `🔍 Exploring buttons on: ${sectionName} (${elapsed}s)`, progress: 50 + Math.round((sectionPaths.indexOf(sectionPath) / sectionPaths.length) * 40) });
 
       try {
+        currentCrawlPath = sectionPath;
         await page.goto(`${baseUrl}${sectionPath}`, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
         await page.waitForTimeout(1500);
         // Some banners reappear on new page loads — dismiss again per section.
@@ -5068,6 +5072,7 @@ App description: ${appKnowledge.description || '(none)'}`;
 
           if (obs?.type === 'navigated' && !crawledPaths.has(obs.path) && !obs.path.includes('login')) {
             crawledPaths.add(obs.path);
+            currentCrawlPath = obs.path;
             recordDiscovery('page');
             onProgress?.({ phase: 'crawl', message: `    → Discovered: ${obs.path}` });
 
@@ -5172,6 +5177,7 @@ App description: ${appKnowledge.description || '(none)'}`;
 
               if (subObs?.type === 'navigated' && !crawledPaths.has(subObs.path) && !subObs.path.includes('login')) {
                 crawledPaths.add(subObs.path);
+                currentCrawlPath = subObs.path;
                 recordDiscovery('page');
                 onProgress?.({ phase: 'crawl', message: `        → Discovered: ${subObs.path}` });
 
@@ -5268,6 +5274,7 @@ App description: ${appKnowledge.description || '(none)'}`;
         if (clickResult.success) {
           await page.waitForTimeout(2000);
           const detailPath = new URL(page.url()).pathname + (new URL(page.url()).search || '');
+          currentCrawlPath = detailPath;
           const detailKnow = await capturePageKnowledge(page);
           const detailScreenshot = await takeScreenshot(page, `crawl-${appId}-detail-${sectionName.replace(/[^a-z0-9]/gi, '_').substring(0, 20)}`, true);
 
