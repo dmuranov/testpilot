@@ -3995,8 +3995,13 @@ async function crawlApp(appId, url, credentials, description, apiKey, onProgress
     const safe = await assertPublicUrl(url);
     if (!safe.ok) throw new Error(`Blocked target URL: ${safe.error}`);
     onProgress?.({ phase: 'navigating', message: `Opening ${url}...` });
+    // Set BEFORE navigating, not after: page.goto() kicks off every resource
+    // request on the target page immediately, and diagnostics for those can
+    // fire while this call is still being awaited — attributing them to
+    // whatever currentCrawlPath held before we set it (empty, or the last
+    // page) is wrong for effectively every page-load-time error a site has.
+    currentCrawlPath = routeKey(url);
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    currentCrawlPath = routeKey(page.url());
     await page.waitForTimeout(2000);
 
     // Login — skipped entirely if a sessionState was provided ("bring your own
@@ -4564,6 +4569,7 @@ App description: ${appKnowledge.description || '(none)'}`;
           if (item.type === 'link') {
             if (crawledPaths.has(routeKey(item.href))) continue;
             onProgress?.({ phase: 'crawl', message: `${indent}  🔗 ${item.text}` });
+            currentCrawlPath = routeKey(toAbsolute(item.href)); // before navigating — see initial-goto comment
             await page.goto(toAbsolute(item.href), { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
             await page.waitForTimeout(1200);
             const arrived = routeKey(page.url());
@@ -4861,6 +4867,7 @@ App description: ${appKnowledge.description || '(none)'}`;
         let arrivedPath;
 
         if (info.kind === 'href') {
+          currentCrawlPath = routeKey(toAbsolute(info.href)); // set before navigating — see the initial-goto comment above
           await page.goto(toAbsolute(info.href), { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
           await page.waitForTimeout(1500);
           arrivedPath = routeKey(page.url());
