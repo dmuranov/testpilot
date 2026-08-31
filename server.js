@@ -10129,7 +10129,19 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
 
   try {
     emitSweep(sweepId, { type: 'info', message: `Opening ${appKnowledge.url}…` });
-    await page.goto(appKnowledge.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    try {
+      // Scheme already proven at Learn time — explicitScheme:true means a
+      // single attempt, no fallback trial. This only reclassifies a raw
+      // Playwright trace into a plain message if the site is unreachable now
+      // (same fix as Learn/runAgentTest/security scan).
+      await gotoWithSchemeFallback(page, appKnowledge.url, { waitUntil: 'domcontentloaded', timeout: 45000 }, { explicitScheme: true });
+    } catch (e) {
+      const cls = classifyFailure({ cause: 'nav_timeout', description: `Navigation failed: ${e.message}` });
+      const friendly = new Error(`Couldn't reach ${appKnowledge.url} to run the sweep — the site may be down or unreachable right now.`);
+      friendly.category = cls.category;
+      friendly.failureCause = cls.cause;
+      throw friendly;
+    }
     await page.waitForTimeout(1500);
 
     if (credentials?.email && !credentials?.sessionState) {
@@ -11401,7 +11413,19 @@ app.post('/api/chat/start', async (req, res) => {
 
     const chatSafe = await assertPublicUrl(appKnowledge.url);
     if (!chatSafe.ok) throw new Error(`Blocked target URL: ${chatSafe.error}`);
-    await page.goto(appKnowledge.url, { waitUntil: 'networkidle', timeout: 30000 });
+    try {
+      // This widget renders on a THIRD-PARTY site — a raw Playwright trace
+      // surfacing here is a public bad look, not just an internal one.
+      // Scheme already proven at Learn time, so explicitScheme:true is a
+      // single attempt, just message cleanup on failure.
+      await gotoWithSchemeFallback(page, appKnowledge.url, { waitUntil: 'networkidle', timeout: 30000 }, { explicitScheme: true });
+    } catch (e) {
+      const cls = classifyFailure({ cause: 'nav_timeout', description: `Navigation failed: ${e.message}` });
+      const friendly = new Error(`Couldn't reach the app to start this session — it may be down or unreachable right now.`);
+      friendly.category = cls.category;
+      friendly.failureCause = cls.cause;
+      throw friendly;
+    }
     await page.waitForTimeout(1500);
     // visionLogin has no internal overall-timeout — if the Anthropic vision
     // call stalls, or the login page has something visionLogin can't parse
