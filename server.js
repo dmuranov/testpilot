@@ -18,6 +18,7 @@ import { randomUUID, createHash, timingSafeEqual, createCipheriv, createDecipher
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'node:os';
+import net from 'node:net';
 import nodemailer from 'nodemailer';
 import Stripe from 'stripe';
 
@@ -554,12 +555,24 @@ const NOCODE_HOSTS = [
   'lovable.app', 'webflow.io', 'wixsite.com', 'glide.page', 'softr.app',
 ];
 
+// A bare IP or a non-standard port (:3000, :8080, …) is almost always a
+// self-hosted box without TLS termination in front of it — trying https
+// first just buys a guaranteed timeout before the http retry kicks in.
+// Named public hosts with no port get the normal https-first treatment.
+function preferredScheme(hostPort) {
+  const [host, port] = String(hostPort || '').split(':');
+  if (port && port !== '80' && port !== '443') return 'http:';
+  if (net.isIP(host)) return 'http:';
+  return 'https:';
+}
+
 function normalizeAppUrl(raw) {
   let url;
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return { ok: false, error: 'URL required' };
+  const explicitScheme = /^https?:\/\//i.test(trimmed);
   try {
-    let candidate = String(raw || '').trim();
-    if (!candidate) return { ok: false, error: 'URL required' };
-    if (!/^https?:\/\//i.test(candidate)) candidate = 'https://' + candidate;
+    const candidate = explicitScheme ? trimmed : preferredScheme(trimmed.split(/[/?#]/)[0]) + '//' + trimmed;
     url = new URL(candidate);
   } catch {
     return { ok: false, error: 'Invalid URL' };
@@ -569,7 +582,11 @@ function normalizeAppUrl(raw) {
   // DISTINCT apps: municipality.foo.es and dashboardpro.foo.es must NOT collide.
   // (psl.get() registrable-domain collapse removed; multi-label TLDs like
   // foo.co.uk are preserved by keeping the full host.)
-  return { ok: true, normalized: host, original: String(raw).trim() };
+  // `navigable` is always a complete, schemed, absolute URL — safe to hand
+  // straight to page.goto(). `original` stays the untouched user input for
+  // display; a bare "vetcentricity.com" (no scheme) used to be passed to
+  // Playwright as-is and crash with "Cannot navigate to invalid URL".
+  return { ok: true, normalized: host, original: trimmed, navigable: url.href, explicitScheme };
 }
 
 function isValidEmailSyntax(e) {
@@ -1335,7 +1352,7 @@ app.post('/api/embed/connect', async (req, res) => {
         const appId = appUrl.replace(/https?:\/\//, '').replace(/[^a-z0-9]/gi, '-').substring(0, 40) + '--' + ownerH.substring(0, 4) + '-' + randomUUID().substring(0, 4);
         try {
           await acquireScanSlot();
-          await crawlApp(appId, appUrl, { email, password }, '', anthropicKey, () => {}, owner);
+          await crawlApp(appId, norm.navigable, { email, password }, '', anthropicKey, () => {}, owner, { explicitScheme: norm.explicitScheme });
           rec.appId = appId; rec.learning = false; saveEmbedTokens();
           console.log('[embed] learned app for token', token.slice(0, 14), '→', appId);
         } catch (e) {
@@ -3897,7 +3914,61 @@ async function resolveAndFill(page, fieldName, value, { nth } = {}) {
   return false;
 }
 
-async function crawlApp(appId, url, credentials, description, apiKey, onProgress, ownerEmail = '') {
+// Connection-level failures where the OTHER scheme might actually work —
+// as opposed to a 4xx/5xx (the server answered: scheme was right, something
+// else is wrong) or a DNS failure (wrong host entirely; no scheme fixes that).
+// A plain navigation timeout counts too: a firewall/security-group that
+// silently drops packets on the wrong port hangs instead of refusing, and
+// that looks exactly like a real timeout until the other scheme is tried.
+const SCHEME_RETRYABLE_RE = /ERR_SSL_PROTOCOL_ERROR|ERR_CONNECTION_REFUSED|ERR_CONNECTION_CLOSED|ERR_CONNECTION_RESET|ERR_CONNECTION_TIMED_OUT|ERR_EMPTY_RESPONSE|ERR_CERT_|ERR_SOCKET_NOT_CONNECTED|ECONNREFUSED|Timeout \d+ms exceeded/i;
+
+// Budget for the first attempt when we're only guessing the scheme — plenty
+// for a real page to reach domcontentloaded, short enough that a wrong or
+// hanging scheme doesn't cost the user a full minute before the working one
+// even starts. The (sole) attempt for an explicit scheme, and the final
+// fallback attempt, both get the caller's full timeout instead — there's no
+// reachability check left to rush at that point.
+const SCHEME_PROBE_TIMEOUT_MS = 10000;
+
+// Navigate with an automatic http(s) fallback. If the user typed a scheme
+// explicitly, that's a hard choice — we never silently downgrade it. If they
+// didn't, we try normalizeAppUrl's preferred scheme first and retry the other
+// one ONCE, but only on a connection-level failure (see SCHEME_RETRYABLE_RE
+// above) — a real HTTP response (even an error page) means the scheme was
+// fine, so it's returned as-is with no retry. On total failure the thrown
+// error carries `attemptedUrls` so the caller can say exactly what it tried.
+async function gotoWithSchemeFallback(page, navigableUrl, gotoOpts, { explicitScheme = false, onProgress } = {}) {
+  const primary = new URL(navigableUrl);
+  const schemes = explicitScheme ? [primary.protocol] : [primary.protocol, primary.protocol === 'https:' ? 'http:' : 'https:'];
+  const attempted = [];
+  let lastErr;
+  for (let i = 0; i < schemes.length; i++) {
+    const candidate = new URL(navigableUrl);
+    candidate.protocol = schemes[i];
+    attempted.push(candidate.href);
+    const isProbe = schemes.length > 1 && i === 0;
+    const opts = isProbe ? { ...gotoOpts, timeout: Math.min(gotoOpts?.timeout ?? SCHEME_PROBE_TIMEOUT_MS, SCHEME_PROBE_TIMEOUT_MS) } : gotoOpts;
+    try {
+      const response = await page.goto(candidate.href, opts);
+      // page.url() (post-navigation, post-redirect), NOT candidate.href (what
+      // we merely attempted): an http candidate that gets 301'd to https by
+      // the server is a working https site, and reporting it as http would
+      // both send every later run through a needless redirect hop and trip
+      // the plaintext-credentials warning below on a site that's encrypted.
+      const landedUrl = page.url() || candidate.href;
+      return { response, urlUsed: landedUrl };
+    } catch (e) {
+      lastErr = e;
+      const canRetry = i < schemes.length - 1 && SCHEME_RETRYABLE_RE.test(e.message || '');
+      if (!canRetry) { lastErr.attemptedUrls = attempted; throw lastErr; }
+      onProgress?.({ phase: 'navigating', message: `${schemes[i].replace(':', '')} didn't connect — trying ${schemes[i + 1].replace(':', '')}...` });
+    }
+  }
+  lastErr.attemptedUrls = attempted;
+  throw lastErr;
+}
+
+async function crawlApp(appId, url, credentials, description, apiKey, onProgress, ownerEmail = '', navOpts = {}) {
   const browser = await launchBrowser();
   // "Bring your own session": hydrate the context with a pasted Playwright
   // storageState if provided, so SSO/MFA/CAPTCHA-walled apps can be crawled.
@@ -4003,7 +4074,38 @@ async function crawlApp(appId, url, credentials, description, apiKey, onProgress
     // whatever currentCrawlPath held before we set it (empty, or the last
     // page) is wrong for effectively every page-load-time error a site has.
     currentCrawlPath = routeKey(url);
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    let nav;
+    try {
+      nav = await gotoWithSchemeFallback(page, url, { waitUntil: 'domcontentloaded', timeout: 60000 }, {
+        explicitScheme: navOpts.explicitScheme,
+        onProgress,
+      });
+    } catch (e) {
+      // Never surface Playwright's raw "Protocol error / Call log:" trace —
+      // it's meaningless to a vibe coder. Classify + reword — and since we
+      // know exactly which URL(s) we just tried, name them: that tells the
+      // user their typo isn't the problem, instead of vaguely asking them to
+      // "check the address" when we already ruled that out.
+      const cls = classifyFailure({ cause: 'nav_timeout', description: `Navigation failed: ${e.message}` });
+      const tried = e.attemptedUrls || [url];
+      const friendly = new Error(tried.length > 1
+        ? `Tried ${tried.join(' and ')} — neither responded. The site may be down or blocking automated visits.`
+        : `Couldn't reach ${tried[0]} — check the site is up and reachable, then try again.`);
+      friendly.category = cls.category;
+      friendly.failureCause = cls.cause;
+      throw friendly;
+    }
+    // Rebind to whatever scheme actually worked so every downstream use
+    // (baseUrl, appKnowledge.url, future test runs against this app) reuses
+    // the proven URL instead of re-guessing the scheme every time.
+    url = nav.urlUsed;
+    appKnowledge.url = url;
+    learnAppOrigin = new URL(url).origin;
+    // Gated on where we actually LANDED, not which scheme we attempted — a
+    // server that 301s http → https is encrypted, and shouldn't get flagged.
+    if (new URL(url).protocol === 'http:' && credentials?.email) {
+      onProgress?.({ phase: 'navigating', message: `⚠️ ${new URL(url).host} only answered on plain http — credentials for this login will be sent unencrypted.` });
+    }
     await page.waitForTimeout(2000);
 
     // Login — skipped entirely if a sessionState was provided ("bring your own
@@ -9146,9 +9248,9 @@ app.post('/api/learn', async (req, res) => {
   res.write(`data: ${JSON.stringify({ phase: 'starting', message: 'Starting deep crawl...', appId })}\n\n`);
 
   try {
-    await crawlApp(appId, url, { email, password, sessionState: learnSessionState }, description, effectiveApiKey, (progress) => {
+    await crawlApp(appId, norm.navigable, { email, password, sessionState: learnSessionState }, description, effectiveApiKey, (progress) => {
       res.write(`data: ${JSON.stringify(progress)}\n\n`);
-    }, ownerEmail);
+    }, ownerEmail, { explicitScheme: norm.explicitScheme });
     res.write(`data: ${JSON.stringify({ phase: 'done', appId })}\n\n`);
   } catch (e) {
     // Carry the classification so the UI can show "couldn't log in / tool

@@ -1258,6 +1258,16 @@ async function ssLoadReports() {
   .step-info .step-icon { color: var(--accent); }
   .step-done .step-icon { color: var(--purple); }
 
+  /* A Learn-stream failure needs to read as visibly different from the
+     ⏳ crawl narration above it, not just a differently-colored icon in the
+     same neutral row — this is the line someone waited 30+ seconds to see. */
+  #learn-stream .step-fail {
+    background: rgba(239, 68, 68, 0.1);
+    border-left: 3px solid var(--red);
+    padding-left: 7px;
+    font-weight: 600;
+  }
+
   .step-text { color: var(--text-dim); word-break: break-word; }
   .step-pass .step-text { color: var(--text); }
   .step-retry .step-text { color: var(--text-muted); font-size: 11px; }
@@ -2785,7 +2795,7 @@ function renderLearn() {
         <div style="margin-top:16px">
           <div class="test-stream" id="learn-stream">
             ${state.learnProgress.map(p => `
-              <div class="step-line step-info">
+              <div class="step-line ${p.phase === 'error' ? 'step-fail' : 'step-info'}">
                 <span class="step-icon">${p.phase === 'complete' ? '✅' : p.phase === 'error' ? '❌' : '⏳'}</span>
                 <span class="step-text">${p.message || p.error || JSON.stringify(p)}</span>
               </div>
