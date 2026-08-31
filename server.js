@@ -6451,7 +6451,22 @@ async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey)
     if (!safe.ok) throw new Error(`Blocked target URL: ${safe.error}`);
     // Login
     emitStep(testId, { type: 'info', message: 'Logging in...' });
-    await page.goto(appKnowledge.url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    try {
+      // The scheme itself was already proven reachable at Learn time (see
+      // gotoWithSchemeFallback there), so this is a single attempt, not a
+      // fresh guess — explicitScheme:true skips the fallback trial entirely.
+      // What this DOES still fix: a raw Playwright "Protocol error / Call
+      // log:" trace landing in the test report if the site is down or DNS
+      // changed since Learn — same class of surprise as the crawl bug, just
+      // at test time instead of learn time.
+      await gotoWithSchemeFallback(page, appKnowledge.url, { waitUntil: 'domcontentloaded', timeout: 60000 }, { explicitScheme: true });
+    } catch (e) {
+      const cls = classifyFailure({ cause: 'nav_timeout', description: `Navigation failed: ${e.message}` });
+      const friendly = new Error(`Couldn't reach ${appKnowledge.url} to run this test — the site may be down or unreachable right now.`);
+      friendly.category = cls.category;
+      friendly.failureCause = cls.cause;
+      throw friendly;
+    }
     await page.waitForTimeout(1500);
     // Login with one automatic retry — OR skipped entirely if a sessionState was
     // provided ("bring your own session"). For sessionState we do a stale-check
@@ -14169,7 +14184,14 @@ app.post('/api/security/api-intercept', async (req, res) => {
   } catch (e) {
     console.error('Deep security scan error:', e.message);
     if (_secCredit.reserved) refundRunCredit(sessionUser.email);
-    res.status(500).json({ error: e.message, results });
+    // Never leak a raw Playwright "Protocol error / Call log:" trace into the
+    // scan report — same reasoning as the Learn crawl and runAgentTest's
+    // nav-failure wrap. The credit is already refunded above regardless.
+    const rawNavError = /page\.goto:|net::ERR_|Protocol error|Call log:/i.test(e.message || '');
+    const friendlyMsg = rawNavError
+      ? `Couldn't reach ${appKnowledge.url} to run the scan — the site may be down or unreachable right now.`
+      : e.message;
+    res.status(500).json({ error: friendlyMsg, results });
   } finally {
     // Always close browsers
     if (browserA) await browserA.close().catch(() => {});
