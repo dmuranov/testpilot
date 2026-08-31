@@ -1088,11 +1088,17 @@ app.patch('/api/admin/users/:id', async (req, res) => {
   if (!requireAdmin(req, res)) return;
   const id = pgFilter(req.params.id);
   if (!id) return res.status(400).json({ error: 'Invalid id' });
-  const { plan, role, free_credits } = req.body;
+  // `credits` only gates anything for plan === 'onerun' (see
+  // reserveRunCreditOrDeny / the inline onerun check in /api/test) — comping
+  // runs for a free-plan user also needs plan set to 'onerun' in the same
+  // call, or the number sits in the DB unread. This used to accept
+  // `free_credits`, a column nothing ever checked — an admin field that
+  // silently did nothing is worse than no field, so it's gone.
+  const { plan, role, credits } = req.body;
   const update = {};
   if (plan !== undefined) update.plan = plan;
   if (role !== undefined) update.role = role;
-  if (free_credits !== undefined) update.free_credits = free_credits;
+  if (credits !== undefined) update.credits = credits;
   await supabase('PATCH', 'users', update, `?id=eq.${id}`);
   res.json({ ok: true });
 });
