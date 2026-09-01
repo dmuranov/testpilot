@@ -67,7 +67,17 @@
 <!-- data-stall-ms: this whole page IS a /api/test/:id/stream viewer, where a
      single legitimate step can take ~100s (server.js, runAgentTest timeout
      comment) — the 90s script default would false-positive on a normal run. -->
-<script src="/signal.js" defer data-stall-ms="180000"></script>
+<!-- NOT deferred, unlike every other page: the inline script below calls
+     connect() -> new EventSource(...) immediately at parse time (this page's
+     whole purpose is to auto-connect on load), which races a deferred
+     signal.js — connect() would run first and get the native, unwrapped
+     EventSource, silently disabling stall/CLOSED detection for this page's
+     only stream. Found by actually running it: the connection sat at
+     readyState CONNECTING for 10+ minutes with zero bytes ever received
+     (confirmed via curl too — a real, unrelated server-side quirk for a
+     nonexistent testId) and stream_stalled never fired, on a fake testId
+     that would never emit a real 'done'/'summary' event either way. -->
+<script src="/signal.js" data-stall-ms="180000"></script>
 <script src="/support-widget.js" defer></script>
 </head>
 <body>
