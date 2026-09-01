@@ -318,6 +318,15 @@
       Wrapped.OPEN = NativeEventSource.OPEN;
       Wrapped.CLOSED = NativeEventSource.CLOSED;
       window.EventSource = Wrapped;
+      // Load-order flag: a page whose own script opens an EventSource at
+      // parse time (live-test.html's connect()) can only get the wrapped
+      // constructor if this script ran first. That's a real dependency on
+      // tag order, not something a diff makes obvious — a future "tidy up
+      // the script tags" pass could re-add defer here, silently going back
+      // to the native EventSource with no error anywhere. Any such page
+      // should check this flag before connecting and warn if it's missing,
+      // rather than let stall/CLOSED detection go quietly inert again.
+      window.__tpEventSourceWrapped = true;
     })();
 
     // --- stuck detector ------------------------------------------------------

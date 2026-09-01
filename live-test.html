@@ -134,6 +134,14 @@
   }
 
   function connect() {
+    // This only works because /signal.js above is NOT deferred, so it wins
+    // the race against this script and wraps EventSource before we ever get
+    // here. If someone "tidies up" that tag later and re-adds defer, stall/
+    // CLOSED detection on this page goes silently inert again — nothing
+    // breaks visibly, it just stops reporting. Announce it instead.
+    if (!window.__tpEventSourceWrapped) {
+      console.warn('[live-test] EventSource is not instrumented by signal.js — check that its <script> tag has no defer/async and sits above this script in the document.');
+    }
     const events = new EventSource('/api/test/' + encodeURIComponent(testId) + '/stream');
     events.onopen = () => {
       if (!connected) {
