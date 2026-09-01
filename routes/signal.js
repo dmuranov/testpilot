@@ -30,6 +30,8 @@ const CFG = {
   CIRCUIT_WINDOW_MS: 10 * 60_000,   // "distinct new signatures" lookback for the breaker
   CIRCUIT_THRESHOLD: 5,             // more than this many brand-new signatures in the window trips it
   CIRCUIT_COOLDOWN_MS: 30 * 60_000, // how long the breaker stays open once tripped
+  STRANDED_QUEUED_MS: 5 * 60_000,      // a 'queued' row with no job_id past this age is stranded
+  STRANDED_SWEEP_INTERVAL_MS: 5 * 60_000,
 };
 
 const ALLOWED_TYPES = new Set([
@@ -113,6 +115,47 @@ function enqueueRateLimitReason() {
   if (enqueueTimestamps.length >= CFG.HOURLY_ENQUEUE_CAP) return 'hourly_cap';
   return null;
 }
+
+// Every rollback below writes a signature's status back from 'queued' —
+// the RPC's enqueue branch only ever fires from 'watching', so a row left
+// stranded at 'queued' (this write failing silently, a network blip, the
+// process dying mid-request) can never be picked up again no matter how
+// many more times the underlying bug recurs. Logging on failure here is
+// necessary but not sufficient — see sweepStrandedQueued below for the
+// same-shape failure this can't catch (nothing runs this code at all).
+function resetSignatureStatus(hash, status) {
+  return supabase.from('error_signatures').update({ status }).eq('signature_hash', hash)
+    .then(({ error }) => {
+      if (error) console.error(`[signal] failed to reset ${hash.slice(0, 12)} to '${status}':`, error.message);
+    }, (e) => {
+      console.error(`[signal] failed to reset ${hash.slice(0, 12)} to '${status}':`, e.message);
+    });
+}
+
+// Self-healing backstop for exactly that case: a row sitting in 'queued'
+// with no job_id (so no enqueue attempt is actually in flight for it) past
+// a few minutes is stranded, whatever the cause. Sweeping it back to
+// 'watching' means the next real occurrence — and there will be one, since
+// nothing about the underlying bug changed — gets a fresh chance to enqueue.
+async function sweepStrandedQueued() {
+  try {
+    const cutoff = new Date(Date.now() - CFG.STRANDED_QUEUED_MS).toISOString();
+    const { data, error } = await supabase
+      .from('error_signatures')
+      .update({ status: 'watching' })
+      .eq('status', 'queued')
+      .is('job_id', null)
+      .lt('last_seen', cutoff)
+      .select('signature_hash');
+    if (error) { console.error('[signal] stranded-queued sweep failed:', error.message); return; }
+    if (data && data.length) {
+      console.warn(`[signal] swept ${data.length} signature(s) stranded in 'queued' back to 'watching': ${data.map((r) => r.signature_hash.slice(0, 12)).join(', ')}`);
+    }
+  } catch (e) {
+    console.error('[signal] stranded-queued sweep failed:', e.message);
+  }
+}
+setInterval(sweepStrandedQueued, CFG.STRANDED_SWEEP_INTERVAL_MS).unref?.();
 
 // -------------------------------------------------------------- normalization
 function normalizePath(p) {
@@ -292,14 +335,14 @@ router.post('/', express.json({ limit: '32kb' }), async (req, res) => {
           // "we noticed you're stuck" is genuinely right even when nothing
           // is going to auto-fix it.
           row.out_status = 'ignored';
-          supabase.from('error_signatures').update({ status: 'ignored' }).eq('signature_hash', hash).then(() => {}, () => {});
+          resetSignatureStatus(hash, 'ignored');
         } else if (rateLimitReason) {
           console.warn(`[signal] enqueue suppressed for ${hash.slice(0, 12)} (${rateLimitReason})`);
           // Retryable — hand it back to 'watching' so a later hit (this
           // signature, still real) gets re-evaluated once capacity frees up,
           // rather than sitting in 'queued' with nothing ever processing it.
           row.out_status = 'watching';
-          supabase.from('error_signatures').update({ status: 'watching' }).eq('signature_hash', hash).then(() => {}, () => {});
+          resetSignatureStatus(hash, 'watching');
         } else {
           // Exactly one caller ever reaches here for a given hash — the RPC
           // flipped status to 'queued' under a row lock.
@@ -312,10 +355,7 @@ router.post('/', express.json({ limit: '32kb' }), async (req, res) => {
               console.error('enqueueFixJob failed:', e.message);
               // Hand the signature back so a later hit can retry rather than
               // leaving it stuck in 'queued' with nothing working on it.
-              supabase.from('error_signatures')
-                .update({ status: 'watching' })
-                .eq('signature_hash', hash)
-                .then(() => {}, () => {});
+              resetSignatureStatus(hash, 'watching');
             });
         }
       }
