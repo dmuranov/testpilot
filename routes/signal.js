@@ -26,6 +26,10 @@ const CFG = {
   HELP_COOLDOWN_MS: 10 * 60_000,
   MIN_OCCURRENCES: 3,           // never enqueue an agent job off a single report
   MIN_SESSIONS: 2,
+  HOURLY_ENQUEUE_CAP: 3,        // max auto-fix jobs started in any rolling hour
+  CIRCUIT_WINDOW_MS: 10 * 60_000,   // "distinct new signatures" lookback for the breaker
+  CIRCUIT_THRESHOLD: 5,             // more than this many brand-new signatures in the window trips it
+  CIRCUIT_COOLDOWN_MS: 30 * 60_000, // how long the breaker stays open once tripped
 };
 
 const ALLOWED_TYPES = new Set([
@@ -61,6 +65,54 @@ setInterval(() => {
   for (const [k, v] of seen) if (now - v > 600_000) seen.delete(k);
   for (const [k, v] of helped) if (now - v > CFG.HELP_COOLDOWN_MS * 2) helped.delete(k);
 }, 120_000).unref?.();
+
+// ------------------------------------------------------------ enqueue limits
+// A per-signature threshold (3 occurrences/2 sessions) has no idea how many
+// OTHER signatures are also crossing it right now. A bad deploy produces
+// many distinct brand-new signatures at once — different stack origins on
+// different pages — each independently legitimate by its own count, but
+// ten simultaneous agent runs and ten PRs is not the right response to one
+// bad deploy; one rollback is. Two independent guards:
+//   - an hourly ceiling on actual auto-enqueues, so volume alone can't run
+//     up unbounded agent/API spend even on a slow, steady stream of real bugs
+//   - a circuit breaker keyed on brand-new signatures appearing (not on
+//     enqueues — this needs to trip BEFORE any of them individually reaches
+//     enqueue-eligibility, since that's the whole point of catching a bad
+//     deploy fast rather than after several independent thresholds clear)
+const enqueueTimestamps = [];      // one entry per actual auto-enqueue, for the hourly cap
+const newSignatureTimestamps = []; // one entry per signature's very first occurrence
+let breakerTrippedUntil = 0;
+
+function pruneOlderThan(arr, windowMs) {
+  const cutoff = Date.now() - windowMs;
+  while (arr.length && arr[0] < cutoff) arr.shift();
+}
+
+function noteNewSignature() {
+  const now = Date.now();
+  newSignatureTimestamps.push(now);
+  pruneOlderThan(newSignatureTimestamps, CFG.CIRCUIT_WINDOW_MS);
+  if (newSignatureTimestamps.length > CFG.CIRCUIT_THRESHOLD && now >= breakerTrippedUntil) {
+    breakerTrippedUntil = now + CFG.CIRCUIT_COOLDOWN_MS;
+    sendAdminAlert(
+      `Circuit breaker: ${newSignatureTimestamps.length} distinct new error signatures in ${Math.round(CFG.CIRCUIT_WINDOW_MS / 60000)} minutes — auto-fix paused`,
+      { count: newSignatureTimestamps.length, windowMs: CFG.CIRCUIT_WINDOW_MS, pausedUntil: new Date(breakerTrippedUntil).toISOString() },
+      'circuit-breaker',
+    );
+  }
+}
+
+// Reason is returned (not just a boolean) because the caller needs to know
+// whether this is retryable later (rate/breaker — put the signature back to
+// 'watching') or terminal (a 4xx — see the client-error check at the call
+// site, handled separately since it isn't a rate limit at all).
+function enqueueRateLimitReason() {
+  const now = Date.now();
+  if (now < breakerTrippedUntil) return 'circuit_breaker';
+  pruneOlderThan(enqueueTimestamps, 60 * 60_000);
+  if (enqueueTimestamps.length >= CFG.HOURLY_ENQUEUE_CAP) return 'hourly_cap';
+  return null;
+}
 
 // -------------------------------------------------------------- normalization
 function normalizePath(p) {
@@ -219,22 +271,53 @@ router.post('/', express.json({ limit: '32kb' }), async (req, res) => {
       const row = Array.isArray(data) ? data[0] : data;
       if (!row) continue;
 
+      if (row.out_occurrences === 1) noteNewSignature();
+
       if (row.out_should_enqueue) {
-        // Exactly one caller ever reaches here for a given hash — the RPC
-        // flipped status to 'queued' under a row lock.
-        enqueueFixJob({ hash, page: ev.page, event: ev })
-          .then((r) => supabase.from('error_signatures')
-            .update({ job_id: r && r.jobId ? String(r.jobId) : null, status: 'fix_in_progress' })
-            .eq('signature_hash', hash))
-          .catch((e) => {
-            console.error('enqueueFixJob failed:', e.message);
-            // Hand the signature back so a later hit can retry rather than
-            // leaving it stuck in 'queued' with nothing working on it.
-            supabase.from('error_signatures')
-              .update({ status: 'watching' })
-              .eq('signature_hash', hash)
-              .then(() => {}, () => {});
-          });
+        // 4xx is an input problem, not a bug — a rejected URL, bad
+        // credentials, a validation guard doing its job. Every distinct
+        // typo normalizes to the same signature, so this class crosses the
+        // occurrence/session threshold FASTER than most real bugs ever
+        // would; auto-enqueueing on it means asking an agent to "fix" a
+        // guard that's working correctly. 5xx and anything with no status
+        // at all (network_failure, uncaught_error, stream_stalled, ...) is
+        // TestPilot's own fault and stays eligible.
+        const isClientError = typeof ev.status === 'number' && ev.status >= 400 && ev.status < 500;
+        const rateLimitReason = isClientError ? null : enqueueRateLimitReason();
+
+        if (isClientError) {
+          // Terminal, not retryable — mark it so future occurrences of the
+          // same signature don't re-evaluate at all (the RPC's 'watching'
+          // branch never touches 'ignored'). Help is still offered below;
+          // "we noticed you're stuck" is genuinely right even when nothing
+          // is going to auto-fix it.
+          row.out_status = 'ignored';
+          supabase.from('error_signatures').update({ status: 'ignored' }).eq('signature_hash', hash).then(() => {}, () => {});
+        } else if (rateLimitReason) {
+          console.warn(`[signal] enqueue suppressed for ${hash.slice(0, 12)} (${rateLimitReason})`);
+          // Retryable — hand it back to 'watching' so a later hit (this
+          // signature, still real) gets re-evaluated once capacity frees up,
+          // rather than sitting in 'queued' with nothing ever processing it.
+          row.out_status = 'watching';
+          supabase.from('error_signatures').update({ status: 'watching' }).eq('signature_hash', hash).then(() => {}, () => {});
+        } else {
+          // Exactly one caller ever reaches here for a given hash — the RPC
+          // flipped status to 'queued' under a row lock.
+          enqueueTimestamps.push(Date.now());
+          enqueueFixJob({ hash, page: ev.page, event: ev })
+            .then((r) => supabase.from('error_signatures')
+              .update({ job_id: r && r.jobId ? String(r.jobId) : null, status: 'fix_in_progress' })
+              .eq('signature_hash', hash))
+            .catch((e) => {
+              console.error('enqueueFixJob failed:', e.message);
+              // Hand the signature back so a later hit can retry rather than
+              // leaving it stuck in 'queued' with nothing working on it.
+              supabase.from('error_signatures')
+                .update({ status: 'watching' })
+                .eq('signature_hash', hash)
+                .then(() => {}, () => {});
+            });
+        }
       }
 
       if (row.out_is_regression) {
@@ -251,7 +334,10 @@ router.post('/', express.json({ limit: '32kb' }), async (req, res) => {
           reply.cannedMessage = "We've seen this one and a fix is already underway.";
           reply.context = { hash: hash.slice(0, 12), type: ev.type, path: ev.path || ev.page };
         }
-      } else if (row.out_status === 'regressed' || row.out_status === 'watching') {
+      } else if (row.out_status === 'regressed' || row.out_status === 'watching' || row.out_status === 'ignored') {
+        // 'ignored' (a 4xx that crossed the threshold, or one rate-limited
+        // by the caps above) still gets a genuine "we noticed you're
+        // stuck" — it only skips the misleading "a fix is underway".
         if (canOffer()) {
           reply.offerHelp = true;
           reply.context = { hash: hash.slice(0, 12), type: ev.type, path: ev.path || ev.page };
