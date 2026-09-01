@@ -32,6 +32,8 @@ const CFG = {
   CIRCUIT_COOLDOWN_MS: 30 * 60_000, // how long the breaker stays open once tripped
   STRANDED_QUEUED_MS: 5 * 60_000,      // a 'queued' row with no job_id past this age is stranded
   STRANDED_SWEEP_INTERVAL_MS: 5 * 60_000,
+  IGNORED_DIGEST_INTERVAL_MS: 7 * 24 * 60 * 60_000, // weekly
+  IGNORED_DIGEST_THRESHOLD: 10, // occurrence_count on the WORST ignored signature before it's worth an email
 };
 
 const ALLOWED_TYPES = new Set([
@@ -137,6 +139,14 @@ function resetSignatureStatus(hash, status) {
 // a few minutes is stranded, whatever the cause. Sweeping it back to
 // 'watching' means the next real occurrence — and there will be one, since
 // nothing about the underlying bug changed — gets a fresh chance to enqueue.
+//
+// Filtered on queued_at, NOT last_seen: last_seen is bumped by record_signal
+// on every occurrence, including while the row is stranded and actively
+// recurring — the case that matters most, and the one a last_seen-based
+// filter can never catch (a live bug's last_seen is always recent).
+// queued_at (see sql/002_queued_at.sql) is stamped once, on the transition
+// into 'queued', and untouched by anything after — its age is genuinely how
+// long the row has been stuck.
 async function sweepStrandedQueued() {
   try {
     const cutoff = new Date(Date.now() - CFG.STRANDED_QUEUED_MS).toISOString();
@@ -145,7 +155,7 @@ async function sweepStrandedQueued() {
       .update({ status: 'watching' })
       .eq('status', 'queued')
       .is('job_id', null)
-      .lt('last_seen', cutoff)
+      .lt('queued_at', cutoff)
       .select('signature_hash');
     if (error) { console.error('[signal] stranded-queued sweep failed:', error.message); return; }
     if (data && data.length) {
@@ -156,6 +166,48 @@ async function sweepStrandedQueued() {
   }
 }
 setInterval(sweepStrandedQueued, CFG.STRANDED_SWEEP_INTERVAL_MS).unref?.();
+
+// 'ignored' is terminal (see the isClientError branch below) — a 4xx that
+// crosses the enqueue threshold is written off permanently and never
+// re-evaluated. Correct for a typo'd URL, but a shipped validation
+// regression that starts rejecting previously-valid input is a real bug
+// wearing a 4xx, and would be silently written off the same way. A query
+// nobody is scheduled to run is a query nobody runs — this turns
+// sql/watch-ignored-signatures.sql into an actual alert instead of
+// something that depends on a human remembering, the same way the
+// occurrence-count sweep depends on a human reading it. Sends nothing when
+// the worst offender is still just routine trickle (many distinct typos,
+// few hits each); sends once when one signature's count suggests a cliff
+// (many hits on the SAME rejected shape) instead.
+async function sendIgnoredDigestIfDue() {
+  try {
+    const { data, error } = await supabase
+      .from('error_signatures')
+      .select('signature_hash,occurrence_count,session_count,raw_sample')
+      .eq('status', 'ignored')
+      .order('occurrence_count', { ascending: false })
+      .limit(20);
+    if (error) { console.error('[signal] ignored-digest query failed:', error.message); return; }
+    if (!data || !data.length) return;
+
+    const worst = data[0];
+    if (worst.occurrence_count < CFG.IGNORED_DIGEST_THRESHOLD) return; // routine trickle — nothing worth a human's time
+
+    const table = data.map((r) => {
+      const ev = (r.raw_sample && r.raw_sample.event) || {};
+      return `${r.occurrence_count}x (${r.session_count} sessions) — ${ev.path || (r.raw_sample && r.raw_sample.page) || 'unknown'} status=${ev.status ?? 'n/a'} — ${r.signature_hash.slice(0, 12)}`;
+    }).join('\n');
+
+    await sendAdminAlert(
+      `Weekly check: ${worst.occurrence_count}x on one 'ignored' signature — possible validation regression, not just typo trickle`,
+      { topSignatureHash: worst.signature_hash, topOccurrenceCount: worst.occurrence_count, table },
+      'ignored-digest-weekly',
+    );
+  } catch (e) {
+    console.error('[signal] ignored-digest failed:', e.message);
+  }
+}
+setInterval(sendIgnoredDigestIfDue, CFG.IGNORED_DIGEST_INTERVAL_MS).unref?.();
 
 // -------------------------------------------------------------- normalization
 function normalizePath(p) {
