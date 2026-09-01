@@ -174,6 +174,12 @@
 </div>
 
 <script src="/attrib.js"></script>
+<!-- data-stall-ms: this page's test view watches /api/test/:id/stream, where
+     a single legitimate step can take ~100s (server.js, runAgentTest timeout
+     comment) — anything near the 90s script default would false-positive on
+     a normal run. -->
+<script src="/signal.js" defer data-stall-ms="180000"></script>
+<script src="/support-widget.js" defer></script>
 <script>
 const state = { appId: null, testId: null, userEmail: null, appEmail: '', appPw: '', learnSummary: '' };
 
@@ -322,7 +328,24 @@ async function runLearnStream({ url, userEmail, appEmail, appPw }) {
             }, 1300);
             return;
           }
-          if (ev.phase === 'error') return;
+          if (ev.phase === 'error') {
+            // A 200 response with an in-band error line is invisible to
+            // signal.js's fetch wrapper — it already marked this call
+            // "pending" the moment headers arrived. Report it explicitly.
+            // ev.category (server.js emits it on this same event, defaulting
+            // to 'tool_limitation') is the real discriminator between
+            // distinct causes — without it every learn failure hashes the
+            // same and only the first one ever gets looked at.
+            try {
+              window.tpReportSignal && window.tpReportSignal({
+                type: 'stream_error',
+                name: ev.category || 'unknown',
+                message: ev.message,
+                path: '/api/learn'
+              });
+            } catch (e) {}
+            return;
+          }
         } catch {}
       }
     }

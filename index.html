@@ -7,6 +7,15 @@
 <link rel="icon" type="image/png" href="/brand/favicon-32.png">
 <link rel="apple-touch-icon" href="/brand/apple-touch-icon.png">
 <link rel="manifest" href="/brand/site.webmanifest">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://testpilotapp.dev/app">
+<meta property="og:title" content="TestPilot — AI App Tester">
+<meta property="og:description" content="Test faster. Launch smarter.">
+<meta property="og:image" content="https://testpilotapp.dev/brand/og-share-card.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://testpilotapp.dev/brand/og-share-card.png">
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
 <script type="text/javascript">/* Cookie consent — gates Microsoft Clarity (GDPR/ePrivacy: no analytics before opt-in; choice remembered). */
 (function(){var KEY='tp-cookie-consent';function loadClarity(){(function(c,l,a,r,i,t,y){c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y)})(window,document,"clarity","script","w97af8wesr");}function get(){try{return localStorage.getItem(KEY);}catch(e){return null;}}function decide(v){try{localStorage.setItem(KEY,v);}catch(e){}var b=document.getElementById('tp-consent');if(b&&b.parentNode)b.parentNode.removeChild(b);if(v==='granted')loadClarity();}var c=get();if(c==='granted'){loadClarity();return;}if(c==='denied'){return;}function show(){if(document.getElementById('tp-consent'))return;var d=document.createElement('div');d.id='tp-consent';d.setAttribute('role','dialog');d.setAttribute('aria-label','Cookie consent');d.style.cssText='position:fixed;left:16px;right:16px;bottom:16px;z-index:2147483647;max-width:560px;margin:0 auto;background:#111;border:1px solid rgba(200,240,64,0.3);border-radius:6px;padding:16px 18px;font-family:system-ui,-apple-system,sans-serif;box-shadow:0 8px 32px rgba(0,0,0,0.55)';d.innerHTML='<p style="margin:0 0 12px;font-size:13px;line-height:1.6;color:#cfcfcf">We use analytics cookies (Microsoft Clarity) to see how TestPilot is used and improve it. Accept or decline — your choice is remembered. See our <a href="/privacy.html" style="color:#c8f040">Privacy Policy</a>.</p><div style="display:flex;gap:8px;justify-content:flex-end"><button id="tpc-no" style="background:transparent;border:1px solid #444;color:#ccc;font-size:13px;padding:8px 16px;border-radius:4px;cursor:pointer">Decline</button><button id="tpc-yes" style="background:#c8f040;border:none;color:#080808;font-weight:700;font-size:13px;padding:8px 16px;border-radius:4px;cursor:pointer">Accept</button></div>';document.body.appendChild(d);document.getElementById('tpc-yes').onclick=function(){decide('granted');};document.getElementById('tpc-no').onclick=function(){decide('denied');};}if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',show);}else{show();}})();
@@ -1941,6 +1950,12 @@ async function ssLoadReports() {
 
 </style>
 <script src="/attrib.js"></script>
+<!-- data-stall-ms: the dashboard opens /api/test/:id/stream (twice) plus the
+     sweep/saved-sessions streams — a single legitimate test step can take
+     ~100s (server.js, runAgentTest timeout comment) — the 90s script default
+     would false-positive on a normal run. -->
+<script src="/signal.js" defer data-stall-ms="180000"></script>
+<script src="/support-widget.js" defer></script>
 </head>
 <body>
 
@@ -2267,14 +2282,14 @@ function render() {
     <div class="sidebar-overlay" onclick="toggleSidebar()"></div>
     <div class="sidebar">
       <div class="logo">
-        <div style="display:flex;align-items:center;gap:10px">
-          <svg width="32" height="32" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <div style="display:flex;align-items:flex-end;gap:10px;padding-bottom:4px">
+          <svg width="52" height="52" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
             <style>.tpca{animation:tpba 1.1s step-end infinite}@keyframes tpba{0%,49%{opacity:1}50%,100%{opacity:0}}</style>
-            <rect x="1" y="1" width="46" height="46" rx="2" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
+            <rect x="1" y="1" width="46" height="46" rx="2" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1.5"/>
             <text x="6" y="13" font-family="DM Mono,monospace" font-size="8" fill="#333">run_test</text>
-            <polyline points="6,24 14,31 6,38" stroke="#c8f040" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-            <line x1="18" y1="31" x2="33" y2="31" stroke="#c8f040" stroke-width="2" stroke-linecap="round" opacity="0.35"/>
-            <rect x="35" y="26" width="2.5" height="10" rx="1" fill="#c8f040" class="tpca"/>
+            <polyline points="6,24 14,31 6,38" stroke="#c8f040" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+            <line x1="18" y1="31" x2="33" y2="31" stroke="#c8f040" stroke-width="3" stroke-linecap="round" opacity="0.35"/>
+            <rect x="35" y="26" width="3.5" height="10" rx="1" fill="#c8f040" class="tpca"/>
           </svg>
           <h1>Test<span>Pilot</span></h1>
         </div>

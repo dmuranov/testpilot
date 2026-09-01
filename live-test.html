@@ -64,6 +64,11 @@
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 2px; }
 </style>
+<!-- data-stall-ms: this whole page IS a /api/test/:id/stream viewer, where a
+     single legitimate step can take ~100s (server.js, runAgentTest timeout
+     comment) — the 90s script default would false-positive on a normal run. -->
+<script src="/signal.js" defer data-stall-ms="180000"></script>
+<script src="/support-widget.js" defer></script>
 </head>
 <body>
 <header>

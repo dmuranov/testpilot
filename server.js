@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { runStagingSafeTests } from './routes/staging-test.js';
 import netlifyRoutes from './routes/netlify.js';
 import githubRoutes from './routes/github.js';
+import signalRoutes from './routes/signal.js';
 import { classifyFailure, summarizeFindings, isConfirmedAppBug, Category, Confidence } from './routes/classify.js';
 import { parseScopeCap, shouldFlagDropdownDivergence, isCommitStep, classifyCommit, isPublicPath, isAuthReplayEndpoint, corsVerdict, noAuthVerdict, crossTenantVerdict, stampFinding, scanForSecrets, isStaticAsset, extractSupabaseConfig, supabaseTablesFromSpec, supabaseTablesFromTraffic, rlsReadVerdict } from './routes/sec-classify.js';
 import { detectUndisclosedRename, renameDisclosureNote, terminalVerifyDiagnostics, summaryLooksBlocked } from './routes/done-gates.js';
@@ -12393,22 +12394,13 @@ app.get('/api/billing/plan', (req, res) => {
 // ═══════════════════════════════════════════════════════════════
 // SUPPORT — Claude pre-diagnosis
 // ═══════════════════════════════════════════════════════════════
-app.post('/api/support', async (req, res) => {
-  const chunks = [];
-  req.on('data', chunk => chunks.push(chunk));
-  req.on('end', async () => {
-    try {
-      const body = Buffer.concat(chunks).toString();
-      const getField = (name) => {
-        const match = body.match(new RegExp(`name="${name}"\\r\\n\\r\\n([^\\r\\n-]+)`));
-        return match ? match[1].trim() : '';
-      };
-      const description = getField('description');
-      const email = getField('email');
-      const plan = getField('plan');
-      if (!description) return res.status(400).json({ error: 'Description required' });
+// Shared by both request shapes below: the multipart contact form and the
+// support-widget's JSON POST (pre-filled from a captured error signature).
+async function finishSupportTicket(res, { description, email, plan }) {
+  try {
+    if (!description) return res.status(400).json({ error: 'Description required' });
 
-      // Claude diagnosis
+    // Claude diagnosis
       const client = new Anthropic({ apiKey: process.env.ANTHROPIC_SUPPORT_KEY || '' });
       let claudeDiagnosis = 'Claude diagnosis unavailable — API key not configured for support.';
       try {
@@ -12455,6 +12447,11 @@ Respond in plain text, no markdown.` }]
         </div>`
       });
 
+    // The widget path may have no real address to reply to (an anonymous
+    // pre-signup visitor, or no session cookie yet) — sending to '' or a
+    // placeholder would just bounce, so skip the confirmation in that case.
+    // The internal ticket email above always goes out regardless.
+    if (email && email.includes('@')) {
       await mailer.sendMail({
         from: '"TestPilot Support" <hello@testpilotapp.dev>',
         to: email,
@@ -12466,12 +12463,42 @@ Respond in plain text, no markdown.` }]
           <p style="color:#999;font-size:12px">Reply to this email if urgent.</p>
         </div>`
       });
-
-      res.json({ ok: true });
-    } catch (e) {
-      console.error('Support error:', e.message);
-      res.status(500).json({ error: e.message });
     }
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('Support error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+}
+
+app.post('/api/support', async (req, res) => {
+  // Widget path: signal.js/support-widget.js post JSON, already parsed into
+  // req.body by the global express.json() middleware (server.js:785). The
+  // legacy branch below reads the raw stream itself, which would find
+  // nothing left if express.json() already drained it for this content type.
+  if (req.is('application/json')) {
+    const body = req.body || {};
+    const token = req.cookies?.tpsession;
+    const session = token ? sessions.get(token) : null;
+    const context = body.context && typeof body.context === 'object' ? body.context : null;
+    const base = typeof body.description === 'string' ? body.description.trim() : '';
+    const description = context
+      ? `${base}\n\n[Auto-captured: ${context.type || 'unknown'} on ${context.path || body.url || 'unknown page'} — signature ${context.hash || 'n/a'}]`
+      : base;
+    return finishSupportTicket(res, { description, email: session?.email || '', plan: session?.plan || 'free' });
+  }
+
+  // Legacy path: the manual "contact support" form, posted as multipart/form-data.
+  const chunks = [];
+  req.on('data', chunk => chunks.push(chunk));
+  req.on('end', () => {
+    const raw = Buffer.concat(chunks).toString();
+    const getField = (name) => {
+      const match = raw.match(new RegExp(`name="${name}"\\r\\n\\r\\n([^\\r\\n-]+)`));
+      return match ? match[1].trim() : '';
+    };
+    finishSupportTicket(res, { description: getField('description'), email: getField('email'), plan: getField('plan') });
   });
 });
 
@@ -14248,6 +14275,34 @@ await backfillAppsFromPlatformMaps();
 // plan without their own session store.
 app.locals.sessions = sessions;
 app.use('/api/v1', githubRoutes);
+app.use('/api/signal', signalRoutes);
+
+// Called by testpilot-support-bridge's GitHub-merge webhook once an
+// auto-fix PR actually merges — the only writer of error_signatures.status
+// = 'fix_shipped' (and the anchor mark_fix_shipped's regression grace period
+// measures from). Bearer-authed with a secret shared only between the two
+// services, distinct from BRIDGE_TOKEN (which authorizes the opposite
+// direction) so a leak of one can't be used against the other.
+app.post('/api/internal/fix-shipped', async (req, res) => {
+  const token = (req.get('authorization') || '').replace(/^Bearer\s+/i, '');
+  const expected = process.env.TESTPILOT_CALLBACK_TOKEN;
+  if (!expected || token !== expected) return res.status(401).json({ error: 'unauthorized' });
+
+  const { signatureHash, prUrl } = req.body || {};
+  if (typeof signatureHash !== 'string' || !/^[0-9a-f]{64}$/.test(signatureHash)) {
+    return res.status(400).json({ error: 'signatureHash required (64-char hex)' });
+  }
+  try {
+    await supabase('POST', 'rpc/mark_fix_shipped', {
+      p_hash: signatureHash,
+      p_pr_url: typeof prUrl === 'string' ? prUrl.slice(0, 500) : null,
+    });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[fix-shipped] mark_fix_shipped failed:', e.message);
+    res.status(500).json({ error: 'update failed' });
+  }
+});
 
 // Upsert app into staging apps table
 app.post('/api/v1/apps/upsert', async (req, res) => {
