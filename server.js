@@ -14304,6 +14304,35 @@ app.post('/api/internal/fix-shipped', async (req, res) => {
   }
 });
 
+// Narrow, purpose-built status check for the signal->bridge->PR->merge
+// handoff, so answering "has this ever actually fired" doesn't require
+// handing anyone the Supabase service key. This token grants exactly this
+// one summary — no signature hashes, no raw_sample, no row-level detail —
+// distinct from every other token in this pipeline (BRIDGE_TOKEN,
+// TESTPILOT_CALLBACK_TOKEN) so a leak of it can't be used for anything else.
+// job_id is the durable signal for "a fix job actually started": it's set
+// once on a successful enqueue and never cleared by the rollback paths in
+// routes/signal.js, so it survives even if status later moved on.
+app.get('/api/internal/fix-pipeline-status', async (req, res) => {
+  const token = (req.get('authorization') || '').replace(/^Bearer\s+/i, '');
+  const expected = process.env.PIPELINE_STATUS_TOKEN;
+  if (!expected || token !== expected) return res.status(401).json({ error: 'unauthorized' });
+
+  try {
+    const rows = await supabase('GET', 'error_signatures', null, '?select=status,job_id');
+    res.json({
+      fixJobsEverStarted: rows.filter((r) => r.job_id).length,
+      currentlyQueued: rows.filter((r) => r.status === 'queued').length,
+      currentlyInProgress: rows.filter((r) => r.status === 'fix_in_progress').length,
+      everShipped: rows.filter((r) => r.status === 'fix_shipped' || r.status === 'regressed').length,
+      checkedAt: new Date().toISOString(),
+    });
+  } catch (e) {
+    console.error('[fix-pipeline-status] query failed:', e.message);
+    res.status(500).json({ error: 'query failed' });
+  }
+});
+
 // Upsert app into staging apps table
 app.post('/api/v1/apps/upsert', async (req, res) => {
   const token = req.cookies?.tpsession;
