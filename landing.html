@@ -226,24 +226,80 @@
 
   .btn-ghost:hover { color: var(--white); border-color: var(--white); }
 
-  .btn-sandbox {
-    display: inline-flex;
-    align-items: center;
-    gap: 10px;
-    background: transparent;
-    color: var(--accent);
-    font-family: 'Syne', sans-serif;
-    font-size: 15px;
-    font-weight: 700;
-    padding: 14px 30px;
-    border-radius: 2px;
-    border: 2px solid var(--accent);
+  /* Big, unmissable sandbox CTA — sits in the empty right side of the hero
+     next to the headline on wide screens; in normal flow (no overlap risk)
+     on anything narrower, including mobile. */
+  .hero-sandbox {
+    display: block;
     text-decoration: none;
-    letter-spacing: -0.2px;
-    transition: transform 0.15s, background 0.15s, color 0.15s;
+    margin-top: 44px;
+    max-width: 480px;
+    padding: 32px 34px;
+    border: 2px solid var(--accent);
+    background: rgba(200, 240, 64, 0.05);
+    opacity: 0;
+    animation: fadeUp 0.7s 0.55s forwards;
+    transition: transform 0.2s ease, background 0.2s ease, border-color 0.2s ease;
   }
 
-  .btn-sandbox:hover { background: var(--accent); color: var(--black); transform: translateY(-2px); }
+  .hero-sandbox:hover {
+    background: rgba(200, 240, 64, 0.1);
+    transform: translateY(-3px);
+  }
+
+  .hero-sandbox-label {
+    display: block;
+    font-family: 'DM Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 14px;
+  }
+
+  .hero-sandbox-title {
+    display: block;
+    font-family: 'Syne', sans-serif;
+    font-size: clamp(28px, 3vw, 38px);
+    font-weight: 800;
+    line-height: 1.05;
+    letter-spacing: -1px;
+    color: var(--white);
+  }
+
+  .hero-sandbox-title span { color: var(--accent); }
+
+  .hero-sandbox-sub {
+    display: block;
+    font-family: 'Inter', sans-serif;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--muted);
+    margin-top: 14px;
+    max-width: 400px;
+  }
+
+  .hero-sandbox-arrow {
+    display: block;
+    font-family: 'Syne', sans-serif;
+    font-weight: 700;
+    font-size: 14px;
+    color: var(--accent);
+    margin-top: 20px;
+  }
+
+  @media (min-width: 1300px) {
+    .hero-sandbox {
+      position: absolute;
+      top: 150px;
+      right: 40px;
+      margin-top: 0;
+      width: min(440px, 32vw);
+      z-index: 2;
+      transform: rotate(-1.2deg);
+    }
+    .hero-sandbox:hover { transform: rotate(-1.2deg) translateY(-4px); }
+  }
 
   .hero-price-note {
     font-family: 'Inter', sans-serif;
@@ -872,12 +928,16 @@
   </p>
   <div class="hero-actions">
     <a href="/first-run" class="btn-primary">Run your first test — free →</a>
-    <a href="/sandbox" class="btn-sandbox">🧪 Try the Sandbox Demo</a>
     <a href="#how" class="btn-ghost">See how it works</a>
   </div>
-  <p class="hero-price-note" style="margin-top:8px">// No signup, no target app needed — a fully simulated walkthrough</p>
   <p class="hero-price-note">// First test free · No credit card · No API key needed · Just your app's URL</p>
   <div class="hero-deco">TP</div>
+  <a href="/sandbox" class="hero-sandbox">
+    <span class="hero-sandbox-label">// no signup needed</span>
+    <span class="hero-sandbox-title">Try the <span>Sandbox</span> Demo</span>
+    <span class="hero-sandbox-sub">Watch TestPilot learn an app, find a real bug, and heal a broken selector — a fully simulated walkthrough.</span>
+    <span class="hero-sandbox-arrow">Explore it live →</span>
+  </a>
 </section>
 
 <!-- TICKER -->
