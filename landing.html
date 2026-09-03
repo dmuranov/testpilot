@@ -579,6 +579,13 @@
     margin-right: auto;
   }
 
+  .pricing-grid-3 {
+    grid-template-columns: repeat(3, 1fr);
+    max-width: 900px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
   .price-card {
     background: var(--dim);
     padding: 36px 28px;
@@ -1139,69 +1146,45 @@
   <p class="section-tag reveal">// pricing</p>
   <h2 class="reveal">Simple, honest pricing.</h2>
   <p class="reveal" style="font-family:'Inter',sans-serif;font-size:13px;color:var(--muted);max-width:560px;margin:0 auto 48px;text-align:center;line-height:1.8">You bring your own Claude API key. TestPilot never touches your data or charges hidden AI fees. <strong style="color:var(--white)">You only pay for what you actually use.</strong></p>
-  <div class="pricing-grid pricing-grid-5">
-
-    <div class="price-card reveal">
-      <p class="price-label">One Run</p>
-      <div class="price-amount">€5</div>
-      <p class="price-per">one-time · no commitment</p>
-      <ul class="price-features">
-        <li>1 full test run, 1 app</li>
-        <li>Bug report + screenshots</li>
-        <li>✓ Every feature included</li>
-        <li style="color:var(--muted)">Re-test a fix? €5 again — or go Solo</li>
-      </ul>
-      <a href="/first-run" class="price-btn">Try it now</a>
-    </div>
+  <div class="pricing-grid pricing-grid-3">
 
     <div class="price-card reveal">
       <p class="price-label">Solo</p>
-      <div class="price-amount">€10</div>
-      <p class="price-per">per month · 1 app</p>
+      <div class="price-amount">€19</div>
+      <p class="price-per">per month · up to 3 apps</p>
       <ul class="price-features">
         <li>Unlimited test runs</li>
-        <li>1 learned app</li>
+        <li>Up to 3 learned apps</li>
+        <li>Full self-healing loops</li>
         <li>Full test history</li>
-        <li>✓ Every feature included</li>
       </ul>
       <a href="/first-run" class="price-btn">Get started</a>
     </div>
 
     <div class="price-card featured reveal">
-      <p class="price-label">Starter</p>
-      <div class="price-amount">€29</div>
-      <p class="price-per">per month · up to 3 apps</p>
-      <ul class="price-features">
-        <li>Unlimited test runs</li>
-        <li>Up to 3 learned apps</li>
-        <li>Full test history</li>
-        <li>✓ Every feature included</li>
-      </ul>
-      <a href="/first-run" class="price-btn">Get started</a>
-    </div>
-
-    <div class="price-card reveal">
       <p class="price-label">Pro</p>
-      <div class="price-amount">€149</div>
+      <div class="price-amount">€49</div>
       <p class="price-per">per month · up to 10 apps</p>
       <ul class="price-features">
         <li>Unlimited test runs</li>
         <li>Up to 10 learned apps</li>
-        <li>Full test history</li>
-        <li>✓ Every feature included</li>
+        <li>Full self-healing loops</li>
+        <li>Team collaboration</li>
+        <li>Priority queues</li>
       </ul>
       <a href="/first-run" class="price-btn">Get started</a>
     </div>
 
     <div class="price-card reveal">
       <p class="price-label">Agency</p>
-      <div class="price-amount">€249</div>
+      <div class="price-amount">€100</div>
       <p class="price-per">per month · unlimited apps</p>
       <ul class="price-features">
         <li>Unlimited test runs</li>
         <li>Unlimited apps</li>
-        <li>Full test history</li>
-        <li>✓ Every feature included</li>
+        <li>Full self-healing loops</li>
+        <li>White-label reporting</li>
+        <li>Custom webhooks</li>
       </ul>
       <a href="/first-run" class="price-btn">Get started</a>
     </div>
@@ -1209,8 +1192,8 @@
   </div>
 
   <p class="reveal" style="font-family:'Inter',sans-serif;font-size:12px;color:var(--muted);max-width:800px;margin:28px auto 0;text-align:center;line-height:1.9">
-    // Every plan includes Scenario Testing · Interactive Test · Multi-Role Testing · Security + Deep Scan.
-    The only difference is how many apps you can test.<br>
+    // Every plan includes full self-healing loops, Scenario Testing, Interactive Test, Multi-Role Testing, and Security + Deep Scan.
+    Higher tiers add more apps, team collaboration, and reporting/webhook integrations.<br>
     You only pay for runs that actually tested your app — if TestPilot fails, the run is free.
   </p>
 
