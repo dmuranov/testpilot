@@ -7,6 +7,15 @@
 <link rel="icon" type="image/png" href="/brand/favicon-32.png">
 <link rel="apple-touch-icon" href="/brand/apple-touch-icon.png">
 <link rel="manifest" href="/brand/site.webmanifest">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://testpilotapp.dev/">
+<meta property="og:title" content="TestPilot — AI Testing for No-Code Apps">
+<meta property="og:description" content="Test faster. Launch smarter.">
+<meta property="og:image" content="https://testpilotapp.dev/brand/og-share-card.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://testpilotapp.dev/brand/og-share-card.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&family=Inter:wght@400;500;600&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
 <style>
@@ -216,6 +225,25 @@
   }
 
   .btn-ghost:hover { color: var(--white); border-color: var(--white); }
+
+  .btn-sandbox {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    background: transparent;
+    color: var(--accent);
+    font-family: 'Syne', sans-serif;
+    font-size: 15px;
+    font-weight: 700;
+    padding: 14px 30px;
+    border-radius: 2px;
+    border: 2px solid var(--accent);
+    text-decoration: none;
+    letter-spacing: -0.2px;
+    transition: transform 0.15s, background 0.15s, color 0.15s;
+  }
+
+  .btn-sandbox:hover { background: var(--accent); color: var(--black); transform: translateY(-2px); }
 
   .hero-price-note {
     font-family: 'Inter', sans-serif;
@@ -485,6 +513,14 @@
     grid-template-columns: repeat(4, 1fr);
     gap: 2px;
     margin-top: 48px;
+  }
+
+  .pricing-grid-5 {
+    grid-template-columns: repeat(5, 1fr);
+    gap: 14px;
+    max-width: 1240px;
+    margin-left: auto;
+    margin-right: auto;
   }
 
   .price-card {
@@ -805,14 +841,14 @@
 
 <!-- NAV -->
 <nav>
-  <a href="/" style="display:flex;align-items:center;gap:10px;text-decoration:none;">
-    <svg width="32" height="32" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <a href="/" style="display:flex;align-items:flex-end;gap:10px;text-decoration:none;padding-bottom:4px;">
+    <svg width="52" height="52" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
       <style>.tpc{animation:tpb 1.1s step-end infinite}@keyframes tpb{0%,49%{opacity:1}50%,100%{opacity:0}}</style>
-      <rect x="1" y="1" width="46" height="46" rx="2" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1"/>
+      <rect x="1" y="1" width="46" height="46" rx="2" fill="#0f0f0f" stroke="#2a2a2a" stroke-width="1.5"/>
       <text x="6" y="13" font-family="DM Mono,monospace" font-size="8" fill="#333">run_test</text>
-      <polyline points="6,24 14,31 6,38" stroke="#c8f040" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-      <line x1="18" y1="31" x2="33" y2="31" stroke="#c8f040" stroke-width="2" stroke-linecap="round" opacity="0.35"/>
-      <rect x="35" y="26" width="2.5" height="10" rx="1" fill="#c8f040" class="tpc"/>
+      <polyline points="6,24 14,31 6,38" stroke="#c8f040" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      <line x1="18" y1="31" x2="33" y2="31" stroke="#c8f040" stroke-width="3" stroke-linecap="round" opacity="0.35"/>
+      <rect x="35" y="26" width="3.5" height="10" rx="1" fill="#c8f040" class="tpc"/>
     </svg>
     <span class="nav-logo">Test<span>Pilot</span></span>
   </a>
@@ -836,8 +872,10 @@
   </p>
   <div class="hero-actions">
     <a href="/first-run" class="btn-primary">Run your first test — free →</a>
+    <a href="/sandbox" class="btn-sandbox">🧪 Try the Sandbox Demo</a>
     <a href="#how" class="btn-ghost">See how it works</a>
   </div>
+  <p class="hero-price-note" style="margin-top:8px">// No signup, no target app needed — a fully simulated walkthrough</p>
   <p class="hero-price-note">// First test free · No credit card · No API key needed · Just your app's URL</p>
   <div class="hero-deco">TP</div>
 </section>
@@ -1041,7 +1079,7 @@
   <p class="section-tag reveal">// pricing</p>
   <h2 class="reveal">Simple, honest pricing.</h2>
   <p class="reveal" style="font-family:'Inter',sans-serif;font-size:13px;color:var(--muted);max-width:560px;margin:0 auto 48px;text-align:center;line-height:1.8">You bring your own Claude API key. TestPilot never touches your data or charges hidden AI fees. <strong style="color:var(--white)">You only pay for what you actually use.</strong></p>
-  <div class="pricing-grid" style="grid-template-columns:repeat(5,1fr);gap:14px;max-width:1240px;margin:0 auto">
+  <div class="pricing-grid pricing-grid-5">
 
     <div class="price-card reveal">
       <p class="price-label">One Run</p>

@@ -1,0 +1,1088 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sandbox Demo — TestPilot</title>
+<link rel="icon" type="image/png" href="/brand/favicon-32.png">
+<link rel="apple-touch-icon" href="/brand/apple-touch-icon.png">
+<link rel="manifest" href="/brand/site.webmanifest">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
+
+<!--
+  A fully simulated walkthrough of the real app (Learn New App, Flow Test,
+  Security Test) for visitors who want to see TestPilot work before signing
+  up. Every class, color and copy string below is lifted from index.html —
+  the real, shipped, logged-in app shell. Only the target app (plazoabierto.es)
+  and its two scripted findings are fabricated for the demo.
+-->
+<style>
+  :root {
+    --bg: #080808; --bg-card: #111111; --bg-hover: #1a1a1a; --bg-input: #0d0d0d;
+    --border: rgba(244,242,238,0.07); --border-focus: #c8f040;
+    --text: #f4f2ee; --text-dim: #d8d8d8; --text-muted: #a8a8a8;
+    --accent: #c8f040; --accent-glow: rgba(200,240,64,0.1);
+    --green: #22c55e; --green-dim: rgba(34,197,94,0.12);
+    --red: #ef4444; --red-dim: rgba(239,68,68,0.12);
+    --yellow: #eab308; --yellow-dim: rgba(234,179,8,0.12);
+    --purple: #a855f7; --radius: 2px; --radius-lg: 4px;
+    color-scheme: dark;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:'Syne',sans-serif; background:var(--bg); color:var(--text); }
+  body::before {
+    content:''; position:fixed; inset:0;
+    background-image: linear-gradient(rgba(200,240,64,0.025) 1px, transparent 1px), linear-gradient(90deg, rgba(200,240,64,0.025) 1px, transparent 1px);
+    background-size:60px 60px; pointer-events:none; z-index:0;
+  }
+  .app { display:flex; min-height:100vh; position:relative; z-index:1; }
+  .sidebar { width:240px; background:var(--bg-card); border-right:1px solid var(--border); padding:20px 0; flex-shrink:0; display:flex; flex-direction:column; }
+  .logo { padding:0 20px 24px; border-bottom:1px solid var(--border); margin-bottom:16px; }
+  .logo h1 { font-family:'Syne',sans-serif; font-size:20px; font-weight:800; letter-spacing:-0.5px; }
+  .logo h1 span { color:var(--accent); }
+  .logo .tagline { font-size:10px; color:var(--text-muted); font-family:'DM Mono',monospace; display:block; margin-top:2px; letter-spacing:0.5px; }
+  .nav-section { padding:0 12px; margin-bottom:8px; }
+  .nav-section label { font-size:10px; text-transform:uppercase; letter-spacing:1.2px; color:var(--text-muted); padding:0 8px; display:block; margin-bottom:6px; }
+  .nav-section-toggle { display:flex; align-items:center; justify-content:space-between; width:100%; padding:0 8px; margin-bottom:6px; border:none; background:none; cursor:default; font-family:inherit; }
+  .nav-section-toggle span { font-size:10px; text-transform:uppercase; letter-spacing:1.2px; color:var(--text-muted); }
+  .nav-chevron { width:12px; height:12px; color:var(--text-muted); flex-shrink:0; }
+  .nav-btn { display:flex; align-items:center; gap:10px; width:100%; padding:9px 12px; border:none; background:none; color:var(--text-dim); font-size:13px; font-family:inherit; cursor:pointer; border-radius:6px; transition:all .15s; text-align:left; }
+  .nav-btn:hover { background:var(--bg-hover); color:var(--text); }
+  .nav-btn.active { background:var(--accent-glow); color:var(--accent); }
+  .nav-btn svg { width:16px; height:16px; flex-shrink:0; }
+  .main { flex:1; padding:24px 32px; overflow-y:auto; max-height:100vh; }
+  .page-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:24px; gap:12px; flex-wrap:wrap; }
+  .page-header h2 { font-size:22px; font-weight:700; letter-spacing:-0.3px; }
+  .card { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius-lg); padding:20px; margin-bottom:16px; }
+  .card-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; gap:10px; flex-wrap:wrap; }
+  .card-title { font-size:14px; font-weight:600; color:var(--text); }
+  .form-group { margin-bottom:14px; }
+  .form-group label { display:block; font-size:12px; font-weight:500; color:var(--text-dim); margin-bottom:5px; font-family:'DM Mono',monospace; }
+  .form-input, .form-textarea { width:100%; padding:10px 12px; background:var(--bg-input); border:1px solid var(--border); border-radius:var(--radius); color:var(--text); font-size:13px; font-family:inherit; outline:none; }
+  .form-input:focus, .form-textarea:focus { border-color:var(--border-focus); box-shadow:0 0 0 3px var(--accent-glow); }
+  .form-textarea { min-height:80px; resize:vertical; }
+  .btn { padding:9px 18px; border:none; border-radius:var(--radius); font-size:13px; font-weight:600; font-family:inherit; cursor:pointer; transition:all .15s; display:inline-flex; align-items:center; gap:6px; }
+  .btn-primary { background:var(--accent); color:#080808; font-weight:700; }
+  .btn-primary:hover { opacity:0.9; }
+  .btn-primary:disabled { opacity:0.4; cursor:not-allowed; }
+  .btn-ghost { background:none; color:var(--text-dim); border:1px solid var(--border); }
+  .btn-ghost:hover { background:var(--bg-hover); color:var(--text); }
+  .btn-sm { padding:5px 10px; font-size:11px; }
+  .badge { display:inline-flex; align-items:center; padding:3px 8px; border-radius:99px; font-size:11px; font-weight:600; font-family:'DM Mono',monospace; }
+  .badge-green { background:var(--green-dim); color:var(--green); }
+  .badge-red { background:var(--red-dim); color:var(--red); }
+  .badge-yellow { background:var(--yellow-dim); color:var(--yellow); }
+  .app-card { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius-lg); padding:18px; cursor:pointer; transition:all .15s; margin-bottom:10px; }
+  .app-card:hover { border-color:var(--accent); background:var(--bg-hover); }
+  .app-card-name { font-size:15px; font-weight:600; }
+  .app-card-url { font-size:11px; color:var(--text-muted); font-family:'DM Mono',monospace; }
+  .app-card-meta { display:flex; gap:12px; margin-top:10px; font-size:12px; color:var(--text-dim); }
+  .stats-row { display:flex; gap:12px; margin-bottom:20px; flex-wrap:wrap; }
+  .stat-card { flex:1; min-width:110px; background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius); padding:14px 16px; }
+  .stat-value { font-size:24px; font-weight:700; font-family:'DM Mono',monospace; }
+  .stat-label { font-size:11px; color:var(--text-muted); margin-top:2px; }
+  .test-stream { max-height:420px; overflow-y:auto; font-family:'DM Mono',monospace; font-size:12px; padding:8px 0; transition:max-height .3s ease; }
+  .test-stream.zoomed { max-height:none; font-size:13.5px; }
+  .step-line { display:flex; align-items:flex-start; gap:8px; padding:6px 10px; border-radius:4px; margin-bottom:2px; line-height:1.5; }
+  .test-stream.zoomed .step-line { padding:9px 12px; }
+  .step-line:hover { background:var(--bg-hover); }
+  .step-icon { flex-shrink:0; font-size:14px; margin-top:1px; }
+  .step-pass .step-icon { color:var(--green); }
+  .step-fail .step-icon { color:var(--red); }
+  .step-retry .step-icon { color:var(--text-muted); }
+  .step-bug .step-icon { color:var(--yellow); }
+  .step-info .step-icon { color:var(--accent); }
+  .step-done .step-icon, .step-summary .step-icon { color:var(--purple); }
+  #learn-stream .step-fail { background:rgba(239,68,68,0.1); border-left:3px solid var(--red); padding-left:7px; font-weight:600; }
+  .step-text { color:var(--text-dim); word-break:break-word; flex:1; }
+  .step-pass .step-text { color:var(--text); }
+  .step-retry .step-text { color:var(--text-muted); font-size:11px; }
+  .step-screenshot-btn { flex-shrink:0; background:none; border:1px solid var(--border); color:var(--text-muted); padding:2px 6px; border-radius:4px; font-size:10px; cursor:pointer; font-family:inherit; }
+  .step-screenshot-btn:hover { background:var(--bg-hover); color:var(--text); }
+  .modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.8); display:flex; align-items:center; justify-content:center; z-index:1000; padding:24px; }
+  .modal-content { max-width:min(640px,92vw); max-height:90vh; border-radius:var(--radius-lg); overflow:hidden; position:relative; background:var(--bg-card); border:1px solid rgba(200,240,64,0.35); box-shadow:0 0 40px rgba(200,240,64,0.08), 0 20px 60px rgba(0,0,0,0.6); }
+  .modal-close { position:absolute; top:10px; right:10px; background:rgba(0,0,0,0.7); border:none; color:white; width:32px; height:32px; border-radius:50%; cursor:pointer; font-size:18px; z-index:2; }
+  .loader { display:inline-block; width:14px; height:14px; border:2px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin .6s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  ::-webkit-scrollbar { width:7px; height:7px; }
+  ::-webkit-scrollbar-track { background:transparent; }
+  ::-webkit-scrollbar-thumb { background:#2a2a2a; border-radius:8px; }
+
+  .browser-frame { border:1px solid var(--border); border-radius:6px; overflow:hidden; background:#e9e9e6; }
+  .browser-chrome { background:#1c1c1c; padding:8px 10px; display:flex; align-items:center; gap:8px; }
+  .browser-dot { width:8px; height:8px; border-radius:50%; background:#3a3a3a; }
+  .browser-url { flex:1; background:#0d0d0d; border-radius:3px; padding:4px 10px; font-family:'DM Mono',monospace; font-size:10.5px; color:#888; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .mock-page { padding:22px; min-height:220px; color:#1a1a1a; }
+  .mock-header { display:flex; align-items:center; gap:8px; margin-bottom:20px; }
+  .mock-logo { width:22px; height:22px; border-radius:4px; background:#c8f040; }
+  .mock-navbit { width:46px; height:8px; border-radius:3px; background:#ccc; }
+  .mock-line { height:9px; border-radius:3px; background:#d8d8d5; margin-bottom:8px; }
+  .mock-field { height:30px; border-radius:4px; background:#fff; border:1px solid #ccc; margin-bottom:10px; }
+  .mock-btn { height:32px; width:110px; border-radius:4px; background:#080808; }
+
+  .toast { position:fixed; bottom:28px; left:50%; transform:translateX(-50%); background:#1c1c1c; border:1px solid var(--accent); color:var(--text); font-size:13px; font-weight:600; font-family:'DM Mono',monospace; padding:12px 20px; border-radius:6px; z-index:2000; box-shadow:0 10px 32px rgba(0,0,0,0.6), 0 0 0 4px rgba(200,240,64,0.08); animation:toastIn .18s ease-out; }
+  @keyframes toastIn { from { opacity:0; transform:translateX(-50%) translateY(8px); } to { opacity:1; transform:translateX(-50%) translateY(0); } }
+  .done-banner { display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap; margin-top:14px; padding:16px 18px; background:var(--bg-card); border:1px solid var(--accent); border-radius:var(--radius-lg); }
+  .done-banner .done-text { font-size:13px; color:var(--text); }
+  .done-banner .done-text strong { color:var(--accent); }
+  .restart-pill { position:fixed; top:14px; right:16px; z-index:1500; background:var(--bg-card); border:1px solid var(--border); color:var(--text-muted); font-size:11px; font-family:'DM Mono',monospace; padding:6px 12px; border-radius:99px; cursor:pointer; }
+  .restart-pill:hover { color:var(--text); border-color:var(--accent); }
+
+  .nudge { display:flex; align-items:center; gap:12px; font-size:15px; font-weight:700; color:var(--accent); font-family:'DM Mono',monospace; margin-bottom:16px; padding:14px 18px; background:rgba(200,240,64,0.08); border:1px solid rgba(200,240,64,0.4); border-radius:6px; line-height:1.4; }
+  .nudge .nudge-arrow { font-size:22px; flex-shrink:0; animation:nudgeBounce 1.1s ease-in-out infinite; }
+  @keyframes nudgeBounce { 0%,100% { transform:translateX(0); } 50% { transform:translateX(5px); } }
+  .pulse { animation:pulseGlow 1.9s ease-out infinite; }
+  @keyframes pulseGlow {
+    0% { box-shadow:0 0 0 0 rgba(200,240,64,0.45); }
+    70% { box-shadow:0 0 0 16px rgba(200,240,64,0); }
+    100% { box-shadow:0 0 0 0 rgba(200,240,64,0); }
+  }
+  .fake-cursor { position:fixed; z-index:2500; pointer-events:none; filter:drop-shadow(0 2px 6px rgba(0,0,0,.6));
+    transition:left .68s cubic-bezier(.5,0,.2,1), top .68s cubic-bezier(.5,0,.2,1), transform .15s ease; }
+  .fake-cursor.press { transform:scale(0.82); }
+  .fake-cursor-tag { position:absolute; left:20px; top:16px; white-space:nowrap; font-size:10px; color:#080808;
+    background:var(--accent); padding:2px 7px; border-radius:5px; font-family:'DM Mono',monospace; font-weight:700; }
+  @media (prefers-reduced-motion: reduce) {
+    .pulse { animation:none; box-shadow:0 0 0 5px rgba(200,240,64,0.3); }
+    .fake-cursor { transition-duration:.01s; }
+  }
+
+  /* ── printable report, ported from downloadTestReport / downloadSecReport ── */
+  .tp-report { font-family:'Segoe UI',Arial,sans-serif; font-size:13px; color:#1a1a1a; background:#fff; padding:40px; border-radius:8px; }
+  .tp-report h1 { font-size:22px; font-weight:800; color:#080808; }
+  .tp-report h2 { font-size:15px; font-weight:700; color:#080808; margin:32px 0 12px; padding-bottom:6px; border-bottom:2px solid #c8f040; }
+  .tp-report .rp-header { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:32px; padding-bottom:24px; border-bottom:3px solid #080808; }
+  .tp-report .rp-logo { font-size:24px; font-weight:900; letter-spacing:-1px; }
+  .tp-report .rp-logo span { color:#c8f040; background:#080808; padding:2px 6px; }
+  .tp-report .meta-table { width:100%; border-collapse:collapse; margin-bottom:24px; }
+  .tp-report .meta-table td { padding:7px 12px; border:1px solid #e5e5e5; font-size:13px; }
+  .tp-report .meta-table td:first-child { font-weight:600; background:#f9f9f9; width:140px; color:#555; }
+  .tp-report .rp-stats { display:flex; gap:16px; margin:20px 0 28px; flex-wrap:wrap; }
+  .tp-report .rp-stat { flex:1; min-width:100px; text-align:center; padding:16px; border:1px solid #e5e5e5; border-radius:4px; }
+  .tp-report .rp-stat-num { font-size:28px; font-weight:800; }
+  .tp-report .rp-stat-label { font-size:11px; color:#666; margin-top:4px; text-transform:uppercase; letter-spacing:0.5px; }
+  .tp-report .rp-stat.green .rp-stat-num { color:#16a34a; }
+  .tp-report .rp-stat.red .rp-stat-num { color:#dc2626; }
+  .tp-report .rp-stat.yellow .rp-stat-num { color:#d97706; }
+  .tp-report .rp-stat.neutral .rp-stat-num { color:#374151; }
+  .tp-report .exec-box { background:#f9fafb; border-left:4px solid #c8f040; padding:16px 20px; margin-bottom:8px; font-size:13px; line-height:1.8; color:#333; }
+  .tp-report .vuln-card { border:1px solid #fca5a5; border-radius:4px; margin-bottom:16px; overflow:hidden; }
+  .tp-report .vuln-header { display:flex; align-items:center; gap:10px; padding:12px 16px; background:#fff5f5; border-bottom:1px solid #fca5a5; flex-wrap:wrap; }
+  .tp-report .vuln-id { font-weight:800; font-size:12px; font-family:monospace; color:#dc2626; }
+  .tp-report .vuln-sev { font-size:10px; font-weight:700; padding:2px 8px; border-radius:2px; text-transform:uppercase; color:#fff; }
+  .tp-report .vuln-type { font-size:10px; font-weight:600; color:#666; background:#f3f4f6; padding:2px 8px; border-radius:2px; text-transform:uppercase; }
+  .tp-report .vuln-title { font-weight:600; font-size:13px; flex:1; }
+  .tp-report .vuln-body { padding:14px 16px; }
+  .tp-report .vuln-desc { line-height:1.6; color:#444; margin-bottom:6px; }
+  .tp-report .vuln-verdict { font-size:12px; color:#888; font-style:italic; }
+  .tp-report .vuln-request { font-family:monospace; font-size:11px; color:#555; background:#f3f4f6; padding:6px 10px; border-radius:3px; margin-bottom:8px; word-break:break-all; }
+  .tp-report .no-vulns { background:#f0fdf4; border:1px solid #86efac; border-radius:4px; padding:16px 20px; color:#16a34a; font-weight:600; }
+  .tp-report .pass-grid { display:grid; grid-template-columns:1fr 1fr; gap:4px; }
+  .tp-report .pass-item { font-size:12px; color:#374151; padding:5px 8px; background:#f9fafb; border-radius:2px; }
+  .tp-report .log-section { background:#f9fafb; border:1px solid #e5e5e5; border-radius:4px; padding:16px; max-height:320px; overflow-y:auto; }
+  .tp-report .log-line { font-family:monospace; font-size:11px; padding:2px 0; line-height:1.6; }
+  .tp-report .steps-table { width:100%; border-collapse:collapse; font-size:12px; }
+  .tp-report .steps-table th { background:#080808; color:#c8f040; padding:8px 12px; text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:0.5px; }
+  .tp-report .steps-table td { padding:8px 12px; border-bottom:1px solid #f0f0f0; vertical-align:top; }
+  .tp-report .step-row.pass { background:#fff; }
+  .tp-report .step-row.fail { background:#fff5f5; }
+  .tp-report .step-row.bug { background:#fffbeb; }
+  .tp-report .rp-step-num { font-family:monospace; color:#999; width:40px; }
+  .tp-report .rp-step-status { width:32px; text-align:center; }
+  .tp-report .rp-step-action { font-family:monospace; font-size:11px; max-width:280px; }
+  .tp-report .rp-step-meta { color:#888; font-size:10px; }
+  .tp-report .rp-footer { margin-top:48px; padding-top:20px; border-top:1px solid #e5e5e5; display:flex; justify-content:space-between; align-items:center; color:#999; font-size:11px; flex-wrap:wrap; gap:8px; }
+  .tp-report .rp-footer-logo { font-weight:800; font-size:14px; color:#080808; }
+  .tp-report .rp-footer-logo span { color:#c8f040; background:#080808; padding:1px 4px; }
+  .tp-report .scope-box { background:#fffbeb; border-left:4px solid #f59e0b; padding:16px 20px; font-size:12px; line-height:1.7; color:#444; }
+  .tp-report .route-tree, .tp-report .route-children { list-style:none; }
+  .tp-report .route-children { padding-left:28px; border-left:2px solid #eee; margin-top:8px; }
+  .tp-report .route-node { margin-bottom:8px; }
+  .tp-report .route-row { display:flex; align-items:center; gap:10px; padding:6px; border:1px solid #eee; border-radius:4px; }
+  .tp-report .route-thumb { width:48px; height:32px; border-radius:2px; border:1px solid #e5e5e5; flex-shrink:0; background:repeating-linear-gradient(45deg, #f5f5f5, #f5f5f5 4px, #eee 4px, #eee 8px); }
+  .tp-report .route-name { font-weight:600; font-size:12.5px; }
+  .tp-report .route-path { font-family:monospace; font-size:11px; color:#888; }
+  .tp-report .dead-row, .tp-report .err-row { border:1px solid #fca5a5; border-radius:4px; padding:10px 14px; margin-bottom:8px; background:#fff5f5; font-size:12px; }
+  .tp-report .dead-row .rp-path, .tp-report .err-page { font-family:monospace; font-weight:700; color:#dc2626; }
+  .tp-report .link-table { width:100%; border-collapse:collapse; font-size:12px; margin-bottom:8px; }
+  .tp-report .link-table th { background:#080808; color:#c8f040; padding:7px 10px; text-align:left; font-size:10px; text-transform:uppercase; letter-spacing:0.5px; }
+  .tp-report .link-table td { padding:7px 10px; border-bottom:1px solid #f0f0f0; vertical-align:top; }
+  .tp-report .link-url { font-family:monospace; font-size:11px; word-break:break-all; max-width:380px; }
+  .tp-report .link-status { font-weight:700; color:#dc2626; white-space:nowrap; }
+  .tp-report .link-pages { color:#666; font-size:11px; }
+  .tp-report .err-line { font-family:monospace; font-size:11px; color:#444; margin-top:4px; }
+
+  @media (max-width: 768px) {
+    .sidebar { width:76px; }
+    .logo { padding:0 10px 20px; }
+    .logo h1, .logo .tagline { display:none; }
+    .nav-section label { display:none; }
+    .nav-btn { justify-content:center; padding:10px 0; }
+    .nav-btn span:not(.badge-like) { display:none; }
+    .main { padding:16px; }
+    .stats-row { flex-wrap:wrap; }
+  }
+</style>
+</head>
+<body>
+
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback } = React;
+
+const SEV_COLOR = { high:'#dc2626', medium:'#d97706', low:'#2563eb', critical:'#dc2626' };
+
+function useTypedStream(script, active, speed){
+  const [lines, setLines] = useState([]);
+  const [done, setDone] = useState(false);
+  useEffect(() => {
+    if (!active) return;
+    setLines([]); setDone(false);
+    let i = 0; let cancelled = false;
+    function step(){
+      if (cancelled) return;
+      if (i >= script.length){ setDone(true); return; }
+      setLines(prev => [...prev, script[i]]);
+      i += 1;
+      setTimeout(step, speed + 120 * Math.random());
+    }
+    const kick = setTimeout(step, 300);
+    return () => { cancelled = true; clearTimeout(kick); };
+  }, [script, active]);
+  return [lines, done];
+}
+
+function useAutoScroll(dep){
+  const ref = useRef(null);
+  useEffect(() => { if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; }, [dep]);
+  return ref;
+}
+
+const STEP_ICON = { pass:'✅', fail:'❌', retry:'🔄', bug:'🐛', info:'ℹ️', done:'🏁', error:'💥', summary:'📊' };
+
+function StepLine({ s, onShot }){
+  return (
+    <div className={'step-line step-' + s.type}>
+      <span className="step-icon">{STEP_ICON[s.type] || '•'}</span>
+      <span className="step-text">{s.type === 'retry' ? <span style={{color:'var(--text-muted)'}}>Agent retrying… </span> : null}{s.message}</span>
+      {s.shot && <button className="step-screenshot-btn" onClick={() => onShot(s.shot)}>📸</button>}
+    </div>
+  );
+}
+
+function TestStream({ lines, id, zoomed, onShot }){
+  const ref = useAutoScroll(lines.length);
+  return (
+    <div ref={ref} id={id} className={'test-stream' + (zoomed ? ' zoomed' : '')}>
+      {lines.filter(Boolean).map((s, i) => <StepLine s={s} key={i} onShot={onShot} />)}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------- mock "captured screenshot"
+   The real product attaches an actual page screenshot to steps and opens it
+   in a modal on click (issueCard / renderStepLine's 📸 button). There is no
+   real target site here, so this renders a browser-chrome mockup with the
+   same click-to-enlarge interaction instead of a live/abstract terminal. */
+function Screenshot({ variant, big }){
+  const url = variant === 'error500' ? 'plazoabierto.es/dashboard' : variant === 'idor' ? 'plazoabierto.es/api/listings/8231' : 'plazoabierto.es/login';
+  return (
+    <div className="browser-frame">
+      <div className="browser-chrome">
+        <span className="browser-dot"></span><span className="browser-dot"></span><span className="browser-dot"></span>
+        <div className="browser-url">🔒 {url}</div>
+      </div>
+      <div className="mock-page" style={{minHeight: big ? 360 : 220}}>
+        <div className="mock-header"><div className="mock-logo"></div><div className="mock-navbit"></div><div className="mock-navbit"></div><div className="mock-navbit"></div></div>
+        {variant === 'login' && (
+          <React.Fragment>
+            <div className="mock-line" style={{width:'40%', height:14, marginBottom:18}}></div>
+            <div className="mock-field"></div>
+            <div className="mock-field"></div>
+            <div className="mock-btn"></div>
+          </React.Fragment>
+        )}
+        {variant === 'error500' && (
+          <div style={{textAlign:'center', padding: big ? '40px 20px' : '24px 20px'}}>
+            <div style={{fontSize: big ? 48 : 32, fontWeight:800, color:'#dc2626'}}>500</div>
+            <div style={{fontSize:13, color:'#666', marginTop:6}}>Internal Server Error</div>
+            <div className="mock-line" style={{width:'60%', margin:'18px auto 0'}}></div>
+          </div>
+        )}
+        {variant === 'idor' && (
+          <React.Fragment>
+            <div className="mock-line" style={{width:'50%', height:14, marginBottom:14}}></div>
+            <div style={{border:'2px solid #dc2626', borderRadius:6, padding:12, background:'#fff5f5'}}>
+              <div className="mock-line" style={{width:'70%'}}></div>
+              <div className="mock-line" style={{width:'45%'}}></div>
+              <div style={{fontSize:10.5, fontFamily:"'DM Mono',monospace", color:'#dc2626', marginTop:6}}>⚠ visible to User B — owned by User A</div>
+            </div>
+          </React.Fragment>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ScreenshotModal({ variant, onClose }){
+  if (!variant) return null;
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-content" onClick={e => e.stopPropagation()}>
+        <button className="modal-close" onClick={onClose}>×</button>
+        <Screenshot variant={variant} big />
+      </div>
+    </div>
+  );
+}
+
+/* A viewer who is just watching the demo (not the person driving it) has no
+   reason to know they should click anything — this auto-clicks the primary
+   CTA after a few seconds of inactivity, same as a kiosk/unattended walkthrough. */
+function FakeCursor({ target, onArrived }){
+  const [pos, setPos] = useState(null);
+  const [pressed, setPressed] = useState(false);
+  useEffect(() => {
+    if (!target) return;
+    setPos({ x: window.innerWidth * 0.82, y: window.innerHeight * 0.86 });
+    const t1 = setTimeout(() => setPos({ x: target.x, y: target.y }), 60);
+    const t2 = setTimeout(() => setPressed(true), 780);
+    const t3 = setTimeout(onArrived, 1000);
+    return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); };
+  }, [target]);
+  if (!pos) return null;
+  return (
+    <div className={'fake-cursor' + (pressed ? ' press' : '')} style={{left:pos.x, top:pos.y}}>
+      <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+        <path d="M2 1.5 L2 17 L6.2 13.4 L9 20 L12 18.6 L9.2 12 L15 12 Z" fill="#f4f2ee" stroke="#080808" strokeWidth="1"/>
+      </svg>
+      <span className="fake-cursor-tag">auto-demo</span>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------- sidebar */
+
+const NAV_ICONS = {
+  learn: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>,
+  apps: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>,
+  security: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>,
+  flow: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>,
+  checkout: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>,
+  sweep: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>,
+  chat: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>,
+  multirole: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
+  staging: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>,
+  widget: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 17l6-6-6-6"/><line x1="12" y1="19" x2="20" y2="19"/></svg>,
+  sched: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><polyline points="9 15 11 17 15 13"/></svg>,
+  history: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>,
+  guide: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>,
+  support: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>,
+};
+
+function NavBtn({ id, icon, label, badge, active, onClick }){
+  return (
+    <button className={'nav-btn' + (active ? ' active' : '')} onClick={() => onClick(id)}>
+      {icon}{label}
+      {badge && <span style={{fontSize:9, fontWeight:700, background:'rgba(251,191,36,0.15)', color:'#f59e0b', border:'1px solid rgba(251,191,36,0.3)', borderRadius:2, padding:'1px 5px', marginLeft:4}}>{badge}</span>}
+    </button>
+  );
+}
+
+function Sidebar({ view, appLearned, onNav }){
+  return (
+    <div className="sidebar">
+      <div className="logo">
+        <div style={{display:'flex', alignItems:'flex-end', gap:10, paddingBottom:4}}>
+          <svg width="40" height="40" viewBox="0 0 48 48" fill="none">
+            <rect x="1" y="1" width="46" height="46" rx="2" fill="#0f0f0f" stroke="#2a2a2a" strokeWidth="1.5"/>
+            <text x="6" y="13" fontFamily="DM Mono,monospace" fontSize="8" fill="#333">run_test</text>
+            <polyline points="6,24 14,31 6,38" stroke="#c8f040" strokeWidth="3.5" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+            <line x1="18" y1="31" x2="33" y2="31" stroke="#c8f040" strokeWidth="3" strokeLinecap="round" opacity="0.35"/>
+            <rect x="35" y="26" width="3.5" height="10" rx="1" fill="#c8f040"/>
+          </svg>
+          <h1>Test<span>Pilot</span></h1>
+        </div>
+        <span className="tagline">v1 — universal ai tester</span>
+      </div>
+      <div className="nav-section">
+        <label>Apps</label>
+        <NavBtn id="learn" icon={NAV_ICONS.learn} label="Learn New App" active={view==='learn'} onClick={onNav} />
+        <NavBtn id="apps" icon={NAV_ICONS.apps} label="Learned Apps" active={view==='apps'} onClick={onNav} />
+      </div>
+      <div className="nav-section">
+        <div className="nav-section-toggle"><span>Testing</span><svg className="nav-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9"/></svg></div>
+        <NavBtn id="security" icon={NAV_ICONS.security} label="Security Test" active={view.indexOf('security')===0} onClick={onNav} />
+        <NavBtn id="flow" icon={NAV_ICONS.flow} label="Flow Test" active={view.indexOf('flow')===0} onClick={onNav} />
+        <NavBtn id="checkout" icon={NAV_ICONS.checkout} label="Checkout & Booking Test" badge="BETA" onClick={onNav} />
+        <NavBtn id="sweep" icon={NAV_ICONS.sweep} label="Check Everything" onClick={onNav} />
+        <NavBtn id="chat" icon={NAV_ICONS.chat} label="Interactive Test" badge="BETA" onClick={onNav} />
+        <NavBtn id="multirole" icon={NAV_ICONS.multirole} label="Multi-Role" badge="BETA" onClick={onNav} />
+        <NavBtn id="staging" icon={NAV_ICONS.staging} label="Staging Safe" badge="BETA" onClick={onNav} />
+        <NavBtn id="widget" icon={NAV_ICONS.widget} label="Widget" badge="BETA" onClick={onNav} />
+        <NavBtn id="sched" icon={NAV_ICONS.sched} label="Scheduled Runs" badge="BETA" onClick={onNav} />
+        <NavBtn id="history" icon={NAV_ICONS.history} label="Test History" onClick={onNav} />
+        <NavBtn id="guide" icon={NAV_ICONS.guide} label="Guide Me" onClick={onNav} />
+        <NavBtn id="support" icon={NAV_ICONS.support} label="Support" onClick={onNav} />
+      </div>
+      <div style={{marginTop:'auto', padding:12, borderTop:'1px solid var(--border)'}}>
+        <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:10}}>
+          <span style={{fontSize:11, fontFamily:"'DM Mono',monospace", color:'var(--text-muted)'}}>sandbox@testpilotapp.dev</span>
+        </div>
+        <div style={{display:'flex', alignItems:'center', justifyContent:'space-between'}}>
+          <span style={{fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--text-muted)'}}>Plan: <strong style={{color:'var(--accent)'}}>DEMO</strong></span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------- Learn New App */
+
+const LEARN_SCRIPT = [
+  { type:'info', message:'⏳ Starting deep crawl…' },
+  { type:'info', message:'Opening https://plazoabierto.es/…' },
+  { type:'info', message:'📍 Phase 1: mapping all navigation sections…' },
+  { type:'info', message:'Expanded menu via button[aria-expanded="false"][aria-controls]' },
+  { type:'info', message:'Logging in with the provided credentials…' },
+  { type:'info', message:'Crawling authenticated pages: /dashboard /listings /messages /settings' },
+  { type:'info', message:'📍 Phase 2: mapping forms and interactive elements…' },
+  { type:'info', message:'Identifying interactive elements — 34 found across 12 pages' },
+  { type:'info', message:'Building resilient selector fingerprints…' },
+];
+
+function LearnPage({ onDone, learned, onReport }){
+  const [noLogin, setNoLogin] = useState(false);
+  const [started, setStarted] = useState(false);
+  const [lines, done] = useTypedStream(LEARN_SCRIPT, started, 460);
+  const [cursorTarget, setCursorTarget] = useState(null);
+  const learnBtnRef = useRef(null);
+  const autoTimer = useRef(null);
+
+  useEffect(() => { if (done) setTimeout(onDone, 500); }, [done]);
+
+  useEffect(() => {
+    if (started) return;
+    autoTimer.current = setTimeout(() => {
+      const el = learnBtnRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      setCursorTarget({ x: r.left + r.width / 2 - 11, y: r.top + r.height / 2 - 11 });
+    }, 4200);
+    return () => clearTimeout(autoTimer.current);
+  }, [started]);
+
+  const startLearning = () => { clearTimeout(autoTimer.current); setCursorTarget(null); setStarted(true); };
+
+  return (
+    <div>
+      {cursorTarget && <FakeCursor target={cursorTarget} onArrived={startLearning} />}
+      <div className="page-header"><h2>Learn New App</h2></div>
+      <div className="card" style={{maxWidth:560}}>
+        <div className="card-title" style={{marginBottom:16}}>App Details</div>
+        <div className="form-group">
+          <label>App URL *</label>
+          <input className="form-input" defaultValue="https://plazoabierto.es" readOnly={started} />
+        </div>
+        <div className="form-group" style={{display:'flex', alignItems:'center', gap:10, marginBottom:4}}>
+          <input type="checkbox" checked={noLogin} onChange={e => setNoLogin(e.target.checked)} style={{width:16, height:16, accentColor:'var(--accent)', cursor:'pointer'}} disabled={started} />
+          <label style={{cursor:'pointer', fontSize:13, color:'var(--text-dim)', margin:0}}>No login required — app is publicly accessible</label>
+        </div>
+        {!noLogin && (
+          <React.Fragment>
+            <div className="form-group">
+              <label>Login Email *</label>
+              <input className="form-input" defaultValue="qa@plazoabierto.es" readOnly={started} />
+            </div>
+            <div className="form-group">
+              <label>Login Password *</label>
+              <input className="form-input" type="password" defaultValue="••••••••••" readOnly={started} />
+            </div>
+          </React.Fragment>
+        )}
+        <div className="form-group">
+          <label>App Description (optional)</label>
+          <textarea className="form-textarea" readOnly={started} defaultValue="Property listings marketplace for owners and tenants."></textarea>
+        </div>
+        <details style={{marginBottom:12}}>
+          <summary style={{cursor:'pointer', fontSize:12, color:'var(--text-dim)'}}>Advanced — bring your own session <span style={{color:'var(--text-muted)'}}>(for SSO / OAuth / MFA / CAPTCHA apps)</span></summary>
+          <div style={{marginTop:8}}>
+            <textarea className="form-textarea" placeholder="Paste a Playwright storageState JSON or a cookies array." style={{minHeight:70, fontFamily:"'DM Mono',monospace", fontSize:11}}></textarea>
+          </div>
+        </details>
+        {!started && <div className="nudge"><span className="nudge-arrow">👉</span> Click "Start Learning" below to begin — TestPilot will start on its own in a few seconds if you don't.</div>}
+        <button ref={learnBtnRef} className={'btn btn-primary' + (started ? '' : ' pulse')} disabled={started} onClick={startLearning}>
+          {started ? <React.Fragment><span className="loader"></span> Learning...</React.Fragment> : '🧠 Start Learning'}
+        </button>
+
+        {started && (
+          <div style={{marginTop:16}}>
+            <TestStream lines={lines} id="learn-stream" zoomed={!done} />
+          </div>
+        )}
+      </div>
+
+      {learned && (
+        <div className="card" style={{maxWidth:560, borderLeft:'3px solid var(--accent)'}}>
+          <div className="card-title" style={{marginBottom:10}}>✅ plazoabierto.es learned</div>
+          <div className="stats-row" style={{marginBottom:12}}>
+            {[['12','pages'],['34','elements'],['5','forms'],['3','auth flows']].map(([n,l]) => (
+              <div className="stat-card" key={l}><div className="stat-value">{n}</div><div className="stat-label">{l}</div></div>
+            ))}
+          </div>
+          <div style={{display:'flex', gap:10, flexWrap:'wrap'}}>
+            <button className="btn btn-primary" onClick={() => onDone('flow')}>▶ Run Flow Test</button>
+            <button className="btn btn-ghost" onClick={() => onDone('security')}>▶ Run Security Test</button>
+            <button className="btn btn-ghost" onClick={onReport}>📥 Download Report</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Real report, ported verbatim from index.html's openSiteReport() (the
+   "Site Report" — route tree + link audit + console diagnostics over what
+   Learn already crawled). Not the invented site-tree/link-check design from
+   before — this is the actual format the live app generates. */
+const ROUTE_TREE = {
+  path:'/', name:'Home', children:[
+    { path:'/login', name:'Login', children:[] },
+    { path:'/search', name:'Search', children:[] },
+    { path:'/profile', name:'Profile', children:[] },
+    { path:'/dashboard', name:'Dashboard', children:[
+      { path:'/listings', name:'Listings', children:[
+        { path:'/listings/new', name:'New Listing', children:[] },
+        { path:'/listings/8231', name:'Listing Detail', children:[] },
+      ]},
+      { path:'/favorites', name:'Favorites', children:[] },
+      { path:'/messages', name:'Messages', children:[] },
+      { path:'/settings', name:'Settings', children:[] },
+    ]},
+  ],
+};
+const DEAD_ROUTES = [
+  { path:'/listings/archived', name:'Archived Listings' },
+];
+const BROKEN_LINKS_FIRST_PARTY = [
+  { url:'/help', status:404, pages:['/dashboard', '/settings'] },
+];
+const BROKEN_LINKS_EXTERNAL = [
+  { url:'https://instagram.com/plazoabierto', status:'blocked', pages:['/'] },
+];
+const CONSOLE_ERRORS_BY_PAGE = {
+  '/listings': ["[error] Uncaught TypeError: Cannot read properties of undefined (reading 'price') at listings.js:142"],
+};
+const PAGES_FOUND = 12;
+
+function RouteNode({ node }){
+  return (
+    <li className="route-node">
+      <div className="route-row">
+        <div className="route-thumb"></div>
+        <div>
+          <div className="route-name">{node.name}</div>
+          <div className="route-path">{node.path}</div>
+        </div>
+      </div>
+      {node.children && node.children.length > 0 && (
+        <ul className="route-children">{node.children.map(c => <RouteNode node={c} key={c.path} />)}</ul>
+      )}
+    </li>
+  );
+}
+
+function LearnReportView(){
+  const brokenTotal = BROKEN_LINKS_FIRST_PARTY.length + BROKEN_LINKS_EXTERNAL.length;
+  const errCount = Object.values(CONSOLE_ERRORS_BY_PAGE).reduce((n, a) => n + a.length, 0);
+  const issues = DEAD_ROUTES.length + brokenTotal;
+  return (
+    <div className="tp-report">
+      <div className="rp-header">
+        <div>
+          <div className="rp-logo">Test<span>Pilot</span></div>
+          <div style={{fontSize:12, color:'#666', marginTop:4}}>Site Report</div>
+        </div>
+        <div style={{textAlign:'right'}}>
+          <div style={{fontSize:20, fontWeight:800, color:issues ? '#dc2626' : '#16a34a'}}>{issues} ISSUE{issues === 1 ? '' : 'S'}</div>
+          <div style={{fontSize:12, color:'#666', marginTop:2}}>{new Date().toLocaleDateString('en-GB', {day:'2-digit', month:'long', year:'numeric'})}</div>
+        </div>
+      </div>
+      <table className="meta-table"><tbody>
+        <tr><td>App</td><td>plazoabierto.es</td></tr>
+        <tr><td>URL</td><td>https://plazoabierto.es</td></tr>
+        <tr><td>Crawled</td><td>{new Date().toLocaleDateString('en-GB', {day:'2-digit', month:'long', year:'numeric'})}</td></tr>
+        <tr><td>Pages Mapped</td><td>{PAGES_FOUND}</td></tr>
+      </tbody></table>
+      <div className="rp-stats">
+        <div className="rp-stat neutral"><div className="rp-stat-num">{PAGES_FOUND}</div><div className="rp-stat-label">Pages Found</div></div>
+        <div className={'rp-stat ' + (DEAD_ROUTES.length ? 'red' : 'green')}><div className="rp-stat-num">{DEAD_ROUTES.length}</div><div className="rp-stat-label">Dead Routes</div></div>
+        <div className={'rp-stat ' + (brokenTotal ? 'red' : 'green')}><div className="rp-stat-num">{brokenTotal}</div><div className="rp-stat-label">Broken Links</div></div>
+        <div className={'rp-stat ' + (errCount ? 'red' : 'green')}><div className="rp-stat-num">{errCount}</div><div className="rp-stat-label">Console Errors</div></div>
+      </div>
+
+      <h2>Route Tree ({PAGES_FOUND})</h2>
+      <ul className="route-tree"><RouteNode node={ROUTE_TREE} /></ul>
+
+      <h2>Dead Routes ({DEAD_ROUTES.length})</h2>
+      {DEAD_ROUTES.length ? DEAD_ROUTES.map(d => (
+        <div className="dead-row" key={d.path}><span className="rp-path">{d.path}</span> — {d.name} returned a 404</div>
+      )) : <div className="no-vulns">✓ No dead routes found.</div>}
+
+      <h2>Broken Links — First-Party ({BROKEN_LINKS_FIRST_PARTY.length})</h2>
+      {BROKEN_LINKS_FIRST_PARTY.length ? (
+        <table className="link-table">
+          <thead><tr><th>URL</th><th>Status</th><th>Found On</th></tr></thead>
+          <tbody>{BROKEN_LINKS_FIRST_PARTY.map(l => (
+            <tr key={l.url}><td className="link-url">{l.url}</td><td className="link-status">{l.status}</td><td className="link-pages">{l.pages.join(', ')}</td></tr>
+          ))}</tbody>
+        </table>
+      ) : <div className="no-vulns">✓ No broken first-party links.</div>}
+
+      <h2>Broken Links — External ({BROKEN_LINKS_EXTERNAL.length})</h2>
+      {BROKEN_LINKS_EXTERNAL.length ? (
+        <table className="link-table">
+          <thead><tr><th>URL</th><th>Status</th><th>Found On</th></tr></thead>
+          <tbody>{BROKEN_LINKS_EXTERNAL.map(l => (
+            <tr key={l.url}><td className="link-url">{l.url}</td><td className="link-status">{l.status}</td><td className="link-pages">{l.pages.join(', ')}</td></tr>
+          ))}</tbody>
+        </table>
+      ) : <div className="no-vulns">✓ No broken external links.</div>}
+
+      <h2>Console Errors ({errCount})</h2>
+      {errCount ? Object.entries(CONSOLE_ERRORS_BY_PAGE).map(([page, errs]) => (
+        <div className="err-row" key={page}>
+          <span className="err-page">{page}</span>
+          {errs.map((e, i) => <div className="err-line" key={i}>{e}</div>)}
+        </div>
+      )) : <div className="no-vulns">✓ No console errors captured.</div>}
+
+      <div className="rp-footer">
+        <div className="rp-footer-logo">Test<span>Pilot</span></div>
+        <div>Generated automatically by TestPilot — AI-powered testing for any web app · testpilotapp.dev</div>
+      </div>
+    </div>
+  );
+}
+
+function AppsPage({ learned, onNav }){
+  if (!learned){
+    return (
+      <div>
+        <div className="page-header"><h2>Learned Apps</h2></div>
+        <div className="card" style={{textAlign:'center', padding:'40px 20px', color:'var(--text-dim)'}}>
+          <p style={{marginBottom:16}}>No apps learned yet.</p>
+          <button className="btn btn-primary" onClick={() => onNav('learn')}>Learn Your First App</button>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div>
+      <div className="page-header"><h2>Learned Apps</h2><button className="btn btn-primary" onClick={() => onNav('learn')}>+ Learn New App</button></div>
+      <div className="app-card" onClick={() => onNav('flow')}>
+        <div className="app-card-name">plazoabierto.es</div>
+        <div className="app-card-url">https://plazoabierto.es</div>
+        <div className="app-card-meta"><span>12 pages</span><span>5 forms</span><span>3 auth flows</span></div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------- Flow Test
+   Self-healing is deliberately only wired into this one scenario — the
+   sandbox shouldn't show it on every run. */
+
+const FLOW_SCRIPT = [
+  { type:'info', message:'Navigating to /login …' },
+  { type:'info', message:'Filling [email] → qa@plazoabierto.es' },
+  { type:'info', message:'Filling [password] → ••••••••' },
+  { type:'info', message:'Clicking [Sign in]' },
+  { type:'fail', message:'Selector not found — DOM structure changed since last learn (#login-submit-btn)' },
+  { type:'retry', message:'Analyzing page for a functional equivalent…' },
+  { type:'retry', message:'Candidate found: [data-testid="submit-login"] — 92% confidence' },
+  { type:'retry', message:'Selector map updated. Retrying step…' },
+  { type:'pass', message:'Clicking [Sign in] via healed selector', shot:'login' },
+  { type:'info', message:'Waiting for navigation → /dashboard' },
+  { type:'fail', message:'Expected /dashboard — server returned 500 Internal Server Error', shot:'error500' },
+  { type:'info', message:'Capturing screenshot + console + network logs' },
+  { type:'bug', message:'Bug filed — MEDIUM "Login succeeds, /dashboard route throws a 500"' },
+  { type:'summary', message:'Run finished — 1 bug found, 1 selector healed automatically' },
+];
+
+const FLOW_REPORT_STEPS = [
+  { step:1, status:'pass', action:'navigate', selector:'/login', outcome:'Opened login page' },
+  { step:2, status:'pass', action:'fill', selector:'input[name="email"]', value:'qa@plazoabierto.es', outcome:'Filled' },
+  { step:3, status:'pass', action:'fill', selector:'input[name="password"]', value:'••••••••', outcome:'Filled' },
+  { step:4, status:'fail', action:'click', selector:'#login-submit-btn', outcome:'Selector not found — DOM changed since last learn' },
+  { step:5, status:'pass', action:'click (self-healed)', selector:'[data-testid="submit-login"]', outcome:'Resolved a functional equivalent at 92% confidence — click succeeded' },
+  { step:6, status:'bug', action:'wait for navigation', selector:'/dashboard', outcome:'Server returned 500 Internal Server Error' },
+];
+
+function TestRunCard({ title, subtitle, scenario, running, onRun }){
+  return (
+    <div className="card" style={{maxWidth:600}}>
+      <div className="form-group">
+        <label>What should happen?</label>
+        <textarea className="form-textarea" readOnly defaultValue={scenario} style={{minHeight:80}}></textarea>
+      </div>
+      <div className="form-group" style={{display:'flex', alignItems:'flex-start', gap:10, marginBottom:8}}>
+        <input type="checkbox" checked readOnly style={{width:16, height:16, marginTop:2, accentColor:'var(--accent)'}} />
+        <label style={{fontSize:12.5, color:'var(--text-dim)', margin:0, lineHeight:1.5}}>Make this repeatable — TestPilot creates any data it needs (tagged <code>TP-TEST</code>) and deletes it afterward.</label>
+      </div>
+      <div className="form-group" style={{display:'flex', alignItems:'center', gap:10, marginBottom:8}}>
+        <input type="checkbox" readOnly style={{width:16, height:16, accentColor:'var(--accent)'}} />
+        <label style={{fontSize:13, color:'var(--text-dim)', margin:0}}>No login required</label>
+      </div>
+      <details style={{marginBottom:12}}>
+        <summary style={{cursor:'pointer', fontSize:12, color:'var(--text-dim)'}}>Advanced — bring your own session <span style={{color:'var(--text-muted)'}}>(for SSO / OAuth / MFA / CAPTCHA apps)</span></summary>
+      </details>
+      <button className="btn btn-primary" disabled={running} onClick={onRun}>
+        {running ? <React.Fragment><span className="loader"></span> Running...</React.Fragment> : '▶ Run Test'}
+      </button>
+    </div>
+  );
+}
+
+function FlowTestPage({ stage, onRun, onReport, onShot }){
+  const [lines, done] = useTypedStream(FLOW_SCRIPT, stage==='running' || stage==='running-done', 520);
+  return (
+    <div>
+      <div className="page-header"><div><h2>Flow Test</h2><div style={{fontSize:12, color:'var(--text-muted)', marginTop:2}}>plazoabierto.es</div></div></div>
+      <TestRunCard scenario="Log in and confirm the dashboard loads with the user's active listings." running={stage==='running' && !done} onRun={onRun} />
+      {(stage==='running' || stage==='running-done') && (
+        <div className="card" style={{marginTop:16}}>
+          <div className="card-header">
+            <div className="card-title">Test Progress</div>
+            {done && <button className="btn btn-ghost btn-sm" onClick={onReport}>📥 Download Report</button>}
+          </div>
+          <TestStream lines={lines} onShot={onShot} />
+          {done && (
+            <div className="done-banner">
+              <div className="done-text">🐛 Run finished — <strong>1 bug found</strong>, 1 selector healed automatically.</div>
+              <button className="btn btn-primary" onClick={onReport}>📥 Download Report</button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FlowReportView(){
+  const passed = FLOW_REPORT_STEPS.filter(s => s.status==='pass').length;
+  const failed = FLOW_REPORT_STEPS.filter(s => s.status==='fail').length;
+  const bugs = FLOW_REPORT_STEPS.filter(s => s.status==='bug').length;
+  return (
+    <div className="tp-report">
+      <div className="rp-header">
+        <div>
+          <div className="rp-logo">Test<span>Pilot</span></div>
+          <div style={{fontSize:12, color:'#666', marginTop:4}}>AI-Powered Flow Test Report</div>
+        </div>
+        <div style={{textAlign:'right'}}>
+          <div style={{fontSize:20, fontWeight:800, color:'#d97706'}}>COMPLETED WITH BUGS</div>
+          <div style={{fontSize:12, color:'#666', marginTop:2}}>{new Date().toLocaleDateString('en-GB', {day:'2-digit', month:'long', year:'numeric'})}</div>
+        </div>
+      </div>
+      <table className="meta-table"><tbody>
+        <tr><td>App</td><td>plazoabierto.es</td></tr>
+        <tr><td>URL</td><td>https://plazoabierto.es</td></tr>
+        <tr><td>Scenario</td><td>Log in and confirm the dashboard loads with the user's active listings.</td></tr>
+        <tr><td>Date</td><td>{new Date().toLocaleDateString('en-GB', {day:'2-digit', month:'long', year:'numeric'})}</td></tr>
+        <tr><td>Total Steps</td><td>{FLOW_REPORT_STEPS.length}</td></tr>
+      </tbody></table>
+      <div className="rp-stats">
+        <div className="rp-stat green"><div className="rp-stat-num">{passed}</div><div className="rp-stat-label">Steps Passed</div></div>
+        <div className="rp-stat red"><div className="rp-stat-num">{failed}</div><div className="rp-stat-label">Steps Failed</div></div>
+        <div className="rp-stat yellow"><div className="rp-stat-num">{bugs}</div><div className="rp-stat-label">App Bugs</div></div>
+        <div className="rp-stat"><div className="rp-stat-num">2</div><div className="rp-stat-label">Agent Retries</div></div>
+      </div>
+      <h2>Executive Summary</h2>
+      <div className="exec-box">Login succeeded after the agent self-healed a stale selector on the sign-in button (the DOM had changed since the app was last learned; a functional equivalent was found at 92% confidence). Immediately after, the dashboard route returned a 500 Internal Server Error — a real, confirmed app defect blocking every user right after sign-in.</div>
+      <h2>Confirmed App Bugs (1)</h2>
+      <div className="vuln-card">
+        <div className="vuln-header">
+          <span className="vuln-id">BUG-01</span>
+          <span className="vuln-sev" style={{background:SEV_COLOR.medium}}>MEDIUM</span>
+          <span className="vuln-title">App Bug — Step 6</span>
+        </div>
+        <div className="vuln-body">
+          <div className="vuln-desc">Dashboard route (/dashboard) returns HTTP 500 immediately after a successful login — the account becomes unreachable right after sign-in.</div>
+        </div>
+      </div>
+      <h2>Step-by-Step Log</h2>
+      <table className="steps-table">
+        <thead><tr><th>#</th><th></th><th>Action</th><th>Outcome</th></tr></thead>
+        <tbody>
+          {FLOW_REPORT_STEPS.map(s => (
+            <tr className={'step-row ' + s.status} key={s.step}>
+              <td className="rp-step-num">{s.step}</td>
+              <td className="rp-step-status">{s.status==='pass' ? '✅' : s.status==='bug' ? '🐛' : '❌'}</td>
+              <td className="rp-step-action">{s.action}{s.selector ? <React.Fragment><br/><span className="rp-step-meta">→ {s.selector}</span></React.Fragment> : null}{s.value ? <React.Fragment><br/><span className="rp-step-meta">= "{s.value}"</span></React.Fragment> : null}</td>
+              <td>{s.outcome}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="rp-footer">
+        <div className="rp-footer-logo">Test<span>Pilot</span></div>
+        <div>Generated automatically by TestPilot — AI-powered testing for any web app · testpilotapp.dev</div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------- Security Test */
+
+const SECURITY_SCRIPT = [
+  { type:'info', message:'🔬 Starting Deep Security Scan (API interception + IDOR)…' },
+  { type:'info', message:'Logging in as User A (Property Owner)…' },
+  { type:'pass', message:'Session cookie flags — Secure ✓ HttpOnly ✓ SameSite=Lax ✓' },
+  { type:'pass', message:'Security headers — CSP, X-Frame-Options, X-Content-Type-Options present' },
+  { type:'pass', message:'CORS — cross-origin requests correctly rejected' },
+  { type:'info', message:'Logging in as User B (Other Tenant)…' },
+  { type:'info', message:"Replaying User A's API calls with User B's session…" },
+  { type:'fail', message:"GET /api/listings/8231 → 200 with User B's session — returns User A's private listing", shot:'idor' },
+  { type:'bug', message:'IDOR confirmed — no ownership check on the listing detail route' },
+  { type:'pass', message:'Mass assignment — role field rejected on user update' },
+  { type:'pass', message:'Login rate limiting — blocked after 10 attempts' },
+  { type:'summary', message:'Scan finished — 1 vulnerability found across 9 checks' },
+];
+
+const SECURITY_SAFE = [
+  'Session cookie flags (Secure / HttpOnly / SameSite)',
+  'Security headers (CSP / HSTS / X-Frame-Options)',
+  'CORS misconfiguration',
+  'Mass assignment — role field',
+  'Login rate limiting',
+  'Open redirects',
+  'JWT hygiene',
+  'Reflected XSS canaries',
+];
+
+function SecuritySetupCard({ running, onRun }){
+  return (
+    <div>
+      <div className="card" style={{maxWidth:600}}>
+        <div className="card-title" style={{marginBottom:14}}>Target App</div>
+        <div className="form-group"><label>App</label><input className="form-input" defaultValue="plazoabierto.es" readOnly /></div>
+      </div>
+      <div style={{display:'flex', gap:14, maxWidth:600, marginBottom:16, flexWrap:'wrap'}}>
+        <div className="card" style={{flex:1, minWidth:240}}>
+          <div className="card-title" style={{marginBottom:10, color:'var(--accent)'}}>👤 User A (Creator)</div>
+          <div className="form-group"><label>Name</label><input className="form-input" defaultValue="Property Owner" readOnly /></div>
+          <div className="form-group"><label>Email</label><input className="form-input" defaultValue="usera@plazoabierto.es" readOnly /></div>
+          <div className="form-group"><label>Password</label><input className="form-input" type="password" defaultValue="••••••••" readOnly /></div>
+        </div>
+        <div className="card" style={{flex:1, minWidth:240}}>
+          <div className="card-title" style={{marginBottom:10, color:'var(--yellow)'}}>👤 User B (Prober)</div>
+          <div className="form-group"><label>Name</label><input className="form-input" defaultValue="Other Tenant" readOnly /></div>
+          <div className="form-group"><label>Email</label><input className="form-input" defaultValue="userb@plazoabierto.es" readOnly /></div>
+          <div className="form-group"><label>Password</label><input className="form-input" type="password" defaultValue="••••••••" readOnly /></div>
+        </div>
+      </div>
+      <button className="btn btn-primary" style={{fontSize:14, padding:'10px 24px'}} disabled={running} onClick={onRun}>
+        {running ? <React.Fragment><span className="loader"></span> Scanning...</React.Fragment> : '▶ Run Security Scan'}
+      </button>
+    </div>
+  );
+}
+
+function SecurityTestPage({ stage, onRun, onReport, onShot }){
+  const [lines, done] = useTypedStream(SECURITY_SCRIPT, stage==='running' || stage==='running-done', 480);
+  const passCount = lines.filter(l => l && l.type==='pass').length;
+  const vulnCount = lines.filter(l => l && l.type==='bug').length;
+  return (
+    <div>
+      <div className="page-header"><div><h2>Security Testing</h2><div style={{fontSize:12, color:'var(--text-muted)', marginTop:2}}>plazoabierto.es</div></div></div>
+      {stage==='setup' && <SecuritySetupCard running={false} onRun={onRun} />}
+      {(stage==='running' || stage==='running-done') && (
+        <React.Fragment>
+          <div className="stats-row" style={{maxWidth:640}}>
+            <div className="stat-card"><div className="stat-value">{lines.length}</div><div className="stat-label">Total Checks</div></div>
+            <div className="stat-card"><div className="stat-value" style={{color:'var(--green)'}}>{passCount}</div><div className="stat-label">Safe</div></div>
+            <div className="stat-card"><div className="stat-value" style={{color:'var(--red)'}}>{vulnCount}</div><div className="stat-label">Vulnerable</div></div>
+          </div>
+          <div className="card">
+            <div className="card-header">
+              <div className="card-title">Execution Log</div>
+              {done && <button className="btn btn-ghost btn-sm" onClick={onReport}>📥 Download Report</button>}
+            </div>
+            <TestStream lines={lines} onShot={onShot} />
+            {done && (
+              <div className="done-banner">
+                <div className="done-text">🔴 Scan finished — <strong>1 vulnerability found</strong> across 9 checks.</div>
+                <button className="btn btn-primary" onClick={onReport}>📥 Download Report</button>
+              </div>
+            )}
+          </div>
+        </React.Fragment>
+      )}
+    </div>
+  );
+}
+
+function SecurityReportView(){
+  const totalTests = 1 + SECURITY_SAFE.length;
+  return (
+    <div className="tp-report">
+      <div className="rp-header">
+        <div>
+          <div className="rp-logo">Test<span>Pilot</span></div>
+          <div style={{fontSize:12, color:'#666', marginTop:4}}>Security Scan Report</div>
+        </div>
+        <div style={{textAlign:'right'}}>
+          <div style={{fontSize:13, color:'#666'}}>{new Date().toLocaleDateString('en-GB', {day:'2-digit', month:'long', year:'numeric'})}</div>
+          <div style={{fontSize:20, fontWeight:800, color:'#dc2626', marginTop:4}}>1 VULNERABILITY</div>
+        </div>
+      </div>
+      <table className="meta-table"><tbody>
+        <tr><td>App</td><td>plazoabierto.es</td></tr>
+        <tr><td>URL</td><td>https://plazoabierto.es</td></tr>
+        <tr><td>User A</td><td>Property Owner — usera@plazoabierto.es</td></tr>
+        <tr><td>User B</td><td>Other Tenant — userb@plazoabierto.es</td></tr>
+        <tr><td>Total Tests</td><td>{totalTests}</td></tr>
+      </tbody></table>
+      <div className="rp-stats">
+        <div className="rp-stat neutral"><div className="rp-stat-num">{totalTests}</div><div className="rp-stat-label">Total Tests</div></div>
+        <div className="rp-stat green"><div className="rp-stat-num">{SECURITY_SAFE.length}</div><div className="rp-stat-label">Safe</div></div>
+        <div className="rp-stat red"><div className="rp-stat-num">1</div><div className="rp-stat-label">Vulnerable</div></div>
+      </div>
+      <h2>Executive Summary</h2>
+      <div className="exec-box">One high-severity authorization failure: User B could read User A's private listing data by changing a URL id, with no server-side ownership check. All other checks — session security, headers, CORS, mass assignment, rate limiting — passed.</div>
+      <h2>Vulnerabilities Found (1)</h2>
+      <div className="vuln-card">
+        <div className="vuln-header">
+          <span className="vuln-id">VULN-01</span>
+          <span className="vuln-sev" style={{background:SEV_COLOR.high}}>HIGH</span>
+          <span className="vuln-type">IDOR</span>
+          <span style={{fontSize:10, color:'#555', fontFamily:'monospace', background:'#eef2ff', padding:'1px 5px', borderRadius:3}}>WSTG-ATHZ-04</span>
+          <span style={{fontSize:11, color:'#16a34a'}}>★★★★★</span>
+          <span className="vuln-title">IDOR: Listing detail API</span>
+        </div>
+        <div className="vuln-body">
+          <div className="vuln-request"><strong style={{color:'#000'}}>GET</strong> /api/listings/8231 <span style={{color:'#888'}}>→ HTTP 200</span></div>
+          <div className="vuln-desc">User B's session retrieved User A's private listing (id 8231) by changing the URL id — the API performs no ownership check.</div>
+          <div className="vuln-verdict">Finding: response included User A's phone number and unlisted price, both marked private.</div>
+        </div>
+      </div>
+      <h2>Tests Passed ({SECURITY_SAFE.length} of {totalTests})</h2>
+      <div className="pass-grid">{SECURITY_SAFE.map(s => <div className="pass-item" key={s}>✓ {s}</div>)}</div>
+      <h2>Scope &amp; Limitations</h2>
+      <div className="scope-box">
+        <p style={{marginBottom:10}}><strong style={{color:'#92400e'}}>This is an indicative automated scan, not a full penetration test.</strong></p>
+        <p style={{margin:0}}><strong>In scope:</strong> authorization &amp; multi-tenancy isolation, IDOR, session security, headers, CORS, mass assignment, rate limiting. <strong>Out of scope:</strong> stored/reflected XSS with payload execution, CSRF review, business-logic flaws, infrastructure assessment.</p>
+      </div>
+      <div className="rp-footer">
+        <div className="rp-footer-logo">Test<span>Pilot</span></div>
+        <div>Generated automatically by TestPilot — AI-powered security testing for any web app · testpilotapp.dev</div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------------------- App */
+
+function App(){
+  const [view, setView] = useState('learn');
+  const [learned, setLearned] = useState(false);
+  const [flowStage, setFlowStage] = useState('setup');
+  const [secStage, setSecStage] = useState('setup');
+  const [shot, setShot] = useState(null);
+  const [toast, setToast] = useState(null);
+
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(null), 2800); };
+
+  const onNav = (id) => {
+    if (id === 'learn' || id === 'apps') { setView(id); return; }
+    if (id === 'security' || id === 'flow') {
+      if (!learned) { showToast('Learn an app first — click "Learn New App".'); setView('learn'); return; }
+      setView(id); return;
+    }
+    showToast('Not wired up in this sandbox demo.');
+  };
+
+  const onLearnDone = (next) => {
+    setLearned(true);
+    if (next) setView(next); else setView('learn');
+  };
+
+  const reset = () => {
+    setView('learn'); setLearned(false); setFlowStage('setup'); setSecStage('setup'); setShot(null); setToast(null);
+  };
+
+  return (
+    <div className="app">
+      <button className="restart-pill" onClick={reset}>↺ restart demo</button>
+      <Sidebar view={view} appLearned={learned} onNav={onNav} />
+      <div className="main">
+        {view === 'learn' && <LearnPage learned={learned} onDone={onLearnDone} onReport={() => setView('learn-report')} />}
+        {view === 'learn-report' && (
+          <div>
+            <button className="btn btn-ghost btn-sm" style={{marginBottom:14}} onClick={() => setView('learn')}>← Back</button>
+            <LearnReportView />
+          </div>
+        )}
+        {view === 'apps' && <AppsPage learned={learned} onNav={onNav} />}
+        {view === 'flow' && flowStage !== 'report' && (
+          <FlowTestPage
+            stage={flowStage}
+            onRun={() => { setFlowStage('running'); setTimeout(() => setFlowStage('running-done'), FLOW_SCRIPT.length * 620 + 800); }}
+            onReport={() => setFlowStage('report')}
+            onShot={setShot}
+          />
+        )}
+        {view === 'flow' && flowStage === 'report' && (
+          <div>
+            <button className="btn btn-ghost btn-sm" style={{marginBottom:14}} onClick={() => setFlowStage('running-done')}>← Back to test</button>
+            <FlowReportView />
+          </div>
+        )}
+        {view === 'security' && secStage !== 'report' && (
+          <SecurityTestPage
+            stage={secStage}
+            onRun={() => { setSecStage('running'); setTimeout(() => setSecStage('running-done'), SECURITY_SCRIPT.length * 560 + 800); }}
+            onReport={() => setSecStage('report')}
+            onShot={setShot}
+          />
+        )}
+        {view === 'security' && secStage === 'report' && (
+          <div>
+            <button className="btn btn-ghost btn-sm" style={{marginBottom:14}} onClick={() => setSecStage('running-done')}>← Back to scan</button>
+            <SecurityReportView />
+          </div>
+        )}
+      </div>
+      <ScreenshotModal variant={shot} onClose={() => setShot(null)} />
+      {toast && <div className="toast">{toast}</div>}
+    </div>
+  );
+}
+
+class Boundary extends React.Component {
+  constructor(p){ super(p); this.state = { hasError:false }; }
+  static getDerivedStateFromError(){ return { hasError:true }; }
+  render(){
+    if (this.state.hasError){
+      return (
+        <div style={{minHeight:'100vh', display:'flex', alignItems:'center', justifyContent:'center', background:'#080808', color:'#f4f2ee', fontFamily:"'Syne',sans-serif"}}>
+          <div style={{textAlign:'center'}}>
+            <h1 style={{fontSize:24, fontWeight:800, marginBottom:10}}>Something interrupted the demo</h1>
+            <button className="btn btn-primary" onClick={() => window.location.reload()}>↺ Restart Sandbox</button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<Boundary><App /></Boundary>);
+</script>
+</body>
+</html>

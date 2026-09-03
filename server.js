@@ -1202,6 +1202,11 @@ app.get('/privacy.html', (req, res) => res.sendFile(path.resolve('./privacy.html
 // Linked to from landing.html's "Run your first test →" CTA.
 app.get('/first-run', (req, res) => res.sendFile(path.resolve('./first-run.html')));
 
+// Fully simulated walkthrough of the real app (fake target, scripted
+// findings) for visitors who want to see TestPilot work before signing up.
+// Linked to from landing.html's "Try the Sandbox Demo" CTA.
+app.get('/sandbox', (req, res) => res.sendFile(path.resolve('./sandbox.html')));
+
 // Embed pages — minimal, no-chrome UIs designed to be iframed from
 // Base44 (or anywhere else). /live-test/:testId is a read-only SSE
 // log viewer; /chat is a full interactive chat (messages + screenshot
