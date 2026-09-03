@@ -1996,7 +1996,7 @@ function hasFeature(feature) {
 function gatedLearn() {
   const plan = currentUser?.plan || 'free';
   // Funnel rework: free + onerun cap at 1 app, starter at 3.
-  const limits = { free: 1, onerun: 1, solo: 1, starter: 3, pro: 10, agency: 999, admin: 999, tester: 999 };
+  const limits = { free: 1, onerun: 1, solo: 3, starter: 3, pro: 10, agency: 999, admin: 999, tester: 999 };
   const limit = limits[plan] ?? 999;
   if (state.apps.length >= limit) {
     showFunnelPaywall('app_slot');
@@ -2019,30 +2019,20 @@ function showFunnelPaywall(reason) {
         <div id="fp-title" style="font-size:22px;font-weight:800;margin-bottom:6px"></div>
         <div id="fp-sub" style="font-size:13px;color:#d8d8d8;margin-bottom:24px;font-family:monospace"></div>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:20px">
-          <div onclick="funnelCheckout('onerun')" style="background:#080808;border:1px solid #2a2a2a;border-radius:5px;padding:18px 16px;cursor:pointer">
-            <div style="font-size:11px;font-family:monospace;color:#c8f040;letter-spacing:1px;margin-bottom:6px">ONE RUN</div>
-            <div style="font-size:24px;font-weight:800">€5</div>
-            <div style="font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace">1 app · 1 run · every feature · repeatable</div>
-          </div>
           <div onclick="funnelCheckout('solo')" style="background:#080808;border:1px solid rgba(200,240,64,0.5);border-radius:5px;padding:18px 16px;cursor:pointer">
             <div style="font-size:11px;font-family:monospace;color:#c8f040;letter-spacing:1px;margin-bottom:6px">SOLO</div>
-            <div style="font-size:24px;font-weight:800">€10<span style="font-size:11px;color:#d8d8d8;font-weight:400">/mo</span></div>
-            <div style="font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace">1 app · unlimited runs · every feature</div>
-          </div>
-          <div onclick="funnelCheckout('starter')" style="background:#080808;border:1px solid #2a2a2a;border-radius:5px;padding:18px 16px;cursor:pointer">
-            <div style="font-size:11px;font-family:monospace;color:#c8f040;letter-spacing:1px;margin-bottom:6px">STARTER</div>
-            <div style="font-size:24px;font-weight:800">€29<span style="font-size:11px;color:#d8d8d8;font-weight:400">/mo</span></div>
-            <div style="font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace">3 apps · unlimited runs · every feature</div>
+            <div style="font-size:24px;font-weight:800">€19<span style="font-size:11px;color:#d8d8d8;font-weight:400">/mo</span></div>
+            <div style="font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace">Up to 3 apps · full self-healing loops</div>
           </div>
           <div onclick="funnelCheckout('pro')" style="background:#080808;border:1px solid #2a2a2a;border-radius:5px;padding:18px 16px;cursor:pointer">
             <div style="font-size:11px;font-family:monospace;color:#c8f040;letter-spacing:1px;margin-bottom:6px">PRO</div>
-            <div style="font-size:24px;font-weight:800">€149<span style="font-size:11px;color:#d8d8d8;font-weight:400">/mo</span></div>
-            <div style="font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace">10 apps · unlimited runs · every feature</div>
+            <div style="font-size:24px;font-weight:800">€49<span style="font-size:11px;color:#d8d8d8;font-weight:400">/mo</span></div>
+            <div style="font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace">Up to 10 apps · team collaboration · priority queues</div>
           </div>
           <div onclick="funnelCheckout('agency')" style="background:#080808;border:1px solid #2a2a2a;border-radius:5px;padding:18px 16px;cursor:pointer">
             <div style="font-size:11px;font-family:monospace;color:#c8f040;letter-spacing:1px;margin-bottom:6px">AGENCY</div>
-            <div style="font-size:24px;font-weight:800">€249<span style="font-size:11px;color:#d8d8d8;font-weight:400">/mo</span></div>
-            <div style="font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace">unlimited apps · every feature</div>
+            <div style="font-size:24px;font-weight:800">€100<span style="font-size:11px;color:#d8d8d8;font-weight:400">/mo</span></div>
+            <div style="font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace">Unlimited apps · white-label reporting · custom webhooks</div>
           </div>
         </div>
         <button onclick="closeFunnelPaywall()" style="background:transparent;color:#d8d8d8;border:1px solid #333;font-weight:400;font-size:13px;padding:10px;border-radius:3px;width:100%;cursor:pointer;font-family:inherit">Maybe later</button>
@@ -2059,7 +2049,7 @@ function showFunnelPaywall(reason) {
     free_run: '// to run more tests or learn another app, choose a plan',
     app_slot: '// upgrade to add more apps',
     feature: '// flow testing is included on every paid plan',
-    onerun_exhausted: '// €5 for another single run, or go Solo — unlimited runs for €10/mo',
+    onerun_exhausted: '// go Solo — unlimited runs for €19/mo',
   };
   document.getElementById('fp-title').textContent = titles[reason] || titles.feature;
   document.getElementById('fp-sub').textContent = subs[reason] || subs.feature;
@@ -4341,13 +4331,11 @@ function renderModal() {
           </div>
           <button onclick="closeModal()" style="background:none;border:none;color:var(--text-muted);font-size:20px;cursor:pointer">×</button>
         </div>
-        <div style="padding:24px;display:grid;grid-template-columns:repeat(2,1fr);gap:12px">
+        <div style="padding:24px;display:grid;grid-template-columns:repeat(3,1fr);gap:12px">
           ${[
-            { plan:'onerun', name:'One Run', price:'€5', desc:'1 app · 1 run', features:['One full run — any feature','Bug report + screenshots','Repeatable — buy again to re-verify'] },
-            { plan:'solo', name:'Solo', price:'€10/mo', desc:'1 app · unlimited runs', features:['Unlimited runs','Every feature included','Full test history'] },
-            { plan:'starter', name:'Starter', price:'€29/mo', desc:'Up to 3 apps', features:['Unlimited runs','Every feature included','Full test history'] },
-            { plan:'pro', name:'Pro', price:'€149/mo', desc:'Up to 10 apps', features:['Unlimited runs','Every feature included','Full test history'] },
-            { plan:'agency', name:'Agency', price:'€249/mo', desc:'Unlimited apps', features:['Unlimited runs','Every feature included','Priority support'] }
+            { plan:'solo', name:'Solo', price:'€19/mo', desc:'Up to 3 apps', features:['Unlimited runs','Full self-healing loops','Full test history'] },
+            { plan:'pro', name:'Pro', price:'€49/mo', desc:'Up to 10 apps', features:['Unlimited runs','Full self-healing loops','Team collaboration','Priority queues'] },
+            { plan:'agency', name:'Agency', price:'€100/mo', desc:'Unlimited apps', features:['Unlimited runs','Full self-healing loops','White-label reporting','Custom webhooks'] }
           ].map(p => `
             <div style="background:var(--bg-hover);border:1px solid var(--border);padding:20px;border-radius:2px;display:flex;flex-direction:column;gap:10px">
               <div>

@@ -190,8 +190,8 @@ const PLAN_LIMITS = {
   // The multirole + security endpoints reserve/refund the credit the same way
   // /api/test does.
   onerun:  { apps: 1,    runs: 1,    features: ['scenario', 'interactive', 'multirole', 'security', 'flow'] },
-  // Solo €10/mo: 1 app, unlimited runs, every feature. Recurring subscription.
-  solo:    { apps: 1,    runs: null, features: ['scenario', 'interactive', 'multirole', 'security', 'flow'] },
+  // Solo €19/mo: 3 apps, unlimited runs, every feature. Recurring subscription.
+  solo:    { apps: 3,    runs: null, features: ['scenario', 'interactive', 'multirole', 'security', 'flow'] },
   starter: { apps: 3,    runs: null, features: ['scenario', 'interactive', 'multirole', 'security', 'flow'] },
   pro:     { apps: 10,   runs: null, features: ['scenario', 'interactive', 'multirole', 'security', 'flow'] },
   agency:  { apps: 999,  runs: null, features: ['scenario', 'interactive', 'multirole', 'security', 'flow'] },
