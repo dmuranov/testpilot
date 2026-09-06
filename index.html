@@ -6315,6 +6315,25 @@ function downloadSecReport() {
   }
   const execSummary = `TestPilot ran ${totalTests} automated security tests on ${appName}, simulating two independent users (${cfg.userA.name} and ${cfg.userB.name}) attempting to access each other's data through various attack vectors. The scan covers URL-based access, search leakage, IDOR (Insecure Direct Object Reference), session persistence, API replay attacks, unauthenticated API access, security headers, CORS, info disclosure, JWT hygiene, rate limiting, and mass assignment.<br><br>${summaryEnd}`;
 
+  // Headline badge (top-right). Must never say "clear" while tests didn't
+  // run — this is the one line a customer screenshots and forwards, so it
+  // carries the same "don't claim safe for unverified" rule as summaryEnd.
+  const unverifiedCount = inconclusive.length + unknown.length;
+  let headlineColor, headlineText;
+  if (vulns.length > 0) {
+    headlineColor = '#dc2626';
+    headlineText = vulns.length + ' VULNERABILIT' + (vulns.length === 1 ? 'Y' : 'IES');
+  } else if (suspicious.length > 0) {
+    headlineColor = '#d97706';
+    headlineText = suspicious.length + ' SUSPICIOUS';
+  } else if (unverifiedCount > 0) {
+    headlineColor = '#92400e';
+    headlineText = `NO ISSUES FOUND — ${unverifiedCount} CHECK${unverifiedCount === 1 ? '' : 'S'} UNVERIFIED`;
+  } else {
+    headlineColor = '#16a34a';
+    headlineText = 'ALL CLEAR';
+  }
+
   // Vulnerabilities HTML
   // Render a single finding card (used for both vulns and suspicious).
   // Uses real server-computed severity from r.severity — no more "everything
@@ -6427,7 +6446,7 @@ function downloadSecReport() {
   </div>
   <div style="text-align:right">
     <div style="font-size:13px;color:#666">${scanDate}</div>
-    <div style="font-size:20px;font-weight:800;color:${vulns.length > 0 ? '#dc2626' : suspicious.length > 0 ? '#d97706' : '#16a34a'};margin-top:4px">${vulns.length > 0 ? vulns.length + ' VULNERABILIT' + (vulns.length === 1 ? 'Y' : 'IES') : suspicious.length > 0 ? suspicious.length + ' SUSPICIOUS' : 'ALL CLEAR'}</div>
+    <div style="font-size:20px;font-weight:800;color:${headlineColor};margin-top:4px">${headlineText}</div>
   </div>
 </div>
 

@@ -6291,14 +6291,26 @@ async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey)
       diag.httpErrors.push({ step: diagStep(), method, url: u.slice(0, 300), status: s, firstParty: diagFirstParty(u) });
     } catch {}
   });
-  // Ring buffer of recent first-party API calls (XHR/fetch, any status) for
-  // structured verify assertions (network_response, see the 'verify' case
-  // below) to search against — an order confirmation's proof is the API
-  // response that actually created it, not a screenshot of the page after.
-  // Stores the live Response object, not its body: reading a body is an
-  // async call with real cost, so it's only paid for the one call an
-  // assertion actually matches, not for every response all run.
-  const API_CALL_CAP = 40;
+  // Log of first-party API calls (XHR/fetch, any status) for structured verify
+  // assertions (network_response, see the 'verify' case below) to search
+  // against — an order confirmation's proof is the API response that actually
+  // created it, not a screenshot of the page after. Stores the live Response
+  // object, not its body: reading a body is an async call with real cost, so
+  // it's only paid for the one call an assertion actually matches, not for
+  // every response all run. Verified directly against a live Playwright
+  // Response object: it doesn't retain the body and JSON.stringify's down to
+  // near-nothing ({_type, _guid}) — the per-entry cost here is small, not "a
+  // whole response cached", so this isn't a body-buffering concern.
+  // Cap raised from 40 to 500, not removed: a verify step can reference a
+  // call from any point earlier in the run and there's no way to know in
+  // advance which ones matter, so a tight recency cap silently evicted early
+  // calls and turned a genuinely-passed assertion into a false "UNCERTAIN"
+  // once ~40 more xhr/fetch calls had fired since. 500 comfortably covers any
+  // realistic assertion window (MAX_AGENT_STEPS=120) while still bounding a
+  // pathological app that polls an endpoint continuously for minutes — this
+  // runs on the same VM as production, so unbounded isn't free even though
+  // each entry is small.
+  const API_CALL_CAP = 500;
   page.on('response', (resp) => {
     try {
       const req = resp.request();
@@ -12405,6 +12417,18 @@ async function finishSupportTicket(res, { description, email, plan }) {
   try {
     if (!description) return res.status(400).json({ error: 'Description required' });
 
+    // Logged before anything that can fail below (Claude call, Resend) so the
+    // ticket's actual text survives in the PM2 log even if the send doesn't —
+    // previously a send failure lost the ticket with zero trace anywhere.
+    console.log(`[support] ticket from ${email || '(anonymous)'} (${plan}): ${description}`);
+
+    // A raw newline this close to the front of `description` (the widget
+    // appends "\n\n[Auto-captured: ...]" to short notes) ends up inside the
+    // subject's first 60 chars and Resend's API 422s the whole send on
+    // "\n is not allowed in the subject field" — silently dropping the
+    // ticket. Collapse whitespace before slicing so that can't happen.
+    const subjectLine = `🆘 Support: ${description.replace(/\s+/g, ' ').trim().substring(0, 60)}`;
+
     // Claude diagnosis
       const client = new Anthropic({ apiKey: process.env.ANTHROPIC_SUPPORT_KEY || '' });
       let claudeDiagnosis = 'Claude diagnosis unavailable — API key not configured for support.';
@@ -12441,7 +12465,7 @@ Respond in plain text, no markdown.` }]
       await mailer.sendMail({
         from: '"TestPilot Support" <hello@testpilotapp.dev>',
         to: 'danijel.muranovic@gmail.com',
-        subject: `🆘 Support: ${description.substring(0, 60)}`,
+        subject: subjectLine,
         html: `<div style="font-family:sans-serif;max-width:600px">
           <h2>New Support Ticket</h2>
           <p><strong>From:</strong> ${email} (${plan} plan)</p>
@@ -12473,6 +12497,17 @@ Respond in plain text, no markdown.` }]
     res.json({ ok: true });
   } catch (e) {
     console.error('Support error:', e.message);
+    // The mailer call above is what usually throws here, so the normal alert
+    // path (also Resend, via sendAlert -> mailer) is not guaranteed to get
+    // through either — but it's a different call (different subject, no
+    // interpolated ticket text) so a failure specific to the ticket's shape,
+    // like the newline-in-subject bug this replaces, won't repeat here too.
+    // Best-effort: if this also fails, the console.log above is the backstop.
+    sendAlert(
+      'support-ticket-send-failed',
+      'A support ticket failed to send',
+      `From: ${email || '(anonymous)'} (${plan})\nError: ${e.message}\n\nTicket:\n${description}`,
+    );
     res.status(500).json({ error: e.message });
   }
 }
@@ -13226,18 +13261,26 @@ app.post('/api/security/api-intercept', async (req, res) => {
           bodyLength: document.body?.textContent?.length || 0
         }));
 
-        const isBlocked = 
+        const isBlocked =
           // Common access denied words in multiple languages
           /denied|unauthorized|forbidden|not found|no permission|access.?denied|no tienes|no autorizado|interdit|non autorisé|nicht berechtigt|zugriff verweigert|niet toegestaan|non autorizzato|acesso negado|sem permissão|brak dostępu|403|404|401/i.test(pageContent.bodyText) ||
           // Redirected to login
           pageContent.url.includes('login') || pageContent.url.includes('signin') || pageContent.url.includes('auth') ||
           // Page is essentially empty
           pageContent.bodyLength < 100;
-        
+
         // Check if User A's data is visible
         const showsUserAData = userAMarkers.some(m => pageContent.bodyText.toLowerCase().includes(m.toLowerCase()));
 
-        let verdict = 'SAFE';
+        // This check only ever inspects the RENDERED DOM, never the raw API
+        // response — so "blocked" is a guess from page text, not a verified
+        // fact. A client-side-filtered app can hit every denial keyword here
+        // (e.g. a soft "not found" empty state) while its API happily returned
+        // User A's full row underneath. Only a real positive (showsUserAData)
+        // is a verified verdict; everything else DOM-inferred is INCONCLUSIVE,
+        // never SAFE — SAFE is reserved for checks that examined the response
+        // itself (see the api_replay / rls_exposure levels elsewhere).
+        let verdict = 'INCONCLUSIVE';
         if (showsUserAData) verdict = 'VULNERABLE';
         else if (!isBlocked && pageContent.bodyLength > 200) verdict = 'POTENTIAL_VULNERABILITY';
 
@@ -13246,7 +13289,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
           ? `${idorShort}: page shows User A's identifying data — IDOR confirmed`
           : verdict === 'POTENTIAL_VULNERABILITY'
             ? `${idorShort}: User B not redirected to login, page has content — manual verify needed`
-            : `${idorShort}: blocked, redirected, or empty`;
+            : `${idorShort}: DOM looked blocked/redirected/empty for User B, but the raw API response was not checked — a client-side-filtered leak would look identical here, so this is not a verified pass`;
         results.push({
           type: 'idor_direct',
           level: 2,
