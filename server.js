@@ -3991,21 +3991,23 @@ async function crawlApp(appId, url, credentials, description, apiKey, onProgress
   // indexedDBRestoreData's comment for why this exists at all.
   if (credentials?.indexedDB?.length) await page.addInitScript(indexedDBRestoreData, credentials.indexedDB);
 
-  // ── SITE REPORT DIAGNOSTICS (superadmin-only, see isSuperAdmin below) ────
+  // ── SITE REPORT DIAGNOSTICS (all users) ───────────────────────────────────
   // Mirrors the sweep's error-capture (see runSweep's `diag`/`firstParty`
   // around line 9735) but deliberately does NOT filter out third-party
   // console/network noise — a broken third-party script is exactly the kind
   // of thing the free Site Report should surface. Each entry is tagged
   // firstParty instead, and the UI groups by that. Attributed to whichever
   // route was open when explorePage() last set currentCrawlPath below.
-  // Gated to the super admin's own crawls only for now — every other user's
-  // Learn behaves exactly as before (no extra listeners, no extra requests).
+  // Was gated to the super admin's own crawls while dogfooding this (extra
+  // listeners + up to 300 link HEAD-checks per crawl has a real cost) — now
+  // rolled out to everyone; see openSiteReport()/isSuperAdminUser() in
+  // index.html, whose comment this contradicted until the button was unhidden.
   let currentCrawlPath = '';
   const learnDiag = { console: [], pageErrors: [], http: [] };
   let learnAppOrigin = null;
   try { learnAppOrigin = new URL(url).origin; } catch {}
   const learnFirstParty = (u) => { try { return new URL(u).origin === learnAppOrigin; } catch { return false; } };
-  const siteReportEnabled = isSuperAdmin(ownerEmail);
+  const siteReportEnabled = true;
   if (siteReportEnabled) {
     page.on('console', (m) => {
       try {

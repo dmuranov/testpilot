@@ -2393,6 +2393,37 @@ function render() {
   if (state.view === 'chat' && !state.chatSession) {
     setTimeout(() => chatLoadCreds(), 50);
   }
+
+  // Idle nudge: land on a testing screen and leave its main field empty for
+  // 4s -> auto-start that screen's guided tour (same one "Guide Me" opens).
+  // Replaces relying on the post-crawl popup's now-removed choice list to be
+  // the only way into a tour — reaching a test via the plain left-nav click
+  // needs its own hint, or a blank form with no explanation is all there is.
+  // Keyed on view+testMode so unrelated re-renders of the SAME screen (e.g.
+  // toggling "no login") don't restart the 4s countdown — only an actual
+  // navigation does. render() re-runs constantly (live test streaming pushes
+  // one per step), so re-arming on every call would either never fire or
+  // keep resetting; this only arms once per distinct screen landed on.
+  (function () {
+    var tourForView = {
+      'test-run': state.testMode === 'flow_e2e' ? 'flow' : 'scenario',
+      'security': 'security',
+      'chat': 'interactive',
+      'multirole': 'multirole',
+    };
+    var name = tourForView[state.view] || null;
+    var key = state.view + ':' + (state.testMode || '');
+    if (key === _idleHintKey) return;
+    _idleHintKey = key;
+    clearTimeout(_idleHintTimer);
+    if (!name) return;
+    _idleHintTimer = setTimeout(function () {
+      if (_tour) return; // a tour (or another idle hint) already running
+      var firstStep = TOURS[name] && TOURS[name][0];
+      var started = firstStep && firstStep.done && firstStep.done();
+      if (!started) maybeStartTour(name);
+    }, 4000);
+  })();
 }
 
 function renderView() {
@@ -2853,7 +2884,7 @@ function renderAppDetail() {
         <div style="font-size:12px;color:var(--text-muted);font-family:'JetBrains Mono',monospace;margin-top:2px">${app.url}</div>
       </div>
       <div style="display:flex;gap:8px">
-        ${isSuperAdminUser() ? `<button class="btn btn-ghost" onclick="openSiteReport()">📊 Site Report</button>` : ''}
+        <button class="btn btn-ghost" onclick="openSiteReport()">📊 Site Report</button>
         <button class="btn btn-ghost" onclick="showGuideChooser()">🧭 Guide Me</button>
         <button class="btn btn-primary" onclick="startTestForApp('${app.appId}')">▶ Run Test</button>
         <button class="btn btn-ghost" onclick="relearn('${app.appId}')">🔄 Re-learn</button>
@@ -6936,18 +6967,14 @@ ${(s.defects || []).length > 0 ? defectsHtml : `<div class="no-vulns">✓ No pro
 }
 
 // ═══════════════════════════════════════════════════════════════
-// SITE REPORT — superadmin-only. Surfaces what the Learn crawl already
-// computes (route tree, console/network diagnostics, link audit, coverage)
-// instead of discarding it. Mirrors downloadSweepReport()'s structure and
-// styling rather than inventing a second report format. Data only exists on
-// state.selectedApp when the crawl that produced it ran under the super
-// admin account (server.js gates diagnostics/linkAudit/coverage collection
-// the same way) — the button that calls this is hidden for everyone else.
+// SITE REPORT — available to all users. Surfaces what the Learn crawl
+// already computes (route tree, console/network diagnostics, link audit,
+// coverage) instead of discarding it. Mirrors downloadSweepReport()'s
+// structure and styling rather than inventing a second report format.
+// Was superadmin-only while dogfooding (server.js gated the extra
+// diagnostics/linkAudit/coverage collection the same way) — both sides
+// rolled out together, so any app learned from here on has this data.
 // ═══════════════════════════════════════════════════════════════
-const TP_SUPER_ADMIN_EMAIL = 'danijel.muranovic@gmail.com';
-function isSuperAdminUser() {
-  return (currentUser?.email || '').trim().toLowerCase() === TP_SUPER_ADMIN_EMAIL;
-}
 
 function openSiteReport() {
   const app = state.selectedApp;
@@ -7512,6 +7539,7 @@ function tpConfirm(message) {
 // hold an element reference — every tick re-finds its target by selector and
 // re-anchors. A missing target just parks the tour (hidden) until it appears.
 var _tour = null, _tourTimer = null;
+var _idleHintTimer = null, _idleHintKey = null;
 
 function _tq(sel) { try { return document.querySelector(sel); } catch (e) { return null; } }
 function _tval(sel) { var el = _tq(sel); return el ? String(el.value || '') : ''; }
@@ -7608,6 +7636,28 @@ var TOURS = {
       done: function () { return _tval('#test-password').length > 0; } },
     { sel: 'button[onclick="runTest()"]', title: 'Run the test',
       text: 'You watch each step live with screenshots, and get a bug list at the end.' }
+  ],
+
+  // Checkout & Booking Test shares renderTestRun()/#test-scenario with the
+  // plain scenario test — same fields, so this reuses that structure with
+  // wording aimed at a booking/checkout/signup journey specifically.
+  flow: [
+    { sel: '#test-scenario', title: 'What flow should it follow?',
+      text: 'The booking/checkout/signup journey to follow, in plain english. Example: "Add a product to the cart, go to checkout, fill in shipping details, and stop before paying."',
+      done: function () { return _tval('#test-scenario').split(/\s+/).filter(Boolean).length >= 5; } },
+    { sel: '#test-no-login', title: 'Login needed?',
+      text: 'Public app — tick it. Otherwise fill in the login for the site below.',
+      done: function () { return _tchecked('#test-no-login') || _tval('#test-email').indexOf('@') > 0; } },
+    { sel: '#test-email', title: 'Login for this site',
+      text: 'A throwaway test account’s email — used to sign in to the app before following the flow.',
+      skipIf: function () { return _tchecked('#test-no-login'); },
+      done: function () { return _tval('#test-email').indexOf('@') > 0; } },
+    { sel: '#test-password', title: 'And its password',
+      skipIf: function () { return _tchecked('#test-no-login'); },
+      text: 'Then you are ready to run.',
+      done: function () { return _tval('#test-password').length > 0; } },
+    { sel: 'button[onclick="runTest()"]', title: 'Run the test',
+      text: 'It follows the flow step by step and reports exactly where it breaks, or which steps are slow enough that real users would drop off.' }
   ],
 
   interactive: [
@@ -7896,7 +7946,7 @@ function _appReadyOptions() {
     { label: 'Flow Test',        desc: 'One flow through your app \u2014 say what should happen, it checks',  feature: 'scenario',    tour: 'scenario',    go: function () { navigateToScenario(); } },
     { label: 'Interactive Test', desc: 'Drive your app live with natural-language commands',            feature: 'interactive', tour: 'interactive', go: function () { gatedNavigate('chat', 'interactive'); } },
     { label: 'Multi-Role',       desc: 'One flow across several user roles in sequence',                feature: 'multirole',   tour: 'multirole',   go: function () { gatedNavigate('multirole', 'multirole'); } },
-    { label: 'Checkout & Booking Test', desc: 'Follows a booking/checkout flow end-to-end — reports where it breaks and what’s slow', feature: 'flow', tour: null, go: function () { navigateToFlowTest(); } }
+    { label: 'Checkout & Booking Test', desc: 'Follows a booking/checkout flow end-to-end — reports where it breaks and what’s slow', feature: 'flow', tour: 'flow', go: function () { navigateToFlowTest(); } }
   ];
 }
 
@@ -7904,7 +7954,12 @@ function showAppReady(message, guide) {
   var ov = document.getElementById('app-ready-overlay');
   if (!ov) return;
   var sub = document.getElementById('app-ready-sub');
-  if (sub) sub.textContent = '// ' + (message || (guide ? 'step-by-step guide' : 'Deep crawl complete \u2014 pages, forms and buttons mapped.'));
+  // Non-guide case is deliberately terse now: this popup used to also list
+  // every test type with descriptions and upgrade badges, which read as "six
+  // decisions to make" right when the user has made zero of them yet. The
+  // left menu already lists the same tests \u2014 this popup's only job is
+  // saying the crawl finished and where to go next, once.
+  if (sub) sub.textContent = guide ? '// ' + (message || 'step-by-step guide') : '';
   // Same chooser, two jobs: announcing a finished crawl, and re-opening the
   // walkthrough on demand from "Guide Me".
   var ttl = document.getElementById('app-ready-title');
@@ -7914,12 +7969,15 @@ function showAppReady(message, guide) {
   var lead = document.getElementById('app-ready-lead');
   if (lead) lead.innerHTML = guide
     ? 'I\u2019ll highlight each field and tell you what to put in it, one step at a time.'
-    : 'Now choose the test you want to run &mdash; from the menu on the <strong style="color:#c8f040">left</strong>, or straight from here:';
+    : 'Pick any test from the menu on the <strong style="color:#c8f040">left</strong>.';
 
   var box = document.getElementById('app-ready-choices');
   if (box) {
     box.innerHTML = '';
-    _appReadyOptions().forEach(function (opt) {
+    // The full list-with-descriptions picker is only for the explicit "Guide
+    // Me" re-open (guide=true, someone who asked to see the options) \u2014 the
+    // first-time "ready" popup no longer duplicates the left nav here.
+    if (guide) _appReadyOptions().forEach(function (opt) {
       var ok = hasFeature(opt.feature);
       var row = document.createElement('button');
       row.style.cssText = 'text-align:left;display:flex;flex-direction:column;gap:3px;padding:12px 14px;border-radius:3px;cursor:pointer;font-family:inherit;' +
