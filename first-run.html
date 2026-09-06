@@ -73,10 +73,10 @@
     <label for="f-email">Your email</label>
     <input id="f-email" type="email" placeholder="you@company.com" autocomplete="email" inputmode="email" />
     <label for="f-url">App URL</label>
-    <input id="f-url" type="url" placeholder="https://your-app.com" autocomplete="url" inputmode="url" />
+    <input id="f-url" type="url" placeholder="https://your-app.com" autocomplete="url" inputmode="url" oninput="updateAppLoginSiteLabel()" />
 
     <div style="margin-top:18px;padding:14px;background:#080808;border:1px solid #222;border-radius:3px">
-      <div style="font-size:11px;color:#d8d8d8;font-family:monospace;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:10px">App login</div>
+      <div style="font-size:11px;color:#d8d8d8;font-family:monospace;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:10px">Login<span id="f-app-login-site"> for the app above</span> — not your TestPilot account</div>
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:0;font-size:12px;color:#a8a8a8">
         <input id="f-no-login" type="checkbox" onchange="toggleStartLogin()" style="width:15px;height:15px;accent-color:#c8f040;cursor:pointer;margin:0" />
         No login needed — my app is publicly accessible
@@ -222,6 +222,18 @@ function toggleStartLogin() {
   const noLogin = document.getElementById('f-no-login').checked;
   const f = document.getElementById('f-login-fields');
   if (f) f.style.display = noLogin ? 'none' : 'block';
+}
+
+// "App login" alone reads ambiguous next to "Your email" above it — easy to
+// mistake for a TestPilot field. Naming the actual site as it's typed makes
+// the distinction concrete instead of relying on wording alone.
+function updateAppLoginSiteLabel() {
+  const el = document.getElementById('f-app-login-site');
+  if (!el) return;
+  const raw = (document.getElementById('f-url') || {}).value || '';
+  let host = '';
+  try { host = new URL(raw.includes('://') ? raw : 'https://' + raw).hostname; } catch (e) {}
+  el.textContent = host ? ' for ' + host : ' for the app above';
 }
 
 async function startFunnel() {

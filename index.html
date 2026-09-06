@@ -2766,6 +2766,7 @@ function renderLearn() {
         <label for="learn-no-login" style="cursor:pointer;font-size:13px;color:var(--text-dim);margin:0">No login required — app is publicly accessible</label>
       </div>
       <div id="login-fields">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">Login for the app above — not your TestPilot account</div>
         <div class="form-group">
           <label>Login Email *</label>
           <input class="form-input" id="learn-email" placeholder="user@example.com" />
@@ -3032,6 +3033,7 @@ function renderTestRun() {
       </div>
       ${!state._testNoLogin ? renderSavedLoginPicker(app?.appId, state.testSavedRole || '', "state.testSavedRole=this.value;render()", 'test') : ''}
       <div id="test-login-fields" style="display:${(state._testNoLogin || state.testSavedRole) ? 'none' : 'block'}">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">Login for <strong style="color:var(--text-dim)">${escapeHtml(app?.summary?.appName || app?.url || 'the app you\'re testing')}</strong> — not your TestPilot account</div>
         <div style="display:flex;gap:10px">
           <div class="form-group" style="flex:1">
             <label>Email</label>

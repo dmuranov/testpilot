@@ -6524,9 +6524,25 @@ async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey)
       const loginCause = /could not find|couldn'?t find|no .*(email|password|login).*field|form|vision|read|locate/i.test(loginResult.error || '')
         ? 'login_vision' : 'login_credentials';
       result.status = 'blocked';
-      result.blockedReason = classifyFailure({ cause: loginCause, description: `Login failed after 2 attempts: ${loginResult.error}` });
+      result.blockedReason = classifyFailure({
+        cause: loginCause,
+        step: 0,
+        description: `Not a bug in your app — TestPilot could not verify the login credentials given for this run. Login failed after 2 attempts: ${loginResult.error} If those credentials are correct, this app's login may need a human (magic link, SSO) — use "+ Capture new role" above to log in yourself once and reuse that session.`,
+      });
       result.steps.push({ step: 0, action: 'login', status: 'fail', outcome: loginResult.error, category: result.blockedReason.category });
-      emitStep(testId, { type: 'error', message: `Login failed after 2 attempts: ${loginResult.error}. This is a TestPilot/login-environment issue, not an app defect — verify credentials are correct and the login page is reachable.` });
+      // findings (not just steps) is what renderTestDetail's "Couldn't verify"
+      // panel reads — without this a login-blocked run showed 0 steps/0 bugs
+      // and nothing else: no reasoning, no reference to the credentials it
+      // tried, no pointer to the capture-session workaround that already
+      // exists one button away on the same screen.
+      result.findings.push(result.blockedReason);
+      // Deliberately NOT "TestPilot/login-environment issue" — that phrasing
+      // reads as "a TestPilot bug" to someone scanning quickly. It isn't:
+      // this fires when the credentials given for THIS run couldn't be
+      // verified — most often because they're wrong for the app being
+      // tested, occasionally because the app uses a login TestPilot can't
+      // drive (magic link, SSO-only). Correct credentials would have worked.
+      emitStep(testId, { type: 'error', message: `Login failed after 2 attempts: ${loginResult.error}. Not a defect in your app — TestPilot could not verify the email/password given for this run. If they're correct, this login may need a human (magic link, SSO) — use "+ Capture new role" to log in yourself once and reuse that session.` });
       return result;
     }
     emitStep(testId, { type: 'pass', message: 'Login successful', screenshot: loginResult.screenshot });
