@@ -2306,7 +2306,7 @@ function render() {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
           Security Test ${!hasFeature('security') ? '<span style="font-size:9px;font-weight:700;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.3);border-radius:2px;padding:1px 5px;margin-left:4px">🔒 Agency</span>' : ''}
         </button>
-        <button class="nav-btn ${state.view === 'test-run' || (state.view === 'apps' && state.selectedApp) ? 'active' : ''}" onclick="navigateToScenario()" data-tooltip="Test one flow through your app, described in plain English. TestPilot logs in, clicks through your app step by step, and reports bugs with screenshots.">
+        <button class="nav-btn ${(state.view === 'test-run' && state.testMode !== 'flow_e2e') || (state.view === 'apps' && state.selectedApp) ? 'active' : ''}" onclick="navigateToScenario()" data-tooltip="Test one flow through your app, described in plain English. TestPilot logs in, clicks through your app step by step, and reports bugs with screenshots.">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
           Flow Test
         </button>
@@ -5175,6 +5175,22 @@ async function runTest() {
             await loadTests();
             render();
           }, 1000);
+        } else if (data.type === 'error') {
+          // Observed bug: a run that ends early (login failed, config error,
+          // etc.) emits ONLY a bare 'error' event and returns server-side —
+          // there is no following 'summary'/'done'. That left this branch
+          // never firing: the EventSource stayed open, state.currentTest.status
+          // stayed 'running' forever, and the Run button was stuck showing a
+          // spinner — surviving navigation away and even a hard reload, since
+          // nothing ever re-fetched the (already-finished) test to correct it.
+          // Every 'error' emit on this stream is terminal (server.js always
+          // `return`s right after it), so treat it exactly like summary/done.
+          events.close();
+          setTimeout(async () => {
+            const r = await fetch(`${API}/api/test/${testId}`);
+            state.currentTest = await r.json().catch(() => ({ testId, status: 'error' }));
+            render();
+          }, 300);
         }
       } catch (err) { /* partial */ }
     };
@@ -5182,11 +5198,21 @@ async function runTest() {
     events.onerror = () => {
       events.close();
       state.testStream.push({ type: 'error', message: 'Connection to test stream lost' });
+      // Same stuck-button bug as the 'error' event above, via a different
+      // trigger (the SSE connection itself dropped rather than the server
+      // sending an error message) — without this the Run button is left
+      // showing "Running..." indefinitely with no way to start a new run.
+      if (state.currentTest) state.currentTest.status = 'error';
       render();
     };
 
   } catch (e) {
     state.testStream.push({ type: 'error', message: `Failed to start test: ${e.message}` });
+    // Same fix as above: this catch fires when the run never even started
+    // (e.g. the initial POST threw), but state.currentTest was already set to
+    // {status:'running'} before the request went out — leave it there and the
+    // button is stuck before a single step ever ran.
+    if (state.currentTest) state.currentTest.status = 'error';
     render();
   }
 }

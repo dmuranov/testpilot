@@ -2370,16 +2370,46 @@ async function supplyPlaceholderToFileInput(page, fileInputLocator) {
 // Selector for a directly-fillable login form (email/password inputs).
 const LOGIN_FORM_SELECTOR = 'input[type="email"], input[type="password"], #email, #password, input[name="email"]';
 
+// A visible input[type="email"]/#email alone is NOT reliable evidence of a
+// LOGIN form — plenty of sites have a contact/newsletter/booking form with an
+// email field that has nothing to do with authentication. Observed: a public
+// B&B site's "Contact us" form (name + email + phone + subject) sits right on
+// the entry page and got mistaken for the login form, so the REAL login (at
+// /admin, unreachable by the sign-in-link/route-probe heuristics below) was
+// never even looked for — the run failed with a false "looks like a
+// magic-LINK login" instead. A password field is unambiguous; an email-only
+// match must be checked against its own <form> for sibling fields (a phone
+// input, a message textarea, 2+ other freeform text fields) that mark it as a
+// non-auth form before it's trusted as "the login form".
+async function isRealLoginFormVisible(page) {
+  const hasPassword = await page.locator('input[type="password"], #password, input[name="password"]').first().isVisible({ timeout: 1200 }).catch(() => false);
+  if (hasPassword) return true;
+  const emailLocator = page.locator('input[type="email"], #email, input[name="email"]').first();
+  if (!(await emailLocator.isVisible({ timeout: 1200 }).catch(() => false))) return false;
+  // Ambiguous: an email field with no password anywhere on the page. Rule out
+  // a contact/booking form before treating it as a (possible passwordless)
+  // login step.
+  const looksLikeContactForm = await emailLocator.evaluate((el) => {
+    const scope = el.closest('form') || document;
+    const hasPhone = !!scope.querySelector('input[type="tel"], input[name*="phone" i], input[id*="phone" i]');
+    const hasMessage = !!scope.querySelector('textarea');
+    const freeTextInputs = scope.querySelectorAll('input[type="text"], input:not([type])').length;
+    return hasPhone || hasMessage || freeTextInputs >= 2;
+  }).catch(() => false);
+  return !looksLikeContactForm;
+}
+
 // Is a "Sign in / Log in" affordance visible? Proof the app is logged OUT — used
 // to decide whether a missing form is "genuinely public/already-authed" (OK to
 // proceed) vs "logged out but we couldn't drive the login" (must fail loud).
 async function hasSignInAffordance(page) {
   const sel = [
     'a:has-text("Sign in")', 'a:has-text("Sign In")', 'a:has-text("Log in")', 'a:has-text("Login")',
+    'a:has-text("Admin")', 'button:has-text("Admin")',
     'a:has-text("Iniciar sesión")', 'a:has-text("Acceder")', 'a:has-text("Entrar")',
     'button:has-text("Sign in")', 'button:has-text("Log in")', 'button:has-text("Login")',
     'button:has-text("Iniciar sesión")', 'button:has-text("Acceder")', 'button:has-text("Entrar")',
-    'a[href="/auth"]', 'a[href="/login"]', 'a[href="/signin"]', 'a[href="/sign-in"]',
+    'a[href="/auth"]', 'a[href="/login"]', 'a[href="/signin"]', 'a[href="/sign-in"]', 'a[href="/admin"]',
   ].join(', ');
   return await page.locator(sel).first().isVisible({ timeout: 1500 }).catch(() => false);
 }
@@ -2410,15 +2440,24 @@ async function hasOAuthSignIn(page) {
 // crawl authenticates instead of silently mapping the logged-out marketing page.
 // Returns true if a fillable login form is now visible on the page.
 async function revealLoginForm(page, ctx = {}) {
-  const isFormVisible = () => page.locator(LOGIN_FORM_SELECTOR).first().isVisible({ timeout: 1500 }).catch(() => false);
+  const isFormVisible = () => isRealLoginFormVisible(page);
+  const startUrl = page.url();
 
   // 1) Click an in-page "Sign in / Log in" link or button, then re-check.
+  // Includes "Admin" — a very common real-world affordance for a backend
+  // login (WordPress-style /wp-admin, Django-style /admin, plenty of custom
+  // admin panels) that a plain "sign in" text match would otherwise miss
+  // entirely, leaving the real login undiscoverable. Safe to include broadly:
+  // isFormVisible() below still gates on an ACTUAL login form appearing, so a
+  // click that lands somewhere unrelated is simply skipped, not trusted.
   const signInSel = [
     'a:has-text("Sign in")', 'a:has-text("Sign In")', 'a:has-text("Log in")', 'a:has-text("Login")',
+    'a:has-text("Admin")', 'button:has-text("Admin")',
     'a:has-text("Iniciar sesión")', 'a:has-text("Acceder")', 'a:has-text("Entrar")',
     'button:has-text("Sign in")', 'button:has-text("Log in")', 'button:has-text("Login")',
     'button:has-text("Iniciar sesión")', 'button:has-text("Acceder")', 'button:has-text("Entrar")',
     'a[href="/auth"]', 'a[href="/login"]', 'a[href="/signin"]', 'a[href="/sign-in"]', 'a[href="/account/login"]',
+    'a[href="/admin"]', 'a[href*="/admin" i]', 'a[href="/dashboard"]',
   ];
   for (const sel of signInSel) {
     try {
@@ -2433,16 +2472,23 @@ async function revealLoginForm(page, ctx = {}) {
     } catch { continue; }
   }
 
-  // 2) Probe common auth routes on the SAME origin.
+  // 2) Probe common auth routes on the SAME origin — including backend/admin
+  // panel routes, not just customer-facing auth ones.
   let origin = '';
   try { origin = new URL(page.url()).origin; } catch { return false; }
-  for (const authPath of ['/auth', '/login', '/signin', '/sign-in', '/account/login', '/users/sign_in']) {
+  for (const authPath of ['/auth', '/login', '/signin', '/sign-in', '/account/login', '/users/sign_in', '/admin', '/admin/login', '/wp-admin', '/dashboard']) {
     try {
       await page.goto(origin + authPath, { waitUntil: 'domcontentloaded', timeout: 20000 });
       await page.waitForTimeout(800);
       if (await isFormVisible()) { ctx.emit?.({ phase: 'login', type: 'info', message: `Found login form at ${authPath}` }); return true; }
     } catch { continue; }
   }
+  // Every candidate failed — the page is now sitting on whichever dead-end
+  // route was probed last (often a 404). Restore the original page so the
+  // caller's next checks (hasSignInAffordance, etc.) read the real entry
+  // page instead of a blank error page, which would otherwise silently look
+  // like "nothing to sign into" and wave through an unauthenticated run.
+  try { await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 20000 }); } catch {}
   return false;
 }
 
@@ -2458,7 +2504,7 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
   }
 
   // Check if a login form is directly visible on the entry page.
-  let hasLoginForm = await page.locator(LOGIN_FORM_SELECTOR).first().isVisible({ timeout: 3000 }).catch(() => false);
+  let hasLoginForm = await isRealLoginFormVisible(page);
 
   // G1 — LOGIN DISCOVERY: no form on the entry page, but credentials were given.
   // Before concluding "no login needed", try to surface the form (click a
@@ -6001,7 +6047,17 @@ const pendingFileUploads = new Map(); // testId -> { resolve, requestId, multipl
 // Was English + partial Spanish only; ITALIAN was entirely missing (e.g.
 // "Paga ora", "Conferma prenotazione") before this app was even tested, and
 // Spanish coverage itself had real gaps (comprar, proceder al pago).
-const PAYMENT_COMMIT_RE = /\b(pay now|complete purchase|place order|complete order|confirm (order|booking|payment|reservation)|book now|reserve now|finalize booking|submit payment|book\b|reserve\b|checkout|purchase|pay\b|reservar( ahora)?|pagar( ahora)?|comprar( ahora)?|confirmar (pedido|reserva|pago|compra)|finalizar (reserva|compra)|completar (compra|pedido)|proceder al pago|paga( ora)?|acquista( ora)?|prenota( ora)?|conferma (prenotazione|ordine|pagamento|acquisto)|completa (l'ordine|l'acquisto|ordine|acquisto)|effettua( il)? pagamento|procedi al pagamento)\b/i;
+// NOTE: deliberately does NOT include a bare "checkout" — observed live on
+// Sauce Demo (and true of essentially every multi-step cart→shipping→pay
+// flow): the cart page's "Checkout" button is the ENTRY point into that flow,
+// not the final commit, so matching it here converted the very first click
+// into a premature `done` and the agent never reached (let alone filled) the
+// shipping-info form the Checkout & Booking Test product exists to exercise.
+// The URL-based structural fallback below (CHECKOUT_URL_HINT_RE, which DOES
+// include "checkout" as a path slug) still catches an unrecognised/unsafe
+// button once the agent is actually ON a checkout/payment page — that's the
+// right place for caution, not the button that merely opens the flow.
+const PAYMENT_COMMIT_RE = /\b(pay now|complete purchase|place order|complete order|confirm (order|booking|payment|reservation)|book now|reserve now|finalize booking|submit payment|book\b|reserve\b|purchase|pay\b|reservar( ahora)?|pagar( ahora)?|comprar( ahora)?|confirmar (pedido|reserva|pago|compra)|finalizar (reserva|compra)|completar (compra|pedido)|proceder al pago|paga( ora)?|acquista( ora)?|prenota( ora)?|conferma (prenotazione|ordine|pagamento|acquisto)|completa (l'ordine|l'acquisto|ordine|acquisto)|effettua( il)? pagamento|procedi al pagamento)\b/i;
 
 // FAIL-SAFE FALLBACK for PAYMENT_COMMIT_RE — confirmed live on YesWeGooo: its
 // real checkout breadcrumb is "Aggiungi opzioni" → "Conferma dati" →
@@ -6029,7 +6085,14 @@ const PAYMENT_COMMIT_RE = /\b(pay now|complete purchase|place order|complete ord
 // Shopify, WooCommerce, Sylius, OpenCart, and this app) — its absence here
 // was the actual gap, not the text list.
 const CHECKOUT_URL_HINT_RE = /[/_-](pagamento|payment|pay|paiement|zahlung|kasse|pago|checkout)([/?_-]|$)/i;
-const SAFE_NONCOMMIT_CLICK_RE = /\b(back|indietro|atr[aá]s|cancel|annulla|cancelar|edit|modifica|editar|add|aggiungi|añadir|change|cambia|cambiar|login|accedi|log ?in|iniciar sesi[oó]n|sign ?in)\b/i;
+// "continue"/"next" (+ the same Spanish/Italian equivalents visionLogin's own
+// advanceSelectors already treats as non-final "advance to the next step"
+// actions) were missing here — on a real multi-step checkout (shipping info →
+// review → pay), that gap meant the structural URL fallback above stopped the
+// run the moment it clicked "Continue" off the now-on-a-checkout-URL shipping
+// form, one step before the actual point of no return. Advancing a wizard is
+// categorically different from committing payment.
+const SAFE_NONCOMMIT_CLICK_RE = /\b(back|indietro|atr[aá]s|cancel|annulla|cancelar|edit|modifica|editar|add|aggiungi|añadir|change|cambia|cambiar|login|accedi|log ?in|iniciar sesi[oó]n|sign ?in|continue|next|continuar|siguiente|continua|avanti)\b/i;
 
 // A step taking longer than this is flagged as a friction point in the
 // summary — "slow enough that a real user might drop off here" — distinct
@@ -8849,7 +8912,7 @@ Then the JSON action object on the next line.`;
     const passed = result.steps.filter(s => s.status === 'pass').length;
     const retries = result.steps.filter(s => s.status === 'retry').length;
     const fsum = summarizeFindings(result.findings);
-    const bugs = fsum.bugs; // confirmed app bugs only (result.bugs already holds these)
+    let bugs = fsum.bugs; // confirmed app bugs only (result.bugs already holds these) — may be reconciled to 0 below once the analysis runs
     // Did the agent actually FINISH (reach `done`)? Surface it in the summary so
     // consumers can't read a budget-exhausted/early-stop run as a clean pass just
     // because many individual step-actions "passed".
@@ -8950,6 +9013,59 @@ Output structure (exact sections, max 220 words total):
         }]
       }), { label: 'analysis' });
       result.analysis = analysisResp.content[0].text;
+      // RECONCILIATION (bidirectional) — observed defect: the structured
+      // per-step check (state_assertion_failed → immediately-CONFIRMED app_bug,
+      // see classify.js) and the analysis above can each be wrong in opposite
+      // directions, and neither one's verdict used to reach the other:
+      //  - FALSE POSITIVE: a structured assertion is authored by the agent and
+      //    can be semantically inverted (e.g. asserting the PRESENCE of an
+      //    "items left" footer to prove NO item was added, when the app
+      //    correctly HIDES that footer at zero items — correct behavior). The
+      //    analysis's richer rules (cascades, our own guardrails, incomplete
+      //    agent input, etc.) can rightly clear a bug the mechanical check
+      //    flagged.
+      //  - FALSE NEGATIVE: the mechanical check only fires for structured
+      //    assertions, so a real defect the analysis identifies in prose (e.g.
+      //    "the login field could not be found/used") can leave 0 structured
+      //    bugs while the analysis itself concludes "Result: fail".
+      // Either mismatch makes the report contradict itself — "Result: pass /
+      // Root-cause bugs: None" next to a "⚠️ App Bugs Found" banner, or
+      // "Result: fail" + a listed root-cause bug next to a "✅ Completed"
+      // banner — which is confusing for a human and actively wrong for any CI
+      // gate keying off the bug count. Make the headline follow the analysis
+      // both ways.
+      const resultLine = (result.analysis.match(/Result:?\**\s*\n?\**\s*(\w+)/i) || [])[1] || '';
+      const rootCauseLine = (result.analysis.match(/Root-cause bugs:?\**\s*\n?\**\s*([^\n]*)/i) || [])[1] || '';
+      const rootCauseNone = /^none\b/i.test(rootCauseLine.replace(/\*/g, '').trim());
+      const analysisSaysPass = /^pass/i.test(resultLine);
+      const analysisSaysFail = /^fail/i.test(resultLine);
+
+      let reconciled = false;
+      if (result.bugs.length > 0 && analysisSaysPass && rootCauseNone) {
+        // Downgrade: the analysis cleared every structured bug as a false positive.
+        result.bugs = [];
+        bugs = 0;
+        reconciled = true;
+      } else if (result.bugs.length === 0 && analysisSaysFail && !rootCauseNone) {
+        // Promote: the analysis found a real defect the structured check missed.
+        result.bugs = [classifyFailure({
+          cause: 'analysis_identified',
+          category: Category.APP_BUG,
+          confidence: Confidence.HIGH,
+          severity: 'medium',
+          description: rootCauseLine.replace(/\*/g, '').trim() || 'See Root-cause bugs in the analysis above.',
+        })];
+        bugs = 1;
+        reconciled = true;
+      }
+      if (reconciled) {
+        result.summary.bugs = bugs;
+        result.status = blockedDone ? 'blocked'
+          : doneCalled && bugs > 0 ? 'completed_with_bugs'
+          : doneCalled && fsum.uncertain > 0 ? 'completed_with_unverified'
+          : doneCalled ? 'completed'
+          : bugs > 0 ? 'blocked' : 'incomplete';
+      }
     } catch (e) {
       result.analysis = `Analysis unavailable: ${e.message}`;
     }
@@ -13005,7 +13121,14 @@ app.post('/api/security/api-intercept', async (req, res) => {
       // No 2FA ctx here on purpose: a 2FA app should be scanned via a captured
       // session, not password login. Without a ctx, a 2FA step fast-fails the
       // login instead of hanging 5 min on a code nobody can submit.
-      await visionLogin(pageA, { email: userA.email, password: userA.password }, apiKey);
+      // Observed bug: this result used to be discarded entirely — a WRONG
+      // password for User A produced a report byte-for-byte identical to a
+      // correct one, with no visible sign the credential was ever bad (every
+      // check downstream just ran against whatever page a failed login left
+      // pageA on). Flag it exactly like the staleA case above: surfaced, not
+      // aborted, so a bad credential can't silently read as "safe".
+      const loginResA = await visionLogin(pageA, { email: userA.email, password: userA.password }, apiKey);
+      if (!loginResA.success) results.push({ type: 'session', level: 0, test: 'User A session', verdict: 'INCONCLUSIVE', severity: 'none', note: `User A login could not be verified (${loginResA.error || 'unknown reason'}) — findings below may reflect a logged-out or wrong-account page, not User A's real data.` });
     }
     await pageA.waitForTimeout(2000);
 
@@ -13137,7 +13260,11 @@ app.post('/api/security/api-intercept', async (req, res) => {
       const staleB = /\/(login|signin|sign-?in|auth)\b/i.test(pageB.url()) || await pageB.locator('input[type="password"]').first().isVisible({ timeout: 1500 }).catch(() => false);
       if (staleB) results.push({ type: 'session', level: 0, test: 'User B session', verdict: 'INCONCLUSIVE', severity: 'none', note: 'User B session looks expired/invalid (still at login) — recapture it; User B findings may be unreliable.' });
     } else {
-      await visionLogin(pageB, { email: userB.email, password: userB.password }, apiKey);
+      // Same fix as User A above — a wrong/failed password for User B must
+      // not silently pass through as if the cross-tenant checks below ran
+      // against a real, logged-in User B.
+      const loginResB = await visionLogin(pageB, { email: userB.email, password: userB.password }, apiKey);
+      if (!loginResB.success) results.push({ type: 'session', level: 0, test: 'User B session', verdict: 'INCONCLUSIVE', severity: 'none', note: `User B login could not be verified (${loginResB.error || 'unknown reason'}) — findings below may reflect a logged-out or wrong-account page, not User B's real data.` });
     }
     await pageB.waitForTimeout(2000);
 
