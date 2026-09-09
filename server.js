@@ -683,6 +683,22 @@ async function createAppRow({ url_normalized, url_original, owner_email }) {
   }
 }
 
+// The actual crawl/learn RESULT (did it succeed, was login required, how many
+// pages) previously lived only in the platform-maps/*.json file on this VM's
+// disk — app_ownership only ever recorded that a URL was claimed, never what
+// happened next. That made "did this signup's onboarding actually work" a
+// question with no database answer, only an SSH-in-and-read-the-JSON one.
+// Best-effort like the other app_ownership writes here: a failure to record
+// the outcome shouldn't fail the crawl that already happened.
+async function recordLearnOutcome(urlNormalized, patch) {
+  if (!SUPABASE_URL || !urlNormalized) return;
+  try {
+    await supabase('PATCH', 'app_ownership', { ...patch, learned_at: new Date().toISOString() }, `?url_normalized=eq.${encodeURIComponent(urlNormalized)}`);
+  } catch (err) {
+    console.warn('[app_ownership] recordLearnOutcome failed:', err.message);
+  }
+}
+
 async function bumpUserAppSlots(userId, delta = 1) {
   if (!SUPABASE_URL || !userId) return;
   try {
@@ -4026,7 +4042,7 @@ async function gotoWithSchemeFallback(page, navigableUrl, gotoOpts, { explicitSc
   throw lastErr;
 }
 
-async function crawlApp(appId, url, credentials, description, apiKey, onProgress, ownerEmail = '', navOpts = {}) {
+async function crawlApp(appId, url, credentials, description, apiKey, onProgress, ownerEmail = '', navOpts = {}, urlNormalized = null) {
   const browser = await launchBrowser();
   // "Bring your own session": hydrate the context with a pasted Playwright
   // storageState if provided, so SSO/MFA/CAPTCHA-walled apps can be crawled.
@@ -5657,6 +5673,18 @@ Return ONLY valid JSON.`
     }
     const _pageCount = Object.keys(appKnowledge.pages).length;
     const _formCount = Object.keys(appKnowledge.formRecipes).length;
+    if (urlNormalized) {
+      const lf = appKnowledge.loginFlow;
+      await recordLearnOutcome(urlNormalized, {
+        learn_status: 'success',
+        login_required: !(lf && /no login required/i.test(lf.message || '')),
+        login_success: lf ? !!lf.success : null,
+        login_message: lf ? String(lf.message || lf.error || '').slice(0, 300) : null,
+        pages_crawled: _pageCount,
+        failure_message: null,
+        failure_category: null,
+      });
+    }
     onProgress?.({ phase: 'complete', message: `Deep crawl complete. ${_pageCount} pages, ${_formCount} forms learned.` });
     // Thin-crawl advisory: only the entry page was reachable — almost always a
     // sign-in wall the crawl couldn't pass. Explain it so "1 pages, 0 forms"
@@ -9423,12 +9451,20 @@ app.post('/api/learn', async (req, res) => {
   try {
     await crawlApp(appId, norm.navigable, { email, password, sessionState: learnSessionState }, description, effectiveApiKey, (progress) => {
       res.write(`data: ${JSON.stringify(progress)}\n\n`);
-    }, ownerEmail, { explicitScheme: norm.explicitScheme });
+    }, ownerEmail, { explicitScheme: norm.explicitScheme }, norm.normalized);
     res.write(`data: ${JSON.stringify({ phase: 'done', appId })}\n\n`);
   } catch (e) {
     // Carry the classification so the UI can show "couldn't log in / tool
     // issue" rather than implying the app itself failed. Default to
     // tool_limitation — a thrown crawl error is our side, not an app verdict.
+    // Covers every crawlApp failure mode uniformly (login, navigation, AI
+    // call, timeout) — simpler and more complete than instrumenting each
+    // throw site inside crawlApp individually.
+    await recordLearnOutcome(norm.normalized, {
+      learn_status: 'failed',
+      failure_message: String(e.message || '').slice(0, 300),
+      failure_category: e.category || 'tool_limitation',
+    });
     res.write(`data: ${JSON.stringify({ phase: 'error', message: e.message, category: e.category || 'tool_limitation' })}\n\n`);
   }
   res.end();
