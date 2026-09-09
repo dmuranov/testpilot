@@ -9465,7 +9465,15 @@ app.post('/api/learn', async (req, res) => {
       failure_message: String(e.message || '').slice(0, 300),
       failure_category: e.category || 'tool_limitation',
     });
-    res.write(`data: ${JSON.stringify({ phase: 'error', message: e.message, category: e.category || 'tool_limitation' })}\n\n`);
+    // classifyConfigError already exists and is used by /api/test and two
+    // other endpoints to turn a raw Anthropic SDK error (e.g. `400
+    // {"type":"error","error":{...,"message":"Your credit balance is too
+    // low..."}}`) into something a visitor won't read as a broken app —
+    // /api/learn just never called it. The raw e.message still went into
+    // failure_message above and reaches signal.js below, so diagnostics
+    // aren't lost — only the user-facing text changes.
+    const cfg = classifyConfigError(e.message);
+    res.write(`data: ${JSON.stringify({ phase: 'error', message: cfg ? cfg.friendly : e.message, category: e.category || 'tool_limitation' })}\n\n`);
   }
   res.end();
 });
