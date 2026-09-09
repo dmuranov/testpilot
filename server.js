@@ -14497,6 +14497,33 @@ app.post('/api/internal/fix-shipped', async (req, res) => {
   }
 });
 
+// Called by the bridge when a fix job exhausts every retry (orchestrator.js's
+// resolveTicket returning status: 'needs_human') and falls back to emailing
+// a human, instead of merging a PR. Without this, a failed job left its
+// error_signatures row stuck at 'fix_in_progress' forever — nothing ever
+// moved it off that status — so the widget kept telling users "a fix is
+// already underway" for a job nothing was still working on. Same auth
+// scheme as fix-shipped, deliberately not folded into it: shipped and
+// failed are different DB writes (mark_fix_shipped vs. mark_fix_needs_human)
+// and mixing them behind one flag would make either miscall silent.
+app.post('/api/internal/fix-failed', async (req, res) => {
+  const token = (req.get('authorization') || '').replace(/^Bearer\s+/i, '');
+  const expected = process.env.TESTPILOT_CALLBACK_TOKEN;
+  if (!expected || token !== expected) return res.status(401).json({ error: 'unauthorized' });
+
+  const { signatureHash } = req.body || {};
+  if (typeof signatureHash !== 'string' || !/^[0-9a-f]{64}$/.test(signatureHash)) {
+    return res.status(400).json({ error: 'signatureHash required (64-char hex)' });
+  }
+  try {
+    await supabase('POST', 'rpc/mark_fix_needs_human', { p_hash: signatureHash });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[fix-failed] mark_fix_needs_human failed:', e.message);
+    res.status(500).json({ error: 'update failed' });
+  }
+});
+
 // Narrow, purpose-built status check for the signal->bridge->PR->merge
 // handoff, so answering "has this ever actually fired" doesn't require
 // handing anyone the Supabase service key. This token grants exactly this

@@ -426,10 +426,12 @@ router.post('/', express.json({ limit: '32kb' }), async (req, res) => {
           reply.cannedMessage = "We've seen this one and a fix is already underway.";
           reply.context = { hash: hash.slice(0, 12), type: ev.type, path: ev.path || ev.page };
         }
-      } else if (row.out_status === 'regressed' || row.out_status === 'watching' || row.out_status === 'ignored') {
+      } else if (row.out_status === 'regressed' || row.out_status === 'watching' || row.out_status === 'ignored' || row.out_status === 'needs_human') {
         // 'ignored' (a 4xx that crossed the threshold, or one rate-limited
-        // by the caps above) still gets a genuine "we noticed you're
-        // stuck" — it only skips the misleading "a fix is underway".
+        // by the caps above) and 'needs_human' (auto-fix exhausted every
+        // retry — see /api/internal/fix-failed) still get a genuine "we
+        // noticed you're stuck" — they only skip the misleading "a fix is
+        // underway".
         if (canOffer()) {
           reply.offerHelp = true;
           reply.context = { hash: hash.slice(0, 12), type: ev.type, path: ev.path || ev.page };
