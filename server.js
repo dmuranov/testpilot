@@ -9806,12 +9806,18 @@ app.post('/api/test', async (req, res) => {
       await runAgentTest(testId, appKnowledge, scenario, { email, password, allowReplay: true, ownerEmail, ownerUserId, sessionState, indexedDB: savedIndexedDB }, effectiveApiKey);
     } catch (e) {
       const result = testResults.get(testId);
+      const cfg = classifyConfigError(e.message);
       if (result) {
-        const cfg = classifyConfigError(e.message);
         result.status = cfg ? 'config_error' : 'error';
         result.error = cfg ? cfg.friendly : e.message;
         if (cfg) result.rawError = e.message;
       }
+      // A throw from OUTSIDE runAgentTest's own try (launchBrowser's low-memory
+      // guard, newContext/newPage) never reached its emitStep, so the SSE stream
+      // stayed open and silent forever: the dashboard sat on "Running..." and
+      // signal.js reported stream_stalled. Terminate the stream like every other
+      // failure path does.
+      emitStep(testId, { type: 'error', message: cfg ? cfg.friendly : `Test error: ${e.message}` });
     } finally {
       releaseScanSlot();
       const _finalStatus = testResults.get(testId)?.status;
@@ -11221,12 +11227,15 @@ app.post('/api/test/flow', async (req, res) => {
         if (_flowDirty3) saveSessions();
       }
       const result = testResults.get(testId);
+      const cfg = classifyConfigError(e.message);
       if (result) {
-        const cfg = classifyConfigError(e.message);
         result.status = cfg ? 'config_error' : 'error';
         result.error = cfg ? cfg.friendly : e.message;
         if (cfg) result.rawError = e.message;
       }
+      // Same stream-never-terminated gap as /api/test above — the flow runner
+      // feeds the same /api/test/:testId/stream the dashboard watches.
+      emitStep(testId, { type: 'error', message: cfg ? cfg.friendly : `Test error: ${e.message}` });
     } finally {
       releaseScanSlot();
     }
