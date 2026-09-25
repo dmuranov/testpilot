@@ -1905,20 +1905,53 @@ app.post('/api/auth/request', async (req, res) => {
 });
 
 // Verify magic link token
+// GET only CONFIRMS — it never consumes the token. Corporate mail scanners
+// (Microsoft Defender Safe Links, Mimecast, …) open every link in an email
+// within seconds; when GET consumed the one-time token, the scanner got the
+// session and the real person's click hit "link already used". Observed for
+// real on 2026-09-25 (a DSV signup: link opened from an Azure IP 27s after
+// the request, the user never got in). Scanners fetch/render pages but don't
+// press buttons, so the token is consumed only by the POST below.
 app.get('/api/auth/verify', async (req, res) => {
   const { token } = req.query;
   const reqId = randomUUID().slice(0, 8);
   if (!token) return res.redirect(`/app?error=invalid&rid=${reqId}`);
   const tk = pgFilter(token);
   if (!tk) return res.redirect(`/app?error=invalid&rid=${reqId}`);
+  try {
+    const links = await supabase('GET', 'magic_links', null, `?token=eq.${tk}&select=used,expires_at`);
+    if (!links || links.length === 0) return res.redirect(`/app?error=invalid&rid=${reqId}`);
+    if (links[0].used) return res.redirect(`/app?error=used&rid=${reqId}`);
+    if (new Date(links[0].expires_at) < new Date()) return res.redirect(`/app?error=expired&rid=${reqId}`);
+  } catch (e) {
+    console.error(`Auth verify (confirm page) error [${reqId}]:`, e.message);
+    return res.redirect(`/app?error=failed&rid=${reqId}`);
+  }
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.type('html').send(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>Sign in to TestPilot</title>
+<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#080808;color:#e8e8e8;font-family:system-ui,-apple-system,sans-serif;padding:16px}
+.c{max-width:380px;width:100%;background:#111;border:1px solid rgba(200,240,64,.25);border-radius:6px;padding:32px 28px;text-align:center}
+h1{font-size:20px;margin:0 0 8px}p{font-size:14px;color:#aaa;margin:0 0 24px;line-height:1.5}
+button{width:100%;background:#c8f040;color:#080808;border:0;border-radius:4px;padding:14px;font-size:15px;font-weight:700;cursor:pointer}</style></head>
+<body><form class="c" method="POST" action="/api/auth/verify"><h1>Sign in to TestPilot</h1><p>Click below to finish signing in on this device.</p>
+<input type="hidden" name="token" value="${String(token).replace(/[^A-Za-z0-9-]/g, '')}"><button type="submit">Sign in →</button></form></body></html>`);
+});
+
+app.post('/api/auth/verify', express.urlencoded({ extended: false, limit: '2kb' }), async (req, res) => {
+  const token = req.body?.token;
+  const reqId = randomUUID().slice(0, 8);
+  if (!token) return res.redirect(303, `/app?error=invalid&rid=${reqId}`);
+  const tk = pgFilter(token);
+  if (!tk) return res.redirect(303, `/app?error=invalid&rid=${reqId}`);
 
   try {
     const links = await supabase('GET', 'magic_links', null, `?token=eq.${tk}&select=*`);
-    if (!links || links.length === 0) return res.redirect(`/app?error=invalid&rid=${reqId}`);
+    if (!links || links.length === 0) return res.redirect(303, `/app?error=invalid&rid=${reqId}`);
 
     const link = links[0];
-    if (link.used) return res.redirect(`/app?error=used&rid=${reqId}`);
-    if (new Date(link.expires_at) < new Date()) return res.redirect(`/app?error=expired&rid=${reqId}`);
+    if (link.used) return res.redirect(303, `/app?error=used&rid=${reqId}`);
+    if (new Date(link.expires_at) < new Date()) return res.redirect(303, `/app?error=expired&rid=${reqId}`);
 
     // Mark as used
     await supabase('PATCH', 'magic_links', { used: true }, `?token=eq.${tk}`);
