@@ -1338,7 +1338,7 @@ app.post('/api/embed/connect', async (req, res) => {
 
     const norm = normalizeAppUrl(appUrl);
     if (!norm.ok) return res.status(400).json({ error: norm.error });
-    const safe = await assertPublicUrl(appUrl);
+    const safe = await assertPublicUrl(norm.navigable); // normalized, same as /api/learn
     if (!safe.ok) return res.status(400).json({ error: safe.error, code: 'URL_BLOCKED' });
 
     // Validate the key with a tiny call before we store it.
@@ -9378,7 +9378,10 @@ app.post('/api/learn', async (req, res) => {
 
   // SSRF guard: refuse to crawl internal/loopback/link-local/metadata targets
   // (e.g. 169.254.169.254, localhost, 10.x). See routes/ssrf.js.
-  const learnSafe = await assertPublicUrl(url);
+  // Check the normalized URL — the one crawlApp actually navigates to. The raw
+  // input "myapp.com:8080" parses as scheme "myapp.com:" and was rejected as
+  // "Only http(s) URLs are allowed." even though funnel/start had accepted it.
+  const learnSafe = await assertPublicUrl(norm.navigable);
   if (!learnSafe.ok) return res.status(400).json({ error: learnSafe.error, code: 'URL_BLOCKED' });
 
   // Resolve user (create if first time — plan='free', slots=0).
