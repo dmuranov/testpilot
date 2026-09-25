@@ -13307,6 +13307,19 @@ app.post('/api/security/api-intercept', async (req, res) => {
     const ctxB = await browserB.newContext({ viewport: { width: 1280, height: 800 }, ...(ssB ? { storageState: ssB } : {}) });
     const pageB = await ctxB.newPage();
 
+    // User B's Authorization header per API host. Token-in-header apps
+    // (Supabase, Base44, Firebase — most of what gets scanned) never send auth
+    // as a cookie, so Level 1 used to replay User A's calls with NO auth at
+    // all: every endpoint 401'd and read as "properly isolated" without User B
+    // ever being tested. Keep the LAST value seen — Supabase sends the anon key
+    // as a Bearer before login and User B's JWT after.
+    const authByHostB = new Map();
+    pageB.on('request', req => {
+      const a = req.headers().authorization;
+      if (!a) return;
+      try { authByHostB.set(new URL(req.url()).host, a); } catch {}
+    });
+
     await pageB.goto(appKnowledge.url, { waitUntil: 'networkidle', timeout: 30000 });
     await pageB.waitForTimeout(1500);
     if (ssB) {
@@ -13320,6 +13333,11 @@ app.post('/api/security/api-intercept', async (req, res) => {
       if (!loginResB.success) results.push({ type: 'session', level: 0, test: 'User B session', verdict: 'INCONCLUSIVE', severity: 'none', note: `User B login could not be verified (${loginResB.error || 'unknown reason'}) — findings below may reflect a logged-out or wrong-account page, not User B's real data.` });
     }
     await pageB.waitForTimeout(2000);
+    // Walk a few sections as User B so its authenticated API calls fire and
+    // authByHostB holds B's real post-login token for each API host.
+    for (const navPath of navPaths.slice(0, 3)) {
+      try { await pageB.goto(`${baseUrl}${navPath}`, { waitUntil: 'networkidle', timeout: 10000 }); await pageB.waitForTimeout(1000); } catch {}
+    }
 
     const cookiesB = await ctxB.cookies();
     const localStorageB = await pageB.evaluate(() => {
@@ -13343,23 +13361,53 @@ app.post('/api/security/api-intercept', async (req, res) => {
       }
     }
 
+    // Headers to carry over when replaying a captured call: everything the app
+    // itself sent (apikey, x-app-id, content-type, …) EXCEPT identity and
+    // browser-controlled headers. Dropping all of them — as this used to — made
+    // Supabase/Base44 calls fail on a missing apikey before auth was ever
+    // evaluated, which then read as "properly requires auth".
+    const REPLAY_DROP = /^(authorization|cookie|host|content-length|connection|accept-encoding|origin|referer|user-agent|sec-|:)/i;
+    const replayHeaders = (h = {}) => Object.fromEntries(Object.entries(h).filter(([k]) => !REPLAY_DROP.test(k)));
+    const isReadMethod = m => ['GET', 'HEAD'].includes(String(m || 'GET').toUpperCase());
+
+    // Read-only mode must not replay User A's writes as User B: a POST/PUT/
+    // DELETE that the app fails to authorize would create/modify/delete real
+    // data. Those only run in destructive mode (same rule as Levels 4/6).
+    let replayWritesSkipped = 0;
     for (const apiCall of uniqueApis.slice(0, 25)) {
       try {
-        // Replay with User B's cookies (authenticated cross-user)
-        const responseB = await pageB.evaluate(async ({ url, method, postData }) => {
+        if (!destructive && !isReadMethod(apiCall.method)) { replayWritesSkipped++; continue; }
+
+        // Swap User A's Authorization for User B's on the same host. If A's
+        // call carried a token and we never saw one from B, this endpoint was
+        // NOT tested cross-account — say so instead of reporting a 401 as SAFE.
+        const aAuth = apiCall.headers?.authorization;
+        let host = null; try { host = new URL(apiCall.url).host; } catch {}
+        // Same host only: B's token for a different API host would just 401
+        // and read as a false "properly isolated".
+        const bAuth = aAuth ? (authByHostB.get(host) || null) : null;
+        if (aAuth && !bAuth) {
+          const sUrl = apiCall.url.length > 80 ? apiCall.url.substring(0, 77) + '...' : apiCall.url;
+          results.push({
+            type: 'api_replay', level: 1, url: apiCall.url, method: apiCall.method, status: null,
+            verdict: 'INCONCLUSIVE', severity: 'none',
+            note: `[${apiCall.method}] ${sUrl}: User A's call used a bearer token, but no token from User B was captured for ${host} — this endpoint was NOT tested cross-account (check that User B's login succeeded).`,
+          });
+          continue;
+        }
+        const headersB = { ...replayHeaders(apiCall.headers), ...(bAuth ? { authorization: bAuth } : {}) };
+
+        const responseB = await pageB.evaluate(async ({ url, method, postData, headers }) => {
           try {
-            const opts = { credentials: 'include', method: method || 'GET' };
-            if (postData && method !== 'GET') {
-              opts.body = postData;
-              opts.headers = { 'Content-Type': 'application/json' };
-            }
+            const opts = { credentials: 'include', method: method || 'GET', headers };
+            if (postData && method !== 'GET') opts.body = postData;
             const res = await fetch(url, opts);
             const text = await res.text();
             return { status: res.status, length: text.length, body: text.substring(0, 500) };
           } catch (e) {
             return { status: 0, error: e.message };
           }
-        }, { url: apiCall.url, method: apiCall.method, postData: apiCall.postData });
+        }, { url: apiCall.url, method: apiCall.method, postData: apiCall.postData, headers: headersB });
 
         // Skip auth/login/token endpoints from the cross-tenant check. Replaying
         // a captured login request re-sends the ORIGINAL user's credentials in
@@ -13423,6 +13471,12 @@ app.post('/api/security/api-intercept', async (req, res) => {
           note,
         });
       } catch {}
+    }
+    if (replayWritesSkipped > 0) {
+      results.push({
+        type: 'api_replay_skipped', level: 1, verdict: 'SKIPPED', severity: 'none',
+        note: `${replayWritesSkipped} write call(s) (POST/PUT/PATCH/DELETE) not replayed as User B — they would modify real data. Run in destructive mode to test them.`,
+      });
     }
 
     // ── LEVEL 2: Deterministic IDOR — User A's record URLs from User B's browser ──
@@ -13788,17 +13842,22 @@ app.post('/api/security/api-intercept', async (req, res) => {
     const noAuthPage = await noAuthCtx.newPage();
     await noAuthPage.goto(baseUrl, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
 
-    for (const apiCall of uniqueApis.slice(0, 10)) {
+    // Only User A's READ calls: GET-ing a URL that was captured as a POST
+    // tests nothing (most APIs 404/405 a wrong method). Same 25 cap as Level 1
+    // (was 10, which skipped most of a typical app's API surface).
+    for (const apiCall of uniqueApis.filter(r => isReadMethod(r.method)).slice(0, 25)) {
       try {
-        const noAuthResult = await noAuthPage.evaluate(async (url) => {
+        // Keep the app's own non-identity headers (e.g. Supabase's apikey) so
+        // the request reaches the auth check instead of failing before it.
+        const noAuthResult = await noAuthPage.evaluate(async ({ url, headers }) => {
           try {
-            const res = await fetch(url);
+            const res = await fetch(url, { credentials: 'omit', headers });
             const text = await res.text();
             return { status: res.status, length: text.length, body: text.substring(0, 200) };
           } catch (e) {
             return { status: 0, error: e.message };
           }
-        }, apiCall.url);
+        }, { url: apiCall.url, headers: replayHeaders(apiCall.headers) });
 
         const hasData = noAuthResult.status === 200 && noAuthResult.length > 50 &&
           !noAuthResult.body.includes('<!DOCTYPE') && !noAuthResult.body.includes('"data":[]');

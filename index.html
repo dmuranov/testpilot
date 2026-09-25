@@ -6123,6 +6123,9 @@ async function secDeepScan() {
         case 'api_replay':
           msg = `L1 API Replay [${r.method}] ${r.url.substring(0, 70)} → ${r.status} ${r.verdict}${sevLabel}${r.containsUserAData ? ' ⚡ Contains User A data!' : ''}`;
           break;
+        case 'api_replay_skipped':
+          msg = `L1 API Replay: ${r.note}`;
+          break;
         case 'idor_direct':
           msg = `L2 IDOR ${r.url.substring(0, 70)} → ${r.blocked ? 'BLOCKED' : 'ACCESSIBLE'}${sevLabel}${r.showsUserAData ? ' ⚡ Shows User A data!' : ''}`;
           break;
