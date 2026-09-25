@@ -590,6 +590,20 @@ function normalizeAppUrl(raw) {
   return { ok: true, normalized: host, original: trimmed, navigable: url.href, explicitScheme };
 }
 
+// The ONE way to accept a URL a user typed (signup, Learn New App, widget,
+// cleanup endpoint, admin tools). Normalizes first ("myapp.com:8080" →
+// "http://myapp.com:8080/"), then runs the SSRF guard on that same
+// normalized URL. Callers must use `navigable` from here on, never the raw
+// input — checking one string and using another is how "myapp.com:8080"
+// passed signup and then failed learn.
+async function resolveUserUrl(raw) {
+  const norm = normalizeAppUrl(raw);
+  if (!norm.ok) return { ok: false, error: norm.error, code: 'URL_INVALID' };
+  const safe = await assertPublicUrl(norm.navigable);
+  if (!safe.ok) return { ok: false, error: safe.error, code: 'URL_BLOCKED' };
+  return norm;
+}
+
 function isValidEmailSyntax(e) {
   // Pragmatic syntax check (not RFC-perfect; rejects obvious garbage).
   // Spec intentionally defers MX + disposable-block, so just shape here.
@@ -1336,10 +1350,8 @@ app.post('/api/embed/connect', async (req, res) => {
     if (!appUrl) return res.status(400).json({ error: 'appUrl required' });
     if (!embedEncKey()) return res.status(500).json({ error: 'Server key store not configured (TP_EMBED_ENC_KEY).' });
 
-    const norm = normalizeAppUrl(appUrl);
-    if (!norm.ok) return res.status(400).json({ error: norm.error });
-    const safe = await assertPublicUrl(norm.navigable); // normalized, same as /api/learn
-    if (!safe.ok) return res.status(400).json({ error: safe.error, code: 'URL_BLOCKED' });
+    const norm = await resolveUserUrl(appUrl);
+    if (!norm.ok) return res.status(400).json({ error: norm.error, code: norm.code });
 
     // Validate the key with a tiny call before we store it.
     try {
@@ -1502,9 +1514,11 @@ app.post('/api/funnel/start', async (req, res) => {
     if (!userEmail || !isValidEmailSyntax(userEmail)) {
       return res.status(400).json({ ok: false, error: 'Invalid email address', code: 'EMAIL_INVALID' });
     }
-    const norm = normalizeAppUrl(rawUrl);
+    // Same check /api/learn runs next, so a URL that can't be crawled (e.g.
+    // localhost) is rejected here on the form, not after the user has moved on.
+    const norm = await resolveUserUrl(rawUrl);
     if (!norm.ok) {
-      return res.status(400).json({ ok: false, error: norm.error, code: 'URL_INVALID' });
+      return res.status(400).json({ ok: false, error: norm.error, code: norm.code });
     }
 
     // Daily ceiling check up front so a paused day rejects cleanly with the
@@ -9142,9 +9156,10 @@ app.post('/api/debug/inspect', async (req, res) => {
   // Operator-only browser-driver — gated behind admin auth so it's invisible to
   // clients and the public internet (was unauthenticated → SSRF/abuse vector).
   if (!requireAdmin(req, res)) return;
-  const { url, email, password, buttonLabel, apiKey } = req.body || {};
-  const dbgSafe = await assertPublicUrl(url);
-  if (!dbgSafe.ok) return res.status(400).json({ error: dbgSafe.error, code: 'URL_BLOCKED' });
+  const { url: rawDbgUrl, email, password, buttonLabel, apiKey } = req.body || {};
+  const dbgNorm = await resolveUserUrl(rawDbgUrl);
+  if (!dbgNorm.ok) return res.status(400).json({ error: dbgNorm.error, code: dbgNorm.code });
+  const url = dbgNorm.navigable;
   const browser = await launchBrowser();
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
   const page = await context.newPage();
@@ -9373,16 +9388,10 @@ app.post('/api/learn', async (req, res) => {
   }
 
   // Normalize URL early — used for ownership lookup + app row.
-  const norm = normalizeAppUrl(url);
-  if (!norm.ok) return res.status(400).json({ error: norm.error, code: 'URL_INVALID' });
-
-  // SSRF guard: refuse to crawl internal/loopback/link-local/metadata targets
-  // (e.g. 169.254.169.254, localhost, 10.x). See routes/ssrf.js.
-  // Check the normalized URL — the one crawlApp actually navigates to. The raw
-  // input "myapp.com:8080" parses as scheme "myapp.com:" and was rejected as
-  // "Only http(s) URLs are allowed." even though funnel/start had accepted it.
-  const learnSafe = await assertPublicUrl(norm.navigable);
-  if (!learnSafe.ok) return res.status(400).json({ error: learnSafe.error, code: 'URL_BLOCKED' });
+  // Normalize + SSRF guard (internal/loopback/metadata targets) in one step,
+  // on the same URL crawlApp navigates to. See resolveUserUrl.
+  const norm = await resolveUserUrl(url);
+  if (!norm.ok) return res.status(400).json({ error: norm.error, code: norm.code });
 
   // Resolve user (create if first time — plan='free', slots=0).
   const dbUser = await createOrGetUser(ownerEmail);
@@ -9592,12 +9601,12 @@ app.post('/api/apps/:appId/cleanup', async (req, res) => {
   if (!ownsApp(appId, user.email) && !isSuperAdmin(me)) return res.status(403).json({ error: 'This app belongs to another account.', code: 'OWNERSHIP_MISMATCH' });
   const { cleanupUrl, cleanupToken, active } = req.body || {};
   if (!cleanupUrl) return res.status(400).json({ error: 'cleanupUrl required' });
-  const safe = await assertPublicUrl(cleanupUrl);
-  if (!safe.ok) return res.status(400).json({ error: safe.error, code: 'URL_BLOCKED' });
+  const cleanupNorm = await resolveUserUrl(cleanupUrl);
+  if (!cleanupNorm.ok) return res.status(400).json({ error: cleanupNorm.error, code: cleanupNorm.code });
   const prev = cleanupConfigs.get(appId) || {};
   let tokenEnc = prev.cleanupTokenEnc || null;
   if (cleanupToken) { try { tokenEnc = encryptSecret(cleanupToken); } catch { return res.status(500).json({ error: 'Secret store unavailable' }); } }
-  const rec = { appId, ownerEmail: me, cleanupUrl: String(cleanupUrl).trim(), cleanupTokenEnc: tokenEnc, active: active !== false, createdAt: prev.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString() };
+  const rec = { appId, ownerEmail: me, cleanupUrl: cleanupNorm.navigable, cleanupTokenEnc: tokenEnc, active: active !== false, createdAt: prev.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString() };
   cleanupConfigs.set(appId, rec); saveCleanupConfigs();
   res.json({ ok: true, cleanup: publicCleanup(rec) });
 });
@@ -13005,10 +13014,10 @@ function resolveSavedSession(appId, role, ownerEmail) {
 app.post('/api/capture-session', async (req, res) => {
   // Operator-only browser-driver — gated behind admin auth (was unauthenticated).
   if (!requireAdmin(req, res)) return;
-  const { url, email, password } = req.body || {};
-  if (!url) return res.status(400).json({ error: 'URL required' });
-  const safe = await assertPublicUrl(url);
-  if (!safe.ok) return res.status(400).json({ error: safe.error, code: 'URL_BLOCKED' });
+  const { url: rawCapUrl, email, password } = req.body || {};
+  const capNorm = await resolveUserUrl(rawCapUrl);
+  if (!capNorm.ok) return res.status(400).json({ error: capNorm.error, code: capNorm.code });
+  const url = capNorm.navigable;
 
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
   const send = (o) => { try { res.write(`data: ${JSON.stringify(o)}\n\n`); } catch {} };
