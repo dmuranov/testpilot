@@ -9,6 +9,7 @@ import { detectUndisclosedRename, renameDisclosureNote, terminalVerifyDiagnostic
 import psl from 'psl';
 import { loadRecipe, saveRecipe, shouldCaptureRun, isReplayableAction, replayStepHeld, stepIdentity, recipeKey, EMAIL_TOKEN, PASSWORD_TOKEN } from './routes/recipes.js';
 import { assertPublicUrl } from './routes/ssrf.js';
+import { alertOnboardingIssue, watchOnboarding } from './lib/onboarding-alert.js';
 import { auditLinks } from './routes/link-audit.js';
 import { scanExposedFiles, tokenFileMatches, metaTagMatches } from './security-exposure.js';
 import express from 'express';
@@ -598,6 +599,11 @@ function normalizeAppUrl(raw) {
 // passed signup and then failed learn.
 async function resolveUserUrl(raw) {
   const trimmed = String(raw || '').trim();
+  // A real signup (2026-09-25) entered file:///C:/Users/.../pharmacy.html,
+  // a page on their own PC. Say exactly that instead of a generic error.
+  if (/^file:/i.test(trimmed) || /^[a-z]:[\\/]/i.test(trimmed)) {
+    return { ok: false, error: 'That\u2019s a file on your computer \u2014 TestPilot can only test apps that are live on the web. Enter your app\u2019s address starting with https:// (a live, staging or preview link).', code: 'URL_LOCAL_FILE' };
+  }
   // "ftp://x" would otherwise get https:// prepended and fail as an
   // unresolvable host named "ftp" — a confusing message for a simple mistake.
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) && !/^https?:\/\//i.test(trimmed)) {
@@ -1523,7 +1529,8 @@ app.get('/live-test/:testId', (req, res) => res.sendFile(path.resolve('./live-te
 // /api/learn with the same userEmail to stream the crawl, then
 // /api/test for the scenario. The session token returned here lets
 // /api/test recognize the user without a magic link round-trip.
-app.post('/api/funnel/start', async (req, res) => {
+const onboardingEmail = (req) => sessions.get(req.cookies?.tpsession)?.email || req.body?.userEmail || req.body?.email || null;
+app.post('/api/funnel/start', watchOnboarding('signup', (req) => ({ email: onboardingEmail(req), url: req.body?.url })), async (req, res) => {
   try {
     const userEmail = canonicalEmail(req.body?.userEmail);
     const rawUrl = String(req.body?.url || '').trim();
@@ -9415,7 +9422,7 @@ app.delete('/api/apps/:appId', async (req, res) => {
 });
 
 // Learn (crawl) endpoint
-app.post('/api/learn', async (req, res) => {
+app.post('/api/learn', watchOnboarding('crawl', (req) => ({ email: onboardingEmail(req), url: req.body?.url })), async (req, res) => {
   // `email`/`password` here are the LOGIN credentials for the target app.
   // `userEmail` is the TestPilot account email (the "owner"). The funnel
   // rework introduced this distinction so the landing-modal flow can
@@ -9535,6 +9542,7 @@ app.post('/api/learn', async (req, res) => {
     // failure_message above and reaches signal.js below, so diagnostics
     // aren't lost — only the user-facing text changes.
     const cfg = classifyConfigError(e.message);
+    alertOnboardingIssue({ stage: 'crawl', email: ownerEmail, url, error: cfg ? cfg.friendly : e.message, code: e.category || 'tool_limitation', detail: cfg ? e.message : undefined });
     res.write(`data: ${JSON.stringify({ phase: 'error', message: cfg ? cfg.friendly : e.message, category: e.category || 'tool_limitation' })}\n\n`);
   }
   res.end();
@@ -9703,7 +9711,7 @@ function scenarioSuggestion(appId) {
   return 'For example: "Log in, create a new project called TP-TEST, and verify it appears in the list."';
 }
 
-app.post('/api/test', async (req, res) => {
+app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail(req), url: platformMaps.get(req.body?.appId)?.url || req.body?.appId, detail: req.body?.scenario })), async (req, res) => {
   const { appId, scenario, email, password, apiKey, freeRun, userEmail, sessionState: rawSessionState, savedSessionRole } = req.body;
   // "Bring your own session" — paste an already-authenticated Playwright
   // storageState (or cookies array) to skip login entirely. Sidesteps
@@ -9892,6 +9900,10 @@ app.post('/api/test', async (req, res) => {
       // two consecutive completed_with_unverified on the same (user, app,
       // scenario) = the tool failing to confirm → the 2nd is free.
       const CHARGED_STATUSES = ['completed', 'completed_with_bugs', 'completed_with_unverified'];
+      if (!CHARGED_STATUSES.includes(_finalStatus)) {
+        const _r = testResults.get(testId);
+        alertOnboardingIssue({ stage: 'test', email: ownerEmail, url: appKnowledge?.url, status: _finalStatus, error: _r?.error || `run ended ${_finalStatus || 'without a status'}`, code: _finalStatus, detail: `scenario: ${String(scenario || '').slice(0, 300)} | testId ${testId}` });
+      }
 
       // Same rule as the OneRun credit below: a run only counts if it produced
       // a verdict about the APP. Ending blocked/error/incomplete is our tooling
