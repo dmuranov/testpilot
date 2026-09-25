@@ -597,10 +597,27 @@ function normalizeAppUrl(raw) {
 // input — checking one string and using another is how "myapp.com:8080"
 // passed signup and then failed learn.
 async function resolveUserUrl(raw) {
-  const norm = normalizeAppUrl(raw);
-  if (!norm.ok) return { ok: false, error: norm.error, code: 'URL_INVALID' };
+  const trimmed = String(raw || '').trim();
+  // "ftp://x" would otherwise get https:// prepended and fail as an
+  // unresolvable host named "ftp" — a confusing message for a simple mistake.
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) && !/^https?:\/\//i.test(trimmed)) {
+    return { ok: false, error: 'Use a web address starting with https:// (or http://).', code: 'URL_INVALID' };
+  }
+  const norm = normalizeAppUrl(trimmed);
+  if (!norm.ok) return { ok: false, error: norm.error === 'Invalid URL' ? 'That doesn’t look like a web address — try something like https://your-app.com' : norm.error, code: 'URL_INVALID' };
   const safe = await assertPublicUrl(norm.navigable);
-  if (!safe.ok) return { ok: false, error: safe.error, code: 'URL_BLOCKED' };
+  if (!safe.ok) {
+    // assertPublicUrl's messages are written for operators. Users hitting
+    // these are almost always pointing at a dev server on their own machine,
+    // or made a typo — say that in plain words.
+    const privateTarget = /loopback|private|internal|metadata/i.test(safe.error);
+    const error = privateTarget
+      ? 'TestPilot runs in the cloud, so it can’t reach localhost or private network addresses. Use your app’s public URL (a live, staging or preview link).'
+      : /resolve/i.test(safe.error)
+        ? `We couldn’t find ${norm.normalized} — check the address is spelled correctly and publicly reachable.`
+        : safe.error;
+    return { ok: false, error, code: 'URL_BLOCKED' };
+  }
   return norm;
 }
 
