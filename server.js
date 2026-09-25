@@ -1967,7 +1967,8 @@ app.post('/api/auth/verify', express.urlencoded({ extended: false, limit: '2kb' 
     // Create session
     const sessionToken = randomUUID() + randomUUID();
     const users = await supabase('GET', 'users', null, `?email=eq.${encodeURIComponent(link.email)}&select=id,email,plan,credits,free_run_used,terms_accepted_version`);
-    const user = users[0];
+    const user = users && users[0];
+    if (!user) return res.redirect(303, '/first-run');
 
     sessions.set(sessionToken, { email: user.email, userId: user.id, plan: user.plan, free_run_used: user.free_run_used || false, terms_accepted_version: user.terms_accepted_version || null, source: 'magic-link', createdAt: Date.now() });
     saveSessions();
@@ -2078,7 +2079,10 @@ onOnboardingFailure(({ stage, email, url, error, code }) => {
       const rec = onboardingLog[key] || {};
       if (rec.helpSentAt && Date.now() - rec.helpSentAt < 24 * 3600_000) return;
       if (await userHasRecovered(stage, email)) return;
-      const link = await createLoginLink(email);
+      // A signup-stage rejection happens before the user row exists, so a
+      // sign-in link would dead-end — send them back to the signup form.
+      const exists = await supabase('GET', 'users', null, `?email=eq.${encodeURIComponent(email)}&select=id`);
+      const link = (exists && exists.length) ? await createLoginLink(email) : `${APP_URL}/first-run`;
       await sendUserEmail(email, msg.subject, msg.p, msg.cta ? { href: link, label: msg.cta } : null);
       onboardingLog[key] = { ...rec, helpSentAt: Date.now(), lastHelp: `${stage}:${code || ''}` }; saveOnboardingLog();
       console.log('[onboarding] help email sent to', email, stage, code || '');
