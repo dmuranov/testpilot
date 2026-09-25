@@ -9,7 +9,7 @@ import { detectUndisclosedRename, renameDisclosureNote, terminalVerifyDiagnostic
 import psl from 'psl';
 import { loadRecipe, saveRecipe, shouldCaptureRun, isReplayableAction, replayStepHeld, stepIdentity, recipeKey, EMAIL_TOKEN, PASSWORD_TOKEN } from './routes/recipes.js';
 import { assertPublicUrl } from './routes/ssrf.js';
-import { alertOnboardingIssue, watchOnboarding } from './lib/onboarding-alert.js';
+import { alertOnboardingIssue, watchOnboarding, onOnboardingFailure, isInternal as isInternalEmail } from './lib/onboarding-alert.js';
 import { auditLinks } from './routes/link-audit.js';
 import { scanExposedFiles, tokenFileMatches, metaTagMatches } from './security-exposure.js';
 import express from 'express';
@@ -47,7 +47,8 @@ async function mailer(opts) {
       to: Array.isArray(opts.to) ? opts.to : [opts.to],
       subject: opts.subject,
       html: opts.html,
-      text: opts.text
+      text: opts.text,
+      ...(opts.replyTo ? { reply_to: opts.replyTo } : {})
     })
   });
   if (!res.ok) {
@@ -1982,6 +1983,160 @@ app.post('/api/auth/verify', express.urlencoded({ extended: false, limit: '2kb' 
     res.redirect(`/app?error=failed&rid=${reqId}`);
   }
 });
+
+// ═══════════════════════════════════════════════════════════════
+// ONBOARDING RECOVERY — getting a new user to a finished first run is the
+// product's job, not something the admin should have to chase by hand.
+//  1. releaseFailedClaim: a crawl that never succeeded gives back the app
+//     slot + URL claim (a file:// signup once sat on its only slot forever).
+//  2. Failure → wait 10 min → if they still haven't recovered, email them the
+//     specific fix for what went wrong (replies go to the admin).
+//  3. Stalled: signed up 3h–72h ago, first run not finished → one nudge with
+//     a 72h sign-in link.
+//  4. Daily funnel digest to the admin.
+// Persisted in ./onboarding-emails.json: at most one help email per user per
+// 24h, one stall nudge per user ever.
+// ═══════════════════════════════════════════════════════════════
+const ONBOARDING_FILE = './onboarding-emails.json';
+let onboardingLog = {};
+fs.readFile(ONBOARDING_FILE, 'utf-8').then(t => { onboardingLog = JSON.parse(t) || {}; }).catch(e => { if (e.code !== 'ENOENT') console.warn('[onboarding] load failed:', e.message); });
+const saveOnboardingLog = () => fs.writeFile(ONBOARDING_FILE, JSON.stringify(onboardingLog)).catch(() => {});
+const ADMIN_REPLY_TO = process.env.ADMIN_EMAIL || SUPER_ADMIN_EMAIL;
+
+async function releaseFailedClaim(urlNormalized, ownerEmail) {
+  try {
+    const rows = await supabase('GET', 'app_ownership', null, `?url_normalized=eq.${encodeURIComponent(urlNormalized)}&select=owner_email,learn_status`);
+    const row = rows && rows[0];
+    if (!row || row.owner_email !== ownerEmail || row.learn_status === 'success') return false;
+    await supabase('DELETE', 'app_ownership', null, `?url_normalized=eq.${encodeURIComponent(urlNormalized)}&owner_email=eq.${encodeURIComponent(ownerEmail)}`);
+    const u = await supabase('GET', 'users', null, `?email=eq.${encodeURIComponent(ownerEmail)}&select=id`);
+    if (u && u[0]) await recountUserAppSlots(ownerEmail, u[0].id);
+    console.log('[onboarding] released failed claim', urlNormalized, 'for', ownerEmail);
+    return true;
+  } catch (e) { console.warn('[onboarding] releaseFailedClaim failed:', e.message); return false; }
+}
+
+async function createLoginLink(email, ttlMs = 72 * 3600_000) {
+  const token = randomUUID() + randomUUID();
+  await supabase('POST', 'magic_links', { email, token, expires_at: new Date(Date.now() + ttlMs).toISOString(), used: false });
+  return `${APP_URL}/api/auth/verify?token=${token}`;
+}
+
+const escHtml = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+async function sendUserEmail(to, subject, paragraphs, cta) {
+  const html = `<div style="font-family:system-ui,-apple-system,sans-serif;max-width:520px;margin:0 auto;padding:32px 20px;color:#222;font-size:15px;line-height:1.6">
+    <h2 style="font-size:22px;font-weight:800;margin:0 0 20px">Test<span style="color:#7a9a10">Pilot</span></h2>
+    ${paragraphs.map(p => `<p style="margin:0 0 14px">${p}</p>`).join('')}
+    ${cta ? `<p style="margin:24px 0"><a href="${cta.href}" style="display:inline-block;background:#c8f040;color:#080808;font-weight:700;padding:13px 26px;text-decoration:none;border-radius:3px">${escHtml(cta.label)}</a></p>` : ''}
+    <p style="margin:24px 0 0;color:#666;font-size:13px">Stuck on anything? Just reply to this email — a real person reads it.</p></div>`;
+  await mailer({ from: 'TestPilot <hello@testpilotapp.dev>', to, replyTo: ADMIN_REPLY_TO, subject, html });
+}
+
+// What to tell the user, per failure. null = don't email (paywall hits are
+// not failures; the admin alert still fires).
+function helpMessageFor({ stage, code, url, error }) {
+  const where = url ? `<b>${escHtml(String(url).slice(0, 120))}</b>` : 'your app';
+  if (['FREE_RUN_USED', 'APP_SLOT_LIMIT', 'OWNERSHIP_MISMATCH'].includes(code)) return null;
+  if (code === 'URL_LOCAL_FILE') return { subject: 'Your TestPilot link points to a file on your computer', p: [
+    `You tried to test ${where}. That's a file on your own computer, and TestPilot runs in the cloud, so it can only test apps that are live on the web.`,
+    'If your app is hosted anywhere (Vercel, Netlify, Lovable, Bolt, Replit, your own domain), paste that <b>https://</b> link instead. Your free test run is still waiting for you.'], cta: 'Test my live app →' };
+  if (code === 'URL_BLOCKED' && /localhost|private/i.test(error || '')) return { subject: 'TestPilot can’t reach localhost', p: [
+    `You tried to test ${where}. That address only exists on your own machine or network, so TestPilot (which runs in the cloud) can't reach it.`,
+    'Use the public link of your app instead: a live site, or a staging/preview deploy. Your free test run is still waiting.'], cta: 'Use my public link →' };
+  if (code === 'URL_BLOCKED' || code === 'URL_INVALID') return { subject: 'We couldn’t reach the address you gave TestPilot', p: [
+    `We couldn't open ${where}. Usually that's a small typo, or the app isn't publicly reachable yet.`,
+    'Double-check the address opens in a private browser window, then try again. Your free test run is still waiting.'], cta: 'Try again →' };
+  if (code === 'APP_OWNED_BY_OTHER') return { subject: 'That app is already connected to another TestPilot account', p: [
+    `${where} is already connected to a different TestPilot account.`,
+    'If it’s yours (maybe signed up with another email), reply to this email and we’ll move it over for you.'], cta: null };
+  if (code === 'FREE_DAILY_BUDGET_EXCEEDED') return { subject: 'Free test runs are back on', p: [
+    'When you tried TestPilot, free runs were paused for the day. Sorry about that. They’re available again now and your free run is untouched.'], cta: 'Run my free test →' };
+  if (stage === 'crawl') return { subject: 'We couldn’t finish mapping your app (our side)', p: [
+    `TestPilot couldn't finish mapping ${where}. That's on us, not a verdict on your app.`,
+    'Your free test run is untouched. Try once more; if it fails again, reply to this email and we’ll look at it personally.'], cta: 'Try again →' };
+  if (stage === 'test') return { subject: 'Your first TestPilot run didn’t reach a result', p: [
+    `Your first test on ${where} stopped before it could give a verdict${error ? ` (${escHtml(String(error).slice(0, 160))})` : ''}. <b>Your free run was not used.</b>`,
+    'Tip: describe one flow and what should be true at the end, e.g. <i>“Add an item called Test, then check it appears in the list.”</i>'], cta: 'Run my free test again →' };
+  return null;
+}
+
+async function userHasRecovered(stage, email) {
+  if (stage === 'test') {
+    const u = await supabase('GET', 'users', null, `?email=eq.${encodeURIComponent(email)}&select=free_run_used`);
+    return !!(u && u[0] && u[0].free_run_used);
+  }
+  const ok = await supabase('GET', 'app_ownership', null, `?owner_email=eq.${encodeURIComponent(email)}&learn_status=eq.success&select=url_normalized`);
+  return !!(ok && ok.length);
+}
+
+onOnboardingFailure(({ stage, email, url, error, code }) => {
+  const msg = helpMessageFor({ stage, code, url, error });
+  if (!msg) return;
+  setTimeout(async () => {
+    try {
+      const key = String(email).toLowerCase();
+      const rec = onboardingLog[key] || {};
+      if (rec.helpSentAt && Date.now() - rec.helpSentAt < 24 * 3600_000) return;
+      if (await userHasRecovered(stage, email)) return;
+      const link = await createLoginLink(email);
+      await sendUserEmail(email, msg.subject, msg.p, msg.cta ? { href: link, label: msg.cta } : null);
+      onboardingLog[key] = { ...rec, helpSentAt: Date.now(), lastHelp: `${stage}:${code || ''}` }; saveOnboardingLog();
+      console.log('[onboarding] help email sent to', email, stage, code || '');
+    } catch (e) { console.warn('[onboarding] help email failed:', e.message); }
+  }, 10 * 60_000);
+});
+
+// Stall sweep: signed up 3h-72h ago, first run not finished, never nudged.
+async function onboardingStallSweep() {
+  try {
+    const from = new Date(Date.now() - 72 * 3600_000).toISOString(), to = new Date(Date.now() - 3 * 3600_000).toISOString();
+    const users = await supabase('GET', 'users', null, `?created_at=gte.${from}&created_at=lte.${to}&plan=eq.free&select=email,free_run_used`) || [];
+    for (const u of users) {
+      const key = String(u.email).toLowerCase();
+      if (u.free_run_used || isInternalEmail(key) || isSuperAdmin(key)) continue;
+      const rec = onboardingLog[key] || {};
+      if (rec.nudgedAt || (rec.helpSentAt && Date.now() - rec.helpSentAt < 24 * 3600_000)) continue;
+      const apps = await supabase('GET', 'app_ownership', null, `?owner_email=eq.${encodeURIComponent(key)}&learn_status=eq.success&select=url_original`) || [];
+      const link = await createLoginLink(u.email);
+      if (apps.length) {
+        await sendUserEmail(u.email, 'Your free TestPilot run is waiting', [
+          `TestPilot has already mapped <b>${escHtml(apps[0].url_original)}</b>. All that's left is one sentence describing what to test, e.g. <i>“Sign up, then check the dashboard loads.”</i>`,
+          'The free run is on us: no card, no API key.'], { href: link, label: 'Run my free test →' });
+      } else {
+        await sendUserEmail(u.email, 'Your free TestPilot run is waiting', [
+          'You signed up for TestPilot but haven’t connected an app yet.',
+          'Paste your app’s public <b>https://</b> link (live site, or a staging/preview deploy from Vercel, Netlify, Lovable, Bolt, Replit…) and TestPilot maps it in a few minutes. Your first test is free.'], { href: link, label: 'Start my free test →' });
+      }
+      onboardingLog[key] = { ...rec, nudgedAt: Date.now() }; saveOnboardingLog();
+      console.log('[onboarding] stall nudge sent to', u.email, apps.length ? '(app learned)' : '(no app)');
+    }
+  } catch (e) { console.warn('[onboarding] stall sweep failed:', e.message); }
+}
+setTimeout(onboardingStallSweep, 2 * 60_000);
+setInterval(onboardingStallSweep, 30 * 60_000);
+
+// Daily funnel digest to the admin (~07:00 UTC).
+let lastDigestDay = null;
+setInterval(async () => {
+  const now = new Date();
+  const day = now.toISOString().slice(0, 10);
+  if (now.getUTCHours() !== 7 || lastDigestDay === day) return;
+  lastDigestDay = day;
+  try {
+    const since = new Date(Date.now() - 24 * 3600_000).toISOString();
+    const users = (await supabase('GET', 'users', null, `?created_at=gte.${since}&select=email,free_run_used,signup_source`) || []).filter(u => !isInternalEmail(u.email) && !isSuperAdmin(u.email));
+    const lines = [];
+    for (const u of users) {
+      const apps = await supabase('GET', 'app_ownership', null, `?owner_email=eq.${encodeURIComponent(u.email)}&select=url_original,learn_status`) || [];
+      const rec = onboardingLog[String(u.email).toLowerCase()] || {};
+      const stage = u.free_run_used ? '✅ first run done' : apps.some(a => a.learn_status === 'success') ? '🟡 app mapped, no test yet' : apps.length ? '🟠 crawl not finished' : '🔴 no app yet';
+      lines.push(`${stage} — ${u.email} (${u.signup_source || 'direct'})${apps[0] ? ` — ${apps[0].url_original}` : ''}${rec.helpSentAt ? ' — help email sent' : ''}${rec.nudgedAt ? ' — nudged' : ''}`);
+    }
+    const done = users.filter(u => u.free_run_used).length;
+    await mailer({ from: 'TestPilot <alerts@testpilotapp.dev>', to: ADMIN_REPLY_TO, subject: `📈 TestPilot onboarding: ${users.length} signup(s), ${done} finished first run (24h)`,
+      html: `<pre style="font-family:monospace;font-size:13px;white-space:pre-wrap">${escHtml(lines.join('\n') || 'No new signups in the last 24h.')}</pre>` });
+  } catch (e) { console.warn('[onboarding] digest failed:', e.message); }
+}, 10 * 60_000);
 
 // Check session
 app.get('/api/auth/me', (req, res) => {
@@ -9542,6 +9697,8 @@ app.post('/api/learn', watchOnboarding('crawl', (req) => ({ email: onboardingEma
     // failure_message above and reaches signal.js below, so diagnostics
     // aren't lost — only the user-facing text changes.
     const cfg = classifyConfigError(e.message);
+    // A crawl that never succeeded must not keep the user's only free slot.
+    await releaseFailedClaim(norm.normalized, ownerEmail);
     alertOnboardingIssue({ stage: 'crawl', email: ownerEmail, url, error: cfg ? cfg.friendly : e.message, code: e.category || 'tool_limitation', detail: cfg ? e.message : undefined });
     res.write(`data: ${JSON.stringify({ phase: 'error', message: cfg ? cfg.friendly : e.message, category: e.category || 'tool_limitation' })}\n\n`);
   }
