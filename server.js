@@ -13512,7 +13512,10 @@ app.post('/api/security/api-intercept', async (req, res) => {
       const secretHits = scanForSecrets([...bundleTexts, { url: 'inline', text: inlineJs }]);
       for (const s of secretHits) results.push({ type: 'secret_exposure', level: 10, test: s.name, verdict: 'VULNERABLE', severity: s.sev, note: s.note + ` (found: ${s.redacted})` });
       if (secretHits.length === 0) results.push({ type: 'secret_exposure', level: 10, test: 'Exposed secrets in client bundle', verdict: 'SAFE', severity: 'none', note: `Scanned ${bundleTexts.length} script file(s) — no live keys or service-role secrets exposed in the client bundle.` });
-    } catch {}
+    } catch (e) {
+      // A check that threw produced no row at all before — it must read as untested.
+      results.push({ type: 'secret_exposure', level: 10, test: 'Exposed secrets in client bundle', verdict: 'INCONCLUSIVE', severity: 'none', note: `Client-bundle secret scan could not complete (${String(e.message || e).slice(0, 120)}) — NOT tested.` });
+    }
 
     // ── Level 11: SUPABASE ANON-KEY / RLS EXPOSURE ──────────────────────
     // The anon/publishable key is PUBLIC by design — flagging it would be a
@@ -13547,6 +13550,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
         const probeList = [...new Set([...discovered, ...COMMON])].slice(0, 40);
         const SENS = /^(password|passwd|pwd|password_hash|hashed_password|secret|client_secret|private_key|priv_key|api_?key|access_key|secret_key|encryption_key|refresh_token|access_token|ssn|social_security|tax_id|credit_card|card_number|cardnumber|cvv|cvc|iban|routing_number|bank_account|account_number|email|phone|phone_number|address|dob|date_of_birth|full_name|first_name|last_name)$/i;
         const openTables = [];
+        const probeFailed = []; // probes that threw (timeout/network) — untested, never "blocked"
         for (const t of probeList) {
           try {
             const r = await sbFetch(`${sb.url}/rest/v1/${encodeURIComponent(t)}?select=*&limit=1`);
@@ -13558,8 +13562,10 @@ app.post('/api/security/api-intercept', async (req, res) => {
             }
             const v = rlsReadVerdict({ status, rowCount, sensitiveFields });
             if (v.verdict !== 'SAFE') openTables.push({ t, status, rowCount, sensitiveFields, ...v });
-          } catch {}
+          } catch { probeFailed.push(t); }
         }
+        const probed = probeList.length - probeFailed.length;
+        const failNote = probeFailed.length ? ` ${probeFailed.length} probe(s) got no response (${probeFailed.slice(0, 5).join(', ')}${probeFailed.length > 5 ? ', …' : ''}) — those tables are untested, not safe.` : '';
         if (openTables.length) {
           const crit = openTables.filter(o => o.severity === 'critical');
           const sens = [...new Set(openTables.flatMap(o => o.sensitiveFields))];
@@ -13568,10 +13574,13 @@ app.post('/api/security/api-intercept', async (req, res) => {
           } else {
             results.push({ type: 'rls_exposure', level: 11, verdict: 'SUSPICIOUS', severity: 'medium', tables: openTables.map(o => o.t), note: `${openTables.length} Supabase table(s) are readable with the public key and returned rows, but no obvious PII/secret columns: ${openTables.map(o => o.t).slice(0, 8).join(', ')}. If any hold private or per-user data, RLS is missing — confirm they are meant to be world-readable (e.g. a public catalog is fine).` });
           }
+        } else if (probed === 0) {
+          // Every probe threw — nothing was judged. This used to report SAFE.
+          results.push({ type: 'rls_exposure', level: 11, verdict: 'INCONCLUSIVE', severity: 'none', note: `Supabase project ${sb.url} detected, but none of the ${probeList.length} table probes got a response — RLS NOT tested.` });
         } else if (discovered.length) {
-          results.push({ type: 'rls_exposure', level: 11, verdict: 'SAFE', severity: 'none', note: `Probed ${probeList.length} Supabase table(s) (incl. the ${discovered.length} the app itself uses) with the public key — every read was blocked or returned no rows (RLS enforced). No anon-readable data.` });
+          results.push({ type: 'rls_exposure', level: 11, verdict: 'SAFE', severity: 'none', note: `Probed ${probed} Supabase table(s) (incl. the ${discovered.length} the app itself uses) with the public key — every read that got a response was blocked or returned no rows (RLS enforced).${failNote}` });
         } else {
-          results.push({ type: 'rls_exposure', level: 11, verdict: 'SAFE', severity: 'none', note: `Supabase project ${sb.url} detected; the app fired no table queries on its public surface, so ${probeList.length} common table names were probed with the public key — none were anon-readable. No exposure found (a full audit of every table needs valid credentials).` });
+          results.push({ type: 'rls_exposure', level: 11, verdict: 'SAFE', severity: 'none', note: `Supabase project ${sb.url} detected; the app fired no table queries on its public surface, so ${probed} common table names were probed with the public key — none that answered were anon-readable (a full audit of every table needs valid credentials).${failNote}` });
         }
       }
     } catch (e) {
@@ -13790,7 +13799,10 @@ app.post('/api/security/api-intercept', async (req, res) => {
             preview: j.responseB.body?.substring(0, 100),
             verdict: j.verdict, severity: j.severity, note: j.note,
           });
-        } catch {}
+        } catch (e) {
+          // Before: a throw here dropped the row entirely, so the endpoint vanished from the report.
+          results.push({ type: 'api_replay', level: 1, url: call.url, method: call.method, status: null, verdict: 'INCONCLUSIVE', severity: 'none', note: `[${call.method}] ${shortUrlOf(call.url)}: check threw (${String(e.message || e).slice(0, 120)}) — NOT tested` });
+        }
       }
     }
     if (replayWritesSkipped > 0) {
@@ -13828,7 +13840,9 @@ app.post('/api/security/api-intercept', async (req, res) => {
             leakedIds: j.leak.idMatches.slice(0, 5), leakedOwners: j.leak.ownerMatches.slice(0, 5),
             verdict: j.verdict, severity: j.severity, note: j.note,
           });
-        } catch {}
+        } catch (e) {
+          results.push({ type: 'idor_direct', level: 2, url: call.url, method: call.method, status: null, verdict: 'INCONCLUSIVE', severity: 'none', note: `[${call.method}] ${shortUrlOf(call.url)}: check threw (${String(e.message || e).slice(0, 120)}) — NOT tested` });
+        }
       }
     }
 
@@ -13872,7 +13886,9 @@ app.post('/api/security/api-intercept', async (req, res) => {
       url: window.location.href,
       bodyText: document.body?.textContent?.substring(0, 3000) || '',
       bodyLength: document.body?.textContent?.length || 0,
-      headings: [...document.querySelectorAll('h1, h2, h3')].map(h => h.textContent.trim()).filter(Boolean)
+      headings: [...document.querySelectorAll('h1, h2, h3')].map(h => h.textContent.trim()).filter(Boolean),
+      // Language-independent login-wall signal (the word list below is EN/ES-centric).
+      hasPasswordField: !!document.querySelector('input[type="password"]'),
     }));
 
     // A "stolen session" only means something if User A HAD a real authenticated
@@ -13891,11 +13907,14 @@ app.post('/api/security/api-intercept', async (req, res) => {
     }, { idMatches: [], ownerMatches: [], markerMatches: [] });
     const cleanShowsUserAData = cleanLeak.idMatches.length > 0 || cleanLeak.ownerMatches.length > 0 || cleanLeak.markerMatches.length > 0 ||
       (exclusiveMarkers.length > 0 && exclusiveMarkers.some(m => cleanPageContent.bodyText.toLowerCase().includes(m.toLowerCase())));
-    const cleanRendersApp = !cleanPageContent.url.includes('login') &&
+    // "Rendered app content" must not fire on a login page in a language the old
+    // EN/ES word list didn't know: a password field or a login-style URL is a
+    // login wall whatever the language; the word list is only the fallback.
+    const LOGIN_WORDS = /\b(sign in|log in|login|iniciar sesi[oó]n|acceder|entrar|anmelden|einloggen|connexion|se connecter|accedi|inloggen|logga in|kirjaudu|войти|登录|ログイン)\b/i;
+    const cleanRendersApp = !cleanPageContent.hasPasswordField &&
+      !/\/(login|signin|sign-?in|auth)\b/i.test(cleanPageContent.url) &&
       cleanPageContent.bodyLength > 200 &&
-      !cleanPageContent.bodyText.includes('Sign in') &&
-      !cleanPageContent.bodyText.includes('Log in') &&
-      !cleanPageContent.bodyText.includes('Iniciar sesión');
+      !LOGIN_WORDS.test(cleanPageContent.bodyText);
 
     let stolenVerdict, stolenSeverity, stolenNote;
     if (!hadRealAuthA) {
@@ -14068,7 +14087,9 @@ app.post('/api/security/api-intercept', async (req, res) => {
               ? `[${call.method}] ${mutShort} → ${mutationResult.status}: app refused User B's write — blocked`
               : `[${call.method}] ${mutShort} → ${mutationResult.reached ? mutationResult.status : 'no response'}: not an authorization decision — NOT tested`,
         });
-      } catch {}
+      } catch (e) {
+        results.push({ type: 'mutation', level: 4, url: call.url, method: call.method, status: null, verdict: 'INCONCLUSIVE', severity: 'none', note: `[${call.method}] ${shortUrlOf(call.url)}: check threw (${String(e.message || e).slice(0, 120)}) — NOT tested` });
+      }
     }
 
     // ── LEVEL 6: Mass Assignment (destructive only) ──
@@ -14148,7 +14169,9 @@ app.post('/api/security/api-intercept', async (req, res) => {
                 ? `Rejected (${maResult.status})`
                 : `Request returned ${maResult.reached ? maResult.status : 'no response'} — not a validation decision; NOT tested`,
         });
-      } catch {}
+      } catch (e) {
+        results.push({ type: 'mass_assignment', level: 6, url: apiCall.url, method: apiCall.method, status: null, verdict: 'INCONCLUSIVE', severity: 'none', note: `[${apiCall.method}] ${shortUrlOf(apiCall.url)}: check threw (${String(e.message || e).slice(0, 120)}) — NOT tested` });
+      }
     }
     if (!destructive && massAssignTargets.length === 0 && capturedRequests.some(r => r.method === 'PUT' || r.method === 'POST')) {
       results.push({
@@ -14204,7 +14227,9 @@ app.post('/api/security/api-intercept', async (req, res) => {
                     ? `${noAuthShort} → ${st}: ${naV.kind === 'empty' ? 'no data returned without auth' : 'properly requires auth'}`
                     : `${noAuthShort} → ${st}: not an authorization decision — NOT tested`
         });
-      } catch {}
+      } catch (e) {
+        results.push({ type: 'no_auth', level: 4, url: apiCall.url, method: `${apiCall.method} (no auth)`, status: null, verdict: 'INCONCLUSIVE', severity: 'none', note: `${shortUrlOf(apiCall.url)}: check threw (${String(e.message || e).slice(0, 120)}) — NOT tested` });
+      }
     }
 
     await browserB.close();
@@ -14231,8 +14256,13 @@ app.post('/api/security/api-intercept', async (req, res) => {
     // severity. CSP absence is high (it's the keystone for XSS defense
     // in 2026); X-Content-Type-Options is medium; HSTS varies by HTTPS.
     try {
-      const headersResp = await fetchWithTimeout(baseUrl, { method: 'GET', redirect: 'manual' });
+      // Follow redirects: with 'manual' this graded the 301 from a CDN/www hop,
+      // reporting headers the app itself never sends. If the final origin
+      // differs from the app's, every row says where it was measured.
+      const headersResp = await fetchWithTimeout(baseUrl, { method: 'GET', redirect: 'follow' });
       const h = Object.fromEntries(headersResp.headers.entries());
+      let hdrOrigin = baseUrl; try { hdrOrigin = new URL(headersResp.url || baseUrl).origin; } catch {}
+      const hdrWhere = hdrOrigin !== baseUrl ? ` (measured at ${hdrOrigin} after redirect)` : '';
       const checks = [
         { name: 'Content-Security-Policy', key: 'content-security-policy', severity: 'high', desc: 'Mitigates XSS' },
         { name: 'Strict-Transport-Security', key: 'strict-transport-security', severity: baseUrl.startsWith('https') ? 'high' : 'low', desc: 'Forces HTTPS' },
@@ -14253,9 +14283,10 @@ app.post('/api/security/api-intercept', async (req, res) => {
           value: present ? String(present).substring(0, 120) : null,
           verdict: effectivelyPresent ? 'SAFE' : 'VULNERABLE',
           severity: effectivelyPresent ? 'none' : c.severity,
+          checkedUrl: headersResp.url || baseUrl,
           note: effectivelyPresent
-            ? `${c.name} present`
-            : `Missing ${c.name} — ${c.desc}`,
+            ? `${c.name} present${hdrWhere}`
+            : `Missing ${c.name} — ${c.desc}${hdrWhere}`,
         });
       }
       // Information leaks via response headers
@@ -14384,7 +14415,11 @@ app.post('/api/security/api-intercept', async (req, res) => {
             });
           }
         }
-      } catch {} // Network errors → assume not exposed.
+      } catch (e) {
+        // A probe that got no response tested nothing — say so instead of
+        // silently assuming the path is not exposed.
+        results.push({ type: 'info_disclosure', level: 5, test: `Probe failed: ${probe.path}`, path: probe.path, status: null, verdict: 'INCONCLUSIVE', severity: 'none', note: `${probe.path}: probe got no response (${String(e.message || e).slice(0, 80)}) — NOT tested` });
+      }
     }
 
     // ── LEVEL 5d: Open redirect probe ───────────────────────────
@@ -14421,7 +14456,10 @@ app.post('/api/security/api-intercept', async (req, res) => {
             ? `Redirect param accepted attacker URL — phishing assist`
             : 'Redirect target validated',
         });
-      } catch {}
+      } catch (e) {
+        // A probe that got no response tested nothing — report it, don't drop it.
+        results.push({ type: 'open_redirect', level: 5, url: origUrl.substring(0, 120), status: null, verdict: 'INCONCLUSIVE', severity: 'none', note: `Redirect probe got no response (${String(e.message || e).slice(0, 80)}) — NOT tested` });
+      }
     }
     if (redirectCandidates.length === 0) {
       // We found nothing to probe — that's "not tested", not "no vulnerability".
@@ -14624,7 +14662,9 @@ app.post('/api/security/api-intercept', async (req, res) => {
           });
         }
       }
-    } catch {}
+    } catch (e) {
+      results.push({ type: 'cookie', level: 2, verdict: 'INCONCLUSIVE', severity: 'none', note: `Could not run cookie-attribute check: ${String(e.message || e).slice(0, 120)} — NOT tested` });
+    }
 
     // ── BROKEN RESOURCES (TP-PERF-04 / browser-observed) ──
     // "A 404 is a 404" — highest-confidence check in the playbook. brokenResources
@@ -14696,7 +14736,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
         if (req.method !== 'GET' || !/[?&][^=]+=/.test(req.url || '')) continue;
         try { const uo = new URL(req.url); const k = [...uo.searchParams.keys()][0]; if (k) { uo.searchParams.set(k, payload); targets.add(uo.toString()); } } catch {}
       }
-      let xssHit = null, tested = 0;
+      let xssHit = null, tested = 0, xssFailed = 0;
       for (const t of targets) {
         try {
           const r = await fetchWithTimeout(t, { method: 'GET', redirect: 'manual' });
@@ -14705,15 +14745,18 @@ app.post('/api/security/api-intercept', async (req, res) => {
           tested++;
           const body = await r.text();
           if (body.includes(rawMarker) && !body.includes(escMarker)) { xssHit = t; break; }
-        } catch {}
+        } catch { xssFailed++; }
       }
       if (xssHit) {
         results.push({
           type: 'xss_reflected', level: 8, verdict: 'VULNERABLE', severity: 'high',
           note: `Reflected input returned UNESCAPED in an HTML response — reflected XSS. The injected marker survived raw at: ${xssHit.slice(0, 90)}. An attacker can run script in a victim's session (session/data theft).`,
         });
+      } else if (tested === 0) {
+        // Used to report SAFE with "0 HTML vector(s) tested" — nothing was judged.
+        results.push({ type: 'xss_reflected', level: 8, verdict: 'INCONCLUSIVE', severity: 'none', note: `Reflected-XSS check NOT tested — none of the ${targets.size} probe URL(s) returned an HTML response${xssFailed ? ` (${xssFailed} got no response)` : ''}.` });
       } else {
-        results.push({ type: 'xss_reflected', level: 8, verdict: 'SAFE', severity: 'none', note: `No unescaped reflection of injected markers in HTML responses (${tested} HTML vector(s) tested). (Server-reflected XSS only; DOM XSS not covered.)` });
+        results.push({ type: 'xss_reflected', level: 8, verdict: 'SAFE', severity: 'none', note: `No unescaped reflection of injected markers in HTML responses (${tested} HTML vector(s) tested${xssFailed ? `, ${xssFailed} probe(s) got no response` : ''}). (Server-reflected XSS only; DOM XSS not covered.)` });
       }
     } catch (e) {
       results.push({ type: 'xss_reflected', level: 8, verdict: 'INCONCLUSIVE', severity: 'none', note: `Could not run reflected-XSS check: ${e.message}` });
@@ -14801,23 +14844,35 @@ app.post('/api/security/api-intercept', async (req, res) => {
         authTokenKeys,
         sharedTokenKeys: Object.keys(localStorageA).filter(k => /token|auth|session|jwt/i.test(k))
       },
-      levels: {
-        level1: { name: 'API Replay', tests: results.filter(r => r.level === 1).length, vulns: results.filter(r => r.level === 1 && r.verdict === 'VULNERABLE').length },
-        level2: { name: 'Direct IDOR', tests: results.filter(r => r.level === 2).length, vulns: results.filter(r => r.level === 2 && r.verdict === 'VULNERABLE').length },
-        level3: { name: 'Token Swap', tests: results.filter(r => r.level === 3).length, vulns: results.filter(r => r.level === 3 && r.verdict === 'VULNERABLE').length },
-        level4: { name: 'Mutation + No-Auth', tests: results.filter(r => r.level === 4).length, vulns: results.filter(r => r.level === 4 && r.verdict === 'VULNERABLE').length },
-        level5: { name: 'Headers + CORS + Disclosure + Redirect + JWT + RateLimit', tests: results.filter(r => r.level === 5).length, vulns: results.filter(r => r.level === 5 && r.verdict === 'VULNERABLE').length },
-        level6: { name: 'Mass Assignment (destructive)', tests: results.filter(r => r.level === 6).length, vulns: results.filter(r => r.level === 6 && r.verdict === 'VULNERABLE').length },
-        level7: { name: 'Excessive Data Exposure', tests: results.filter(r => r.level === 7).length, vulns: results.filter(r => r.level === 7 && r.verdict === 'VULNERABLE').length },
-        level8: { name: 'Reflected XSS', tests: results.filter(r => r.level === 8).length, vulns: results.filter(r => r.level === 8 && r.verdict === 'VULNERABLE').length },
-        level9: { name: 'Session Lifecycle (fixation + logout)', tests: results.filter(r => r.level === 9).length, vulns: results.filter(r => r.level === 9 && r.verdict === 'VULNERABLE').length },
-        level10: { name: 'Exposed Secrets in Client Bundle', tests: results.filter(r => r.level === 10).length, vulns: results.filter(r => r.level === 10 && r.verdict === 'VULNERABLE').length }
-      }
+      // Per level: `tests` counts every row, so the UI must not read
+      // "N tests, 0 vulnerabilities" as a pass — `inconclusive` says how many
+      // of those rows were never judged, and `safe` how many really passed.
+      levels: Object.fromEntries([
+        [1, 'API Replay'], [2, 'Direct IDOR'], [3, 'Token Swap'], [4, 'Mutation + No-Auth'],
+        [5, 'Headers + CORS + Disclosure + Redirect + JWT + RateLimit'], [6, 'Mass Assignment (destructive)'],
+        [7, 'Excessive Data Exposure'], [8, 'Reflected XSS'], [9, 'Session Lifecycle (fixation + logout)'],
+        [10, 'Exposed Secrets in Client Bundle'], [11, 'Supabase RLS / anon key'],
+      ].map(([n, name]) => {
+        const rows = results.filter(r => r.level === n);
+        return [`level${n}`, {
+          name,
+          tests: rows.length,
+          vulns: rows.filter(r => r.verdict === 'VULNERABLE').length,
+          safe: rows.filter(r => r.verdict === 'SAFE').length,
+          inconclusive: rows.filter(r => r.verdict === 'INCONCLUSIVE' || r.verdict === 'SKIPPED').length,
+        }];
+      }))
     });
 
   } catch (e) {
     console.error('Deep security scan error:', e.message);
     if (_secCredit.reserved) refundRunCredit(sessionUser.email);
+    // The free scan was burned optimistically before the run; a crash is our
+    // failure, not the customer's — give it back like the paid credit above.
+    if (freeScan) {
+      freeSecurityUsed.delete(canonicalEmail(sessionUser.email)); saveFreeSecurityUsed();
+      for (const [, s] of sessions) { if (s.email === sessionUser.email) s.free_security_used = false; }
+    }
     // Never leak a raw Playwright "Protocol error / Call log:" trace into the
     // scan report — same reasoning as the Learn crawl and runAgentTest's
     // nav-failure wrap. The credit is already refunded above regardless.
