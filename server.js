@@ -4,7 +4,7 @@ import netlifyRoutes from './routes/netlify.js';
 import githubRoutes from './routes/github.js';
 import signalRoutes from './routes/signal.js';
 import { classifyFailure, summarizeFindings, isConfirmedAppBug, Category, Confidence } from './routes/classify.js';
-import { parseScopeCap, shouldFlagDropdownDivergence, isCommitStep, classifyCommit, isPublicPath, isAuthReplayEndpoint, corsVerdict, noAuthVerdict, crossTenantVerdict, stampFinding, scanForSecrets, isStaticAsset, extractSupabaseConfig, supabaseTablesFromSpec, supabaseTablesFromTraffic, rlsReadVerdict } from './routes/sec-classify.js';
+import { parseScopeCap, shouldFlagDropdownDivergence, isCommitStep, classifyCommit, isPublicPath, isConfirmedPublic, isAuthReplayEndpoint, corsVerdict, noAuthVerdict, crossTenantVerdict, stampFinding, scanForSecrets, isStaticAsset, extractSupabaseConfig, supabaseTablesFromSpec, supabaseTablesFromTraffic, rlsReadVerdict, requestKey, endpointKey, isReadRequest, extractRecordIdentity, findLeakedIdentity, prioritizeEndpoints, fabricateLoginBody, isIdorCandidate, bodyHasData } from './routes/sec-classify.js';
 import { detectUndisclosedRename, renameDisclosureNote, terminalVerifyDiagnostics, summaryLooksBlocked } from './routes/done-gates.js';
 import psl from 'psl';
 import { loadRecipe, saveRecipe, shouldCaptureRun, isReplayableAction, replayStepHeld, stepIdentity, recipeKey, EMAIL_TOKEN, PASSWORD_TOKEN } from './routes/recipes.js';
@@ -14,7 +14,7 @@ import { auditLinks } from './routes/link-audit.js';
 import { scanExposedFiles, tokenFileMatches, metaTagMatches } from './security-exposure.js';
 import express from 'express';
 import cors from 'cors';
-import { chromium } from 'playwright';
+import { chromium, request as pwRequest } from 'playwright';
 import Anthropic from '@anthropic-ai/sdk';
 import { randomUUID, createHash, timingSafeEqual, createCipheriv, createDecipheriv, randomBytes } from 'crypto';
 import fs from 'fs/promises';
@@ -13354,24 +13354,33 @@ app.post('/api/security/api-intercept', async (req, res) => {
 
     const capturedRequests = [];
     const bundleTexts = []; let bundleBytes = 0; // client JS/HTML for the exposed-secrets scan
-    const capturedResponses = new Map(); // url → response data
+    // Keyed by method + url + body hash (requestKey): RPC apps POST different
+    // bodies to one url, and a url-only map overwrote earlier responses.
+    const capturedResponses = new Map();
+    const capturedResponsesB = new Map(); // User B's OWN session — what B legitimately sees
     const brokenResources = []; // TP-PERF-04: 4xx on page assets during nav
+    const RESPONSE_BODY_CAP = 200000; // full bodies: the data-exposure scan missed fields past 2000 chars
+    const THIRD_PARTY = /googleapis\.com|analytics|sentry|fonts\./;
 
-    pageA.on('request', req => {
+    const captureRequest = (req) => {
       const url = req.url();
       const type = req.resourceType();
-      if (type === 'xhr' || type === 'fetch') {
-        if (!url.includes('googleapis.com') && !url.includes('analytics') && !url.includes('sentry') && !url.includes('fonts.')) {
-          capturedRequests.push({
-            url,
-            method: req.method(),
-            headers: req.headers(),
-            postData: req.postData() || null
-          });
-        }
+      if ((type === 'xhr' || type === 'fetch') && !THIRD_PARTY.test(url)) {
+        capturedRequests.push({ url, method: req.method(), headers: req.headers(), postData: req.postData() || null });
       }
-    });
+    };
+    const captureResponseInto = (map) => async (resp) => {
+      const req = resp.request();
+      const type = req.resourceType();
+      if (type !== 'xhr' && type !== 'fetch') return;
+      try {
+        const body = await resp.text().catch(() => '');
+        map.set(requestKey({ method: req.method(), url: resp.url(), postData: req.postData() || null }), { status: resp.status(), body: body.substring(0, RESPONSE_BODY_CAP), url: resp.url() });
+      } catch {}
+    };
 
+    pageA.on('request', captureRequest);
+    pageA.on('response', captureResponseInto(capturedResponses));
     pageA.on('response', async resp => {
       const url = resp.url();
       const type = resp.request().resourceType();
@@ -13384,17 +13393,35 @@ app.post('/api/security/api-intercept', async (req, res) => {
           && !/google|analytics|sentry|facebook|hotjar|doubleclick|mixpanel|segment|stripe\.com\/6/i.test(url)) {
         brokenResources.push({ url, type, status: st });
       }
-      if (type === 'xhr' || type === 'fetch') {
-        try {
-          const body = await resp.text().catch(() => '');
-          capturedResponses.set(url, { status: st, body: body.substring(0, 2000) });
-        } catch {}
-      }
       // Collect client JS + the HTML doc for the exposed-secrets scan (capped).
       if ((type === 'script' || type === 'document') && st < 400 && bundleBytes < 5000000) {
         try { const t = await resp.text().catch(() => ''); if (t) { bundleTexts.push({ url, text: t }); bundleBytes += t.length; } } catch {}
       }
     });
+
+    // Hash-route apps (#tab-inicio) don't load a view on goto(base + '#tab')
+    // when the page is already open — the browser only moves the fragment. Drive
+    // them by clicking the matching tab, else by setting location.hash so the
+    // router's hashchange fires, then wait for the network to settle.
+    const navigateTo = async (page, navPath) => {
+      const hashIdx = String(navPath || '').indexOf('#');
+      if (hashIdx === -1) {
+        await page.goto(`${baseUrl}${navPath}`, { waitUntil: 'networkidle', timeout: 10000 });
+        return;
+      }
+      const hash = navPath.slice(hashIdx);
+      const pathPart = navPath.slice(0, hashIdx);
+      if (pathPart && new URL(page.url()).pathname !== pathPart) {
+        await page.goto(`${baseUrl}${pathPart}`, { waitUntil: 'networkidle', timeout: 10000 }).catch(() => {});
+      }
+      const tab = page.locator(`a[href$="${hash}"], [data-target="${hash}"], [data-tab="${hash.slice(1)}"], [href="${hash}"]`).first();
+      if (await tab.isVisible({ timeout: 800 }).catch(() => false)) {
+        await tab.click({ timeout: 3000 }).catch(() => {});
+      } else {
+        await page.evaluate((h) => { location.hash = h; window.dispatchEvent(new HashChangeEvent('hashchange')); }, hash).catch(() => {});
+      }
+      await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+    };
 
     // Login User A — OR skip when a captured session was provided (the context
     // is already authenticated via storageState). A stale session is flagged
@@ -13402,9 +13429,13 @@ app.post('/api/security/api-intercept', async (req, res) => {
     await pageA.goto(appKnowledge.url, { waitUntil: 'networkidle', timeout: 30000 });
     await pageA.waitForTimeout(1500);
     const preCookiesA = await ctxA.cookies().catch(() => []);
+    // Login gating: if User A (or B below) never demonstrably logged in, every
+    // cross-account verdict downstream is "not tested" — a SAFE produced
+    // against a logged-out page tested nothing.
+    let authOkA = true, authNoteA = '';
     if (ssA) {
       const staleA = /\/(login|signin|sign-?in|auth)\b/i.test(pageA.url()) || await pageA.locator('input[type="password"]').first().isVisible({ timeout: 1500 }).catch(() => false);
-      if (staleA) results.push({ type: 'session', level: 0, test: 'User A session', verdict: 'INCONCLUSIVE', severity: 'none', note: 'User A session looks expired/invalid (still at login) — recapture it; User A findings may be unreliable.' });
+      if (staleA) { authOkA = false; authNoteA = 'User A session looks expired/invalid (still at login)'; results.push({ type: 'session', level: 0, test: 'User A session', verdict: 'INCONCLUSIVE', severity: 'none', note: 'User A session looks expired/invalid (still at login) — recapture it; cross-account checks are reported as not tested.' }); }
     } else {
       // No 2FA ctx here on purpose: a 2FA app should be scanned via a captured
       // session, not password login. Without a ctx, a 2FA step fast-fails the
@@ -13416,7 +13447,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
       // pageA on). Flag it exactly like the staleA case above: surfaced, not
       // aborted, so a bad credential can't silently read as "safe".
       const loginResA = await visionLogin(pageA, { email: userA.email, password: userA.password }, apiKey);
-      if (!loginResA.success) results.push({ type: 'session', level: 0, test: 'User A session', verdict: 'INCONCLUSIVE', severity: 'none', note: `User A login could not be verified (${loginResA.error || 'unknown reason'}) — findings below may reflect a logged-out or wrong-account page, not User A's real data.` });
+      if (!loginResA.success) { authOkA = false; authNoteA = `User A login could not be verified (${loginResA.error || 'unknown reason'})`; results.push({ type: 'session', level: 0, test: 'User A session', verdict: 'INCONCLUSIVE', severity: 'none', note: `${authNoteA} — cross-account checks are reported as not tested, not SAFE.` }); }
     }
     await pageA.waitForTimeout(2000);
 
@@ -13424,7 +13455,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
     const navPaths = Object.values(appKnowledge.navigation || {}).map(n => n.path).slice(0, 8);
     for (const navPath of navPaths) {
       try {
-        await pageA.goto(`${baseUrl}${navPath}`, { waitUntil: 'networkidle', timeout: 10000 });
+        await navigateTo(pageA, navPath);
         await pageA.waitForTimeout(1500);
         const firstLink = await pageA.locator('a[href*="detail"], a[href*="?id="]').first();
         if (await firstLink.isVisible({ timeout: 1000 }).catch(() => false)) {
@@ -13459,6 +13490,19 @@ app.post('/api/security/api-intercept', async (req, res) => {
       .filter(Boolean)
       .map(s => String(s).trim())
       .filter(s => s.length >= 4 && !/^(user|test|admin|demo)$/i.test(s));
+
+    // User A's record identity: every record id / owner value the app returned
+    // to A's own session, per call and in total. The leak decision compares
+    // these against what User B's replay returns (ownership, not email match).
+    const identityA = { ids: new Set(), owners: new Set() };
+    const identityByKeyA = new Map();
+    for (const [k, r] of capturedResponses) {
+      if (r.status !== 200 || !r.body || isStaticAsset(r.url)) continue;
+      const idn = extractRecordIdentity(r.body);
+      identityByKeyA.set(k, idn);
+      for (const v of idn.ids) identityA.ids.add(v);
+      for (const v of idn.owners) identityA.owners.add(v);
+    }
 
     // ── Level 10: EXPOSED SECRETS IN CLIENT BUNDLE ──────────────────────
     // Vibe-coded apps routinely ship live keys / service-role secrets in frontend
@@ -13534,8 +13578,8 @@ app.post('/api/security/api-intercept', async (req, res) => {
       results.push({ type: 'rls_exposure', level: 11, verdict: 'INCONCLUSIVE', severity: 'none', note: `Supabase RLS probe could not complete: ${e.message}` });
     }
 
-    await browserA.close();
-    browserA = null;
+    // browserA stays open until the logout-invalidation check has run (it
+    // needs User A's live page to log out from) — see after Level 3.
 
     // ── SESSION B: Login, get User B's context ──
     browserB = await launchBrowser();
@@ -13555,24 +13599,39 @@ app.post('/api/security/api-intercept', async (req, res) => {
       try { authByHostB.set(new URL(req.url()).host, a); } catch {}
     });
 
+    pageB.on('response', captureResponseInto(capturedResponsesB));
+
     await pageB.goto(appKnowledge.url, { waitUntil: 'networkidle', timeout: 30000 });
     await pageB.waitForTimeout(1500);
+    let authOkB = true, authNoteB = '';
     if (ssB) {
       const staleB = /\/(login|signin|sign-?in|auth)\b/i.test(pageB.url()) || await pageB.locator('input[type="password"]').first().isVisible({ timeout: 1500 }).catch(() => false);
-      if (staleB) results.push({ type: 'session', level: 0, test: 'User B session', verdict: 'INCONCLUSIVE', severity: 'none', note: 'User B session looks expired/invalid (still at login) — recapture it; User B findings may be unreliable.' });
+      if (staleB) { authOkB = false; authNoteB = 'User B session looks expired/invalid (still at login)'; results.push({ type: 'session', level: 0, test: 'User B session', verdict: 'INCONCLUSIVE', severity: 'none', note: 'User B session looks expired/invalid (still at login) — recapture it; cross-account checks are reported as not tested.' }); }
     } else {
       // Same fix as User A above — a wrong/failed password for User B must
       // not silently pass through as if the cross-tenant checks below ran
       // against a real, logged-in User B.
       const loginResB = await visionLogin(pageB, { email: userB.email, password: userB.password }, apiKey);
-      if (!loginResB.success) results.push({ type: 'session', level: 0, test: 'User B session', verdict: 'INCONCLUSIVE', severity: 'none', note: `User B login could not be verified (${loginResB.error || 'unknown reason'}) — findings below may reflect a logged-out or wrong-account page, not User B's real data.` });
+      if (!loginResB.success) { authOkB = false; authNoteB = `User B login could not be verified (${loginResB.error || 'unknown reason'})`; results.push({ type: 'session', level: 0, test: 'User B session', verdict: 'INCONCLUSIVE', severity: 'none', note: `${authNoteB} — cross-account checks are reported as not tested, not SAFE.` }); }
     }
     await pageB.waitForTimeout(2000);
-    // Walk a few sections as User B so its authenticated API calls fire and
-    // authByHostB holds B's real post-login token for each API host.
-    for (const navPath of navPaths.slice(0, 3)) {
-      try { await pageB.goto(`${baseUrl}${navPath}`, { waitUntil: 'networkidle', timeout: 10000 }); await pageB.waitForTimeout(1000); } catch {}
+    // Walk the SAME sections as User A so B's authenticated calls fire:
+    // authByHostB gets B's real post-login token per API host, and
+    // capturedResponsesB records what B legitimately sees — any record id that
+    // B's own session returns is shared data, not a leak when it shows up again.
+    for (const navPath of navPaths) {
+      try { await navigateTo(pageB, navPath); await pageB.waitForTimeout(1000); } catch {}
     }
+    const identityB = { ids: new Set(), owners: new Set() };
+    for (const [, r] of capturedResponsesB) {
+      if (r.status !== 200 || !r.body || isStaticAsset(r.url)) continue;
+      const idn = extractRecordIdentity(r.body);
+      for (const v of idn.ids) identityB.ids.add(v);
+      for (const v of idn.owners) identityB.owners.add(v);
+    }
+    const bOwnText = [...capturedResponsesB.values()].map(r => r.body || '').join('\n').toLowerCase();
+    const crossAccountTestable = authOkA && authOkB;
+    const crossAccountSkipNote = !authOkA ? authNoteA : authNoteB;
 
     const cookiesB = await ctxB.cookies();
     const localStorageB = await pageB.evaluate(() => {
@@ -13584,17 +13643,30 @@ app.post('/api/security/api-intercept', async (req, res) => {
       return items;
     }).catch(() => ({}));
 
-    // ── LEVEL 1: Replay User A's API calls with User B's session ──
-    const uniqueApis = [];
-    const seenUrls = new Set();
+    // ── Unique endpoints: dedupe by SHAPE, classify, prioritise ──
+    // endpointKey collapses numeric/hex/uuid ids and volatile query params but
+    // keeps different RPC bodies apart (listEntity{Job} ≠ listEntity{Invoice}).
+    const endpointsByKey = new Map();
     for (const req of capturedRequests) {
       if (isStaticAsset(req.url)) continue; // .wasm/.pck/.js/.css/images/fonts — public by architecture, not API endpoints (sec-classify.js, tested)
-      const normalized = req.url.replace(/[a-f0-9]{20,}/gi, 'ID');
-      if (!seenUrls.has(normalized)) {
-        seenUrls.add(normalized);
-        uniqueApis.push(req);
-      }
+      const ek = endpointKey(req);
+      if (endpointsByKey.has(ek)) continue;
+      const key = requestKey(req);
+      const aResp = capturedResponses.get(key) || null;
+      const idnA = identityByKeyA.get(key) || { ids: [], owners: [] };
+      endpointsByKey.set(ek, {
+        ...req, key, endpoint: ek, aResp,
+        aStatus: aResp ? aResp.status : null,
+        aHasRecords: idnA.ids.length > 0 || idnA.owners.length > 0,
+        authed: !!(req.headers?.authorization || req.headers?.cookie),
+        isRead: isReadRequest(req),
+        isAuthEndpoint: isAuthReplayEndpoint(req.url, req.postData),
+      });
     }
+    const uniqueApis = prioritizeEndpoints([...endpointsByKey.values()]);
+    const REPLAY_CAP = 60;
+    const replayList = uniqueApis.slice(0, REPLAY_CAP);
+    const untestedByCap = Math.max(0, uniqueApis.length - REPLAY_CAP);
 
     // Headers to carry over when replaying a captured call: everything the app
     // itself sent (apikey, x-app-id, content-type, …) EXCEPT identity and
@@ -13603,109 +13675,123 @@ app.post('/api/security/api-intercept', async (req, res) => {
     // evaluated, which then read as "properly requires auth".
     const REPLAY_DROP = /^(authorization|cookie|host|content-length|connection|accept-encoding|origin|referer|user-agent|sec-|:)/i;
     const replayHeaders = (h = {}) => Object.fromEntries(Object.entries(h).filter(([k]) => !REPLAY_DROP.test(k)));
-    const isReadMethod = m => ['GET', 'HEAD'].includes(String(m || 'GET').toUpperCase());
+    const shortUrlOf = u => (u.length > 80 ? u.substring(0, 77) + '...' : u);
 
-    // Read-only mode must not replay User A's writes as User B: a POST/PUT/
-    // DELETE that the app fails to authorize would create/modify/delete real
-    // data. Those only run in destructive mode (same rule as Levels 4/6).
-    let replayWritesSkipped = 0;
-    for (const apiCall of uniqueApis.slice(0, 25)) {
+    // Replays use Playwright's request API rather than fetch() inside a page:
+    // a page-level fetch to an API on another origin returns status 0, which
+    // used to read as "properly isolated" without the app ever being asked.
+    const replayVia = async (reqCtx, call, extraHeaders = {}) => {
+      const method = String(call.method || 'GET').toUpperCase();
+      const headers = { ...replayHeaders(call.headers), ...extraHeaders };
       try {
-        if (!destructive && !isReadMethod(apiCall.method)) { replayWritesSkipped++; continue; }
-
-        // Swap User A's Authorization for User B's on the same host. If A's
-        // call carried a token and we never saw one from B, this endpoint was
-        // NOT tested cross-account — say so instead of reporting a 401 as SAFE.
-        const aAuth = apiCall.headers?.authorization;
-        let host = null; try { host = new URL(apiCall.url).host; } catch {}
-        // Same host only: B's token for a different API host would just 401
-        // and read as a false "properly isolated".
-        const bAuth = aAuth ? (authByHostB.get(host) || null) : null;
-        if (aAuth && !bAuth) {
-          const sUrl = apiCall.url.length > 80 ? apiCall.url.substring(0, 77) + '...' : apiCall.url;
-          results.push({
-            type: 'api_replay', level: 1, url: apiCall.url, method: apiCall.method, status: null,
-            verdict: 'INCONCLUSIVE', severity: 'none',
-            note: `[${apiCall.method}] ${sUrl}: User A's call used a bearer token, but no token from User B was captured for ${host} — this endpoint was NOT tested cross-account (check that User B's login succeeded).`,
-          });
-          continue;
-        }
-        const headersB = { ...replayHeaders(apiCall.headers), ...(bAuth ? { authorization: bAuth } : {}) };
-
-        const responseB = await pageB.evaluate(async ({ url, method, postData, headers }) => {
-          try {
-            const opts = { credentials: 'include', method: method || 'GET', headers };
-            if (postData && method !== 'GET') opts.body = postData;
-            const res = await fetch(url, opts);
-            const text = await res.text();
-            return { status: res.status, length: text.length, body: text.substring(0, 500) };
-          } catch (e) {
-            return { status: 0, error: e.message };
-          }
-        }, { url: apiCall.url, method: apiCall.method, postData: apiCall.postData, headers: headersB });
-
-        // Skip auth/login/token endpoints from the cross-tenant check. Replaying
-        // a captured login request re-sends the ORIGINAL user's credentials in
-        // the body, so the response naturally contains that user's data — that's
-        // a successful login, NOT a cross-tenant read. Flagging it as a leak is a
-        // false positive (the request carried the identity, not the session).
-        const isAuthEndpoint = isAuthReplayEndpoint(apiCall.url, apiCall.postData); // routes/sec-classify.js (tested)
-        if (isAuthEndpoint) {
-          const sUrl = apiCall.url.length > 80 ? apiCall.url.substring(0, 77) + '...' : apiCall.url;
-          results.push({
-            type: 'api_replay', level: 1, url: apiCall.url, method: apiCall.method, status: responseB.status,
-            verdict: 'SAFE', severity: 'none',
-            note: `[${apiCall.method}] ${sUrl} → ${responseB.status}: auth/login endpoint — replaying it re-authenticates with the credentials in the request body, so a response containing that user's data is EXPECTED, not a cross-tenant leak (excluded from the IDOR/replay check).`,
-          });
-          continue;
-        }
-
-        // Smart comparison: check if User B got User A's SPECIFIC data
-        const userAResponse = capturedResponses.get(apiCall.url);
-        const gotUserAData = userAMarkers.some(m => responseB.body?.toLowerCase().includes(m.toLowerCase()));
-        const responsesMatch = userAResponse && responseB.body && 
-          userAResponse.body.substring(0, 200) === responseB.body.substring(0, 200);
-        const hasRealData = responseB.status === 200 && responseB.length > 50 && 
-          !responseB.body.includes('"data":[]') && !responseB.body.includes('"results":[]') &&
-          !responseB.body.includes('<!DOCTYPE');
-
-        // A /public/ path serves the SAME resource to everyone by design, so
-        // two users getting an identical (or non-empty) response is EXPECTED —
-        // not a tenant leak. Only a CONFIRMED hit (User B's response actually
-        // contains User A's private identifying data) is a real cross-tenant
-        // read. An unconfirmed "identical response" is downgraded to SUSPICIOUS
-        // (manual verify) — never reported as a HIGH vuln with a "likely" hedge.
-        const isPublicEp = isPublicPath(apiCall.url);
-        const { verdict, severity } = crossTenantVerdict({ gotUserAData, isPublic: isPublicEp, responsesMatch, hasRealData }); // routes/sec-classify.js (tested)
-
-        // Build an actionable note. Without this the frontend falls back to
-        // "VULNERABLE (api_replay)" which tells the report buyer nothing —
-        // they can't see the endpoint, the method, or what went wrong.
-        const shortUrl = apiCall.url.length > 80 ? apiCall.url.substring(0, 77) + '...' : apiCall.url;
-        const note = gotUserAData
-          ? `[${apiCall.method}] ${shortUrl} → ${responseB.status}: User B's response CONTAINS User A's private identifying data — cross-tenant read CONFIRMED`
-          : isPublicEp
-            ? `[${apiCall.method}] ${shortUrl} → ${responseB.status}: public-by-design endpoint (path contains "/public/") — an identical/non-empty response across users is expected, NOT a leak`
-            : (responsesMatch && hasRealData)
-              ? `[${apiCall.method}] ${shortUrl} → ${responseB.status}: User B received an identical response to User A — NOT confirmed as a leak (could be a shared resource). MANUAL CHECK: confirm this data is User A's PRIVATE data before treating it as cross-tenant`
-              : hasRealData
-                ? `[${apiCall.method}] ${shortUrl} → ${responseB.status}: User B got non-trivial data from User A's endpoint — manual verify needed`
-                : `[${apiCall.method}] ${shortUrl} → ${responseB.status}: properly isolated`;
-        results.push({
-          type: 'api_replay',
-          level: 1,
-          url: apiCall.url,
-          method: apiCall.method,
-          status: responseB.status,
-          dataLength: responseB.length,
-          containsUserAData: gotUserAData,
-          responsesMatch,
-          preview: responseB.body?.substring(0, 100),
-          verdict,
-          severity,
-          note,
+        const r = await reqCtx.fetch(call.url, {
+          method, headers, timeout: 15000, maxRedirects: 3, failOnStatusCode: false,
+          ...(call.postData && method !== 'GET' && method !== 'HEAD' ? { data: call.postData } : {}),
         });
-      } catch {}
+        const text = await r.text().catch(() => '');
+        return { reached: true, status: r.status(), length: text.length, body: text.substring(0, RESPONSE_BODY_CAP) };
+      } catch (e) {
+        return { reached: false, status: 0, length: 0, body: '', error: String(e.message || e).split('\n')[0].slice(0, 120) };
+      }
+    };
+
+    // ── Unauthenticated probe (reported at Level 4b, but run first: Level 1
+    // uses it to confirm that a "/public/" path really is public) ──
+    const noAuthByKey = new Map();
+    const publicIdentity = { ids: new Set(), owners: new Set() };
+    {
+      const noAuthCtx = await pwRequest.newContext({ ignoreHTTPSErrors: true });
+      try {
+        for (const call of replayList) {
+          if (!call.isRead || call.isAuthEndpoint) continue;
+          const res = await replayVia(noAuthCtx, call);
+          const hasData = res.reached && bodyHasData(res.status, res.body);
+          noAuthByKey.set(call.key, { ...res, hasData });
+          if (hasData) {
+            const idn = extractRecordIdentity(res.body);
+            for (const v of idn.ids) publicIdentity.ids.add(v);
+            for (const v of idn.owners) publicIdentity.owners.add(v);
+          }
+        }
+      } finally { await noAuthCtx.dispose().catch(() => {}); }
+    }
+
+    // User A's EXCLUSIVE identifiers: returned to A's session, never to B's own
+    // session, never to an unauthenticated request. Only these can prove a leak.
+    const exclusiveIdsA = [...identityA.ids].filter(v => !identityB.ids.has(v) && !publicIdentity.ids.has(v));
+    const exclusiveOwnersA = [...identityA.owners].filter(v => !identityB.owners.has(v) && !publicIdentity.owners.has(v));
+    const exclusiveMarkers = userAMarkers.filter(m => !bOwnText.includes(m.toLowerCase()));
+
+    // Replay one captured call as User B and judge it by ownership.
+    const judgeAsB = async (call) => {
+      const aAuth = call.headers?.authorization;
+      let host = null; try { host = new URL(call.url).host; } catch {}
+      const bAuth = aAuth ? (authByHostB.get(host) || null) : null;
+      if (aAuth && !bAuth) {
+        return { skipped: true, note: `[${call.method}] ${shortUrlOf(call.url)}: User A's call used a bearer token, but no token from User B was captured for ${host} — NOT tested cross-account (check that User B's login succeeded).` };
+      }
+      const responseB = await replayVia(ctxB.request, call, bAuth ? { authorization: bAuth } : {});
+      const hasRealData = responseB.reached && bodyHasData(responseB.status, responseB.body);
+      const leak = findLeakedIdentity({ body: responseB.body, exclusiveIds: exclusiveIdsA, exclusiveOwners: exclusiveOwnersA, markers: exclusiveMarkers });
+      const idnA = identityByKeyA.get(call.key);
+      const comparable = !!idnA && (idnA.ids.length > 0 || idnA.owners.length > 0);
+      const responsesMatch = !!(call.aResp && call.aResp.body && responseB.body && call.aResp.body === responseB.body);
+      const isPublicEp = isConfirmedPublic(call.url, noAuthByKey.get(call.key));
+      const v = crossTenantVerdict({ reached: responseB.reached, status: responseB.status, aStatus: call.aStatus, hasRealData, comparable, ...leak, isPublic: isPublicEp, responsesMatch });
+      const nA = idnA ? idnA.ids.length + idnA.owners.length : 0;
+      const head = `[${call.method}] ${shortUrlOf(call.url)} → ${responseB.reached ? responseB.status : 'no response'}`;
+      const notes = {
+        'unreachable': `${head}: request never reached the app (${responseB.error || 'network error'}) — NOT tested`,
+        'owner': `${head}: User B's response contains User A's records (${leak.ownerMatches[0] ? `owner ${leak.ownerMatches[0]}` : `marker "${leak.markerMatches[0]}"`}) — cross-account read CONFIRMED`,
+        'record-id': `${head}: User B's response contains ${leak.idMatches.length} record id(s) that only User A's session had returned (e.g. ${leak.idMatches[0]}) — cross-account read`,
+        'server-error': `${head}: server error — not an authorization decision; NOT tested`,
+        'refused': `${head}: app refused User B — properly isolated`,
+        'not-found': `${head}: not found for both users — nothing to compare; NOT tested`,
+        'rejected': `${head}: request rejected before authorization could be judged; NOT tested`,
+        'public': `${head}: public-by-design (path is /public/ AND readable logged-out) — identical data across users is expected`,
+        'isolated-empty': `${head}: User B received no records where User A had ${nA} — properly isolated`,
+        'isolated': `${head}: User B received data but none of User A's ${nA} record id(s)/owner field(s) — properly isolated`,
+        'identical': `${head}: identical non-empty response for both users and no record ids to compare — MANUAL CHECK whether this is User A's private data`,
+        'nothing-to-compare': `${head}: neither user's response held identifiable records — NOT tested`,
+        'no-baseline': `${head}: User B got data but User A's own response had no identifiable records to compare against — NOT tested`,
+      };
+      return {
+        skipped: false, responseB, leak, verdict: v.verdict, severity: v.severity, kind: v.kind, isPublicEp, responsesMatch,
+        note: notes[v.kind] || `${head}: ${v.verdict}`,
+      };
+    };
+
+    // ── LEVEL 1: Replay User A's API calls with User B's session ──
+    // Read-only mode replays only side-effect-free calls (isReadRequest: GET/
+    // HEAD plus POST reads such as listEntity / getMyOrg / GraphQL queries).
+    // Ambiguous POSTs count as writes and wait for destructive mode.
+    let replayWritesSkipped = 0;
+    const level1Verdicts = new Set();
+    if (!crossAccountTestable) {
+      results.push({ type: 'api_replay', level: 1, verdict: 'INCONCLUSIVE', severity: 'none', note: `Cross-account API replay NOT run — ${crossAccountSkipNote}. ${replayList.length} endpoint(s) untested; none of them is SAFE.` });
+    } else {
+      for (const call of replayList) {
+        try {
+          if (!destructive && !call.isRead) { replayWritesSkipped++; continue; }
+          if (call.isAuthEndpoint) {
+            results.push({ type: 'api_replay', level: 1, url: call.url, method: call.method, status: null, verdict: 'SKIPPED', severity: 'none', note: `[${call.method}] ${shortUrlOf(call.url)}: auth/login endpoint — replaying it would re-send User A's credentials, so it is excluded from the cross-account check.` });
+            continue;
+          }
+          const j = await judgeAsB(call);
+          if (j.skipped) { results.push({ type: 'api_replay', level: 1, url: call.url, method: call.method, status: null, verdict: 'INCONCLUSIVE', severity: 'none', note: j.note }); continue; }
+          if (j.verdict !== 'INCONCLUSIVE') level1Verdicts.add(call.key);
+          results.push({
+            type: 'api_replay', level: 1, url: call.url, method: call.method,
+            status: j.responseB.reached ? j.responseB.status : 0,
+            dataLength: j.responseB.length,
+            containsUserAData: j.leak.ownerMatches.length > 0 || j.leak.markerMatches.length > 0 || j.leak.idMatches.length > 0,
+            leakedIds: j.leak.idMatches.slice(0, 5), leakedOwners: j.leak.ownerMatches.slice(0, 5),
+            responsesMatch: j.responsesMatch,
+            preview: j.responseB.body?.substring(0, 100),
+            verdict: j.verdict, severity: j.severity, note: j.note,
+          });
+        } catch {}
+      }
     }
     if (replayWritesSkipped > 0) {
       results.push({
@@ -13713,84 +13799,37 @@ app.post('/api/security/api-intercept', async (req, res) => {
         note: `${replayWritesSkipped} write call(s) (POST/PUT/PATCH/DELETE) not replayed as User B — they would modify real data. Run in destructive mode to test them.`,
       });
     }
+    if (untestedByCap > 0) {
+      results.push({
+        type: 'api_replay_skipped', level: 1, verdict: 'INCONCLUSIVE', severity: 'none',
+        note: `${untestedByCap} further endpoint(s) were captured but NOT replayed (cap of ${REPLAY_CAP} per scan) — they are untested, not safe.`,
+      });
+    }
 
-    // ── LEVEL 2: Deterministic IDOR — User A's record URLs from User B's browser ──
-    // Previous filter only matched `?id=...` and UUIDs (20+ hex chars). Real
-    // apps use many more ID schemes:
-    //   - REST paths: /users/12345, /order/AB12CD
-    //   - Short UUIDs: 8-16 hex
-    //   - Slug-like: /post/my-thing-123
-    //   - Numeric segments anywhere after a known entity word
-    const ID_BEARING_PATTERNS = [
-      /[?&]id=/i,                              // ?id=anything
-      /[?&](user|order|account|record|item|doc|invoice|client|job|ticket|post)Id=/i,
-      /\/[a-f0-9]{8,}/i,                       // hex IDs >= 8 chars
-      /\/(users|orders|accounts|records|items|docs|invoices|clients|jobs|tickets|posts|profile|account)\/[^\/?]+/i, // /entity/:id
-      /\/\d{3,}(?:\/|$|\?)/,                   // /12345 anywhere (numeric, >= 3 digits)
-    ];
-    const idorUrls = capturedRequests
-      .filter(r => r.method === 'GET' && ID_BEARING_PATTERNS.some(p => p.test(r.url)))
-      .map(r => r.url)
-      .filter((v, i, a) => a.indexOf(v) === i)
-      .slice(0, 20);
-
-    for (const url of idorUrls) {
-      try {
-        await pageB.goto(url, { waitUntil: 'networkidle', timeout: 10000 });
-        await pageB.waitForTimeout(1500);
-
-        const pageContent = await pageB.evaluate(() => ({
-          url: window.location.href,
-          title: document.title,
-          bodyText: document.body?.textContent?.substring(0, 500) || '',
-          hasForm: document.querySelectorAll('input, textarea').length > 0,
-          headings: [...document.querySelectorAll('h1, h2, h3')].map(h => h.textContent.trim()).filter(Boolean),
-          bodyLength: document.body?.textContent?.length || 0
-        }));
-
-        const isBlocked =
-          // Common access denied words in multiple languages
-          /denied|unauthorized|forbidden|not found|no permission|access.?denied|no tienes|no autorizado|interdit|non autorisé|nicht berechtigt|zugriff verweigert|niet toegestaan|non autorizzato|acesso negado|sem permissão|brak dostępu|403|404|401/i.test(pageContent.bodyText) ||
-          // Redirected to login
-          pageContent.url.includes('login') || pageContent.url.includes('signin') || pageContent.url.includes('auth') ||
-          // Page is essentially empty
-          pageContent.bodyLength < 100;
-
-        // Check if User A's data is visible
-        const showsUserAData = userAMarkers.some(m => pageContent.bodyText.toLowerCase().includes(m.toLowerCase()));
-
-        // This check only ever inspects the RENDERED DOM, never the raw API
-        // response — so "blocked" is a guess from page text, not a verified
-        // fact. A client-side-filtered app can hit every denial keyword here
-        // (e.g. a soft "not found" empty state) while its API happily returned
-        // User A's full row underneath. Only a real positive (showsUserAData)
-        // is a verified verdict; everything else DOM-inferred is INCONCLUSIVE,
-        // never SAFE — SAFE is reserved for checks that examined the response
-        // itself (see the api_replay / rls_exposure levels elsewhere).
-        let verdict = 'INCONCLUSIVE';
-        if (showsUserAData) verdict = 'VULNERABLE';
-        else if (!isBlocked && pageContent.bodyLength > 200) verdict = 'POTENTIAL_VULNERABILITY';
-
-        const idorShort = url.length > 80 ? url.substring(0, 77) + '...' : url;
-        const idorNote = showsUserAData
-          ? `${idorShort}: page shows User A's identifying data — IDOR confirmed`
-          : verdict === 'POTENTIAL_VULNERABILITY'
-            ? `${idorShort}: User B not redirected to login, page has content — manual verify needed`
-            : `${idorShort}: DOM looked blocked/redirected/empty for User B, but the raw API response was not checked — a client-side-filtered leak would look identical here, so this is not a verified pass`;
-        results.push({
-          type: 'idor_direct',
-          level: 2,
-          url,
-          userBSees: pageContent.headings.slice(0, 3),
-          bodyLength: pageContent.bodyLength,
-          hasForm: pageContent.hasForm,
-          blocked: isBlocked,
-          showsUserAData,
-          verdict,
-          severity: showsUserAData ? 'critical' : (verdict === 'POTENTIAL_VULNERABILITY' ? 'medium' : 'none'),
-          note: idorNote,
-        });
-      } catch {}
+    // ── LEVEL 2: Direct IDOR — record reads replayed as User B ──
+    // Fetches the raw record through the request API (GET id URLs and POST
+    // reads whose body names a record) and judges by ownership. The rendered
+    // DOM is never consulted: a client-side-filtered app looks "blocked" on
+    // screen while its API returns the row.
+    const idorCalls = uniqueApis.filter(c => isIdorCandidate(c)).slice(0, 20);
+    const idorUrls = idorCalls.map(c => c.url);
+    if (!crossAccountTestable) {
+      if (idorCalls.length) results.push({ type: 'idor_direct', level: 2, verdict: 'INCONCLUSIVE', severity: 'none', note: `Direct IDOR check NOT run — ${crossAccountSkipNote}. ${idorCalls.length} record read(s) untested.` });
+    } else {
+      for (const call of idorCalls) {
+        try {
+          const j = await judgeAsB(call);
+          if (j.skipped) { results.push({ type: 'idor_direct', level: 2, url: call.url, method: call.method, verdict: 'INCONCLUSIVE', severity: 'none', note: j.note }); continue; }
+          results.push({
+            type: 'idor_direct', level: 2, url: call.url, method: call.method,
+            status: j.responseB.reached ? j.responseB.status : 0,
+            blocked: j.kind === 'refused',
+            showsUserAData: j.leak.ownerMatches.length > 0 || j.leak.markerMatches.length > 0 || j.leak.idMatches.length > 0,
+            leakedIds: j.leak.idMatches.slice(0, 5), leakedOwners: j.leak.ownerMatches.slice(0, 5),
+            verdict: j.verdict, severity: j.severity, note: j.note,
+          });
+        } catch {}
+      }
     }
 
     // ── LEVEL 3: Token/Cookie Swap ──
@@ -13803,6 +13842,14 @@ app.post('/api/security/api-intercept', async (req, res) => {
       await ctxClean.addCookies(cookiesA);
     }
     const pageClean = await ctxClean.newPage();
+    // Raw API responses the injected session receives — judged by ownership,
+    // not by whether User A's email happens to render on the page.
+    const cleanBodies = [];
+    pageClean.on('response', async resp => {
+      const t = resp.request().resourceType();
+      if (t !== 'xhr' && t !== 'fetch') return;
+      try { const b = await resp.text().catch(() => ''); if (b && resp.status() === 200) cleanBodies.push(b.substring(0, RESPONSE_BODY_CAP)); } catch {}
+    });
 
     // Inject User A's localStorage tokens
     const authTokenKeys = Object.keys(localStorageA).filter(k => /token|auth|session|jwt|user|key/i.test(k));
@@ -13836,9 +13883,14 @@ app.post('/api/security/api-intercept', async (req, res) => {
     // page render is NOT a vulnerability. Gate the verdict on (a) a genuine
     // session having existed, and (b) positive proof the injected creds
     // reproduce User A's identity — mirroring the level-2 IDOR verdict tiers.
-    const hadRealAuthA = !!ssA || !!(userA?.email && userA?.password);
-    const cleanShowsUserAData = userAMarkers.length > 0 &&
-      userAMarkers.some(m => cleanPageContent.bodyText.toLowerCase().includes(m.toLowerCase()));
+    const hadRealAuthA = authOkA && (!!ssA || !!(userA?.email && userA?.password));
+    const cleanLeak = cleanBodies.reduce((acc, b) => {
+      const l = findLeakedIdentity({ body: b, exclusiveIds: exclusiveIdsA, exclusiveOwners: exclusiveOwnersA, markers: exclusiveMarkers });
+      acc.idMatches.push(...l.idMatches); acc.ownerMatches.push(...l.ownerMatches); acc.markerMatches.push(...l.markerMatches);
+      return acc;
+    }, { idMatches: [], ownerMatches: [], markerMatches: [] });
+    const cleanShowsUserAData = cleanLeak.idMatches.length > 0 || cleanLeak.ownerMatches.length > 0 || cleanLeak.markerMatches.length > 0 ||
+      (exclusiveMarkers.length > 0 && exclusiveMarkers.some(m => cleanPageContent.bodyText.toLowerCase().includes(m.toLowerCase())));
     const cleanRendersApp = !cleanPageContent.url.includes('login') &&
       cleanPageContent.bodyLength > 200 &&
       !cleanPageContent.bodyText.includes('Sign in') &&
@@ -13851,7 +13903,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
       stolenNote = 'No authenticated User A session was established (no credentials / captured session provided) — nothing to steal, so stolen-session access cannot be assessed.';
     } else if (cleanShowsUserAData) {
       stolenVerdict = 'VULNERABLE'; stolenSeverity = 'critical';
-      stolenNote = "Injected User A's cookies/tokens into a fresh browser and User A's identifying data rendered without login — stolen session grants full access.";
+      stolenNote = `Injected User A's cookies/tokens into a fresh browser and the app returned User A's records without login (${cleanLeak.ownerMatches[0] ? `owner ${cleanLeak.ownerMatches[0]}` : cleanLeak.idMatches[0] ? `record ${cleanLeak.idMatches[0]}` : 'identity marker'}) — stolen session grants full access.`;
     } else if (cleanRendersApp) {
       stolenVerdict = 'POTENTIAL_VULNERABILITY'; stolenSeverity = 'medium';
       stolenNote = "Injected session rendered app content without a login wall, but User A's identity was not confirmed — manual verification needed.";
@@ -13907,16 +13959,69 @@ app.post('/api/security/api-intercept', async (req, res) => {
     await browserClean.close();
     browserClean = null;
 
+    // ── LOGOUT INVALIDATION (WSTG-v42-SESS-06) — level 9 ──
+    // Runs while User A's browser is still open (it has to log out from A's
+    // live page) and AFTER the stolen-session test above, which needs A's
+    // credential to still be valid. After logout, A's OLD credential is
+    // replayed through the request API against a read that returned data.
+    try {
+      const authRead = uniqueApis.find(c => c.isRead && !c.isAuthEndpoint && c.aStatus === 200 && c.aHasRecords
+        && (c.headers?.authorization || c.headers?.cookie));
+      const authHeader = authRead && authRead.headers && (authRead.headers.authorization || authRead.headers.Authorization);
+      const cookieHeader = (cookiesA || []).filter(c => /sess|auth|token|sid|jwt|connect|login/i.test(c.name)).map(c => `${c.name}=${c.value}`).join('; ');
+      if (!authOkA) {
+        results.push({ type: 'logout_invalidation', level: 9, verdict: 'INCONCLUSIVE', severity: 'none', note: `Logout invalidation not tested — ${authNoteA}.` });
+      } else if (!authRead || (!authHeader && !cookieHeader)) {
+        results.push({ type: 'logout_invalidation', level: 9, verdict: 'INCONCLUSIVE', severity: 'none', note: 'Logout invalidation not tested — no authenticated data read with a captured credential was found in User A\'s traffic.' });
+      } else {
+        let loggedOut = false;
+        try {
+          const btn = await pageA.$('button:has-text("Log out"), button:has-text("Logout"), button:has-text("Sign out"), button:has-text("Salir"), a:has-text("Cerrar sesión"), a:has-text("Log out"), [aria-label*="logout" i], [aria-label*="log out" i]');
+          if (btn) { await btn.click({ timeout: 4000 }).catch(() => {}); await pageA.waitForTimeout(2500); loggedOut = true; }
+        } catch {}
+        if (!loggedOut) {
+          for (const p of ['/api/auth/logout', '/auth/logout', '/logout', '/api/logout', '/users/sign_out']) {
+            try { const u = new URL(p, baseUrl).toString(); await pageA.evaluate(async (uu) => { await fetch(uu, { method: 'POST', credentials: 'include' }).catch(() => {}); await fetch(uu, { credentials: 'include' }).catch(() => {}); }, u); } catch {}
+          }
+          await pageA.waitForTimeout(1000);
+        }
+        const oldCred = {};
+        if (authHeader) oldCred.authorization = authHeader;
+        if (cookieHeader) oldCred.cookie = cookieHeader;
+        const stale = await pwRequest.newContext({ ignoreHTTPSErrors: true });
+        let replay;
+        try { replay = await replayVia(stale, authRead, oldCred); } finally { await stale.dispose().catch(() => {}); }
+        const stillData = replay.reached && bodyHasData(replay.status, replay.body);
+        const su = shortUrlOf(authRead.url);
+        if (!replay.reached) {
+          results.push({ type: 'logout_invalidation', level: 9, verdict: 'INCONCLUSIVE', severity: 'none', note: `Logout invalidation not tested — the post-logout replay never reached the app (${replay.error || 'network error'}).` });
+        } else if (stillData) {
+          if (cookieHeader && !authHeader) {
+            results.push({ type: 'logout_invalidation', level: 9, verdict: 'VULNERABLE', severity: 'high', note: `After logout, User A's old SESSION COOKIE still returned authenticated data from ${su} (HTTP ${replay.status}, ${replay.length}b). Logout didn't invalidate the server session — a stolen cookie stays valid.` });
+          } else {
+            results.push({ type: 'logout_invalidation', level: 9, verdict: 'SUSPICIOUS', severity: 'medium', note: `After logout, a captured bearer token still returned data from ${su} (HTTP ${replay.status}). Common for STATELESS JWTs (can't revoke without a server-side denylist) — a stolen token stays valid until it expires. Confirm whether logout should revoke it.` });
+          }
+        } else if (replay.status === 401 || replay.status === 403 || (replay.status >= 200 && replay.status < 300)) {
+          results.push({ type: 'logout_invalidation', level: 9, verdict: 'SAFE', severity: 'none', note: `Old credential rejected after logout (replay of ${su} → HTTP ${replay.status}${replay.status < 300 ? '/empty' : ''}) — session invalidated server-side.` });
+        } else {
+          results.push({ type: 'logout_invalidation', level: 9, verdict: 'INCONCLUSIVE', severity: 'none', note: `Post-logout replay of ${su} returned HTTP ${replay.status} — not an authorization decision; NOT tested.` });
+        }
+      }
+    } catch (e) {
+      results.push({ type: 'logout_invalidation', level: 9, verdict: 'INCONCLUSIVE', severity: 'none', note: `Could not run logout-invalidation check: ${e.message}` });
+    }
+
+    await browserA.close();
+    browserA = null;
+
     // ── LEVEL 4: API Mutation Testing ──
-    // Try write operations: change GET→PUT→DELETE on User A's record endpoints.
-    // SKIPPED unless mode === 'destructive' — these probes really do mutate or
-    // delete data if the app is vulnerable. In dry-run we still report what
-    // *would* be tested so the user can see what they're opting into.
-    const writeTestUrls = capturedRequests
-      .filter(r => r.method === 'GET' && ID_BEARING_PATTERNS.some(p => p.test(r.url)))
-      .map(r => r.url)
-      .filter((v, i, a) => a.indexOf(v) === i)
-      .slice(0, 10);
+    // Captured write calls (POST/PUT/PATCH/DELETE) whose url or body names one
+    // of User A's exclusive records, replayed as User B. SKIPPED unless
+    // mode === 'destructive' — a vulnerable app really would mutate the record.
+    // In dry-run we still report what *would* be tested.
+    const idInText = (c) => exclusiveIdsA.some(id => c.url.includes(id) || (c.postData && c.postData.includes(id)));
+    const writeCalls = uniqueApis.filter(c => !c.isRead && !c.isAuthEndpoint && idInText(c)).slice(0, 10);
+    const writeTestUrls = writeCalls.map(c => `${c.method} ${c.url}`);
 
     if (!destructive) {
       results.push({
@@ -13924,51 +14029,46 @@ app.post('/api/security/api-intercept', async (req, res) => {
         level: 4,
         verdict: 'SKIPPED',
         severity: 'none',
-        reason: `Read-only mode. ${writeTestUrls.length} URLs would be probed with PUT/DELETE in destructive mode.`,
+        reason: `Read-only mode. ${writeCalls.length} captured write(s) targeting User A's records would be replayed as User B in destructive mode.`,
         urls_that_would_be_tested: writeTestUrls,
         howToEnable: "Pass mode: 'destructive' in the request body to actually fire write probes. WARNING: if the app is vulnerable, your data WILL be modified."
       });
+    } else if (!crossAccountTestable) {
+      results.push({ type: 'mutation', level: 4, verdict: 'INCONCLUSIVE', severity: 'none', note: `Mutation probes NOT run — ${crossAccountSkipNote}.` });
+    } else if (writeCalls.length === 0) {
+      results.push({ type: 'mutation', level: 4, verdict: 'INCONCLUSIVE', severity: 'none', note: 'No captured write targeting one of User A\'s records — write-side IDOR not tested.' });
     }
 
-    for (const url of destructive ? writeTestUrls : []) {
-      for (const method of ['PUT', 'DELETE']) {
-        try {
-          const mutationResult = await pageB.evaluate(async ({ url, method }) => {
-            try {
-              const opts = {
-                credentials: 'include',
-                method,
-                headers: { 'Content-Type': 'application/json' }
-              };
-              if (method === 'PUT') {
-                opts.body = JSON.stringify({ _test_mutation: true, name: 'SEC-WRITE-TEST' });
-              }
-              const res = await fetch(url, opts);
-              const text = await res.text();
-              return { status: res.status, length: text.length, body: text.substring(0, 200) };
-            } catch (e) {
-              return { status: 0, error: e.message };
-            }
-          }, { url, method });
-
-          const writeSucceeded = mutationResult.status >= 200 && mutationResult.status < 300;
-          const mutShort = url.length > 80 ? url.substring(0, 77) + '...' : url;
-          results.push({
-            type: 'mutation',
-            level: 4,
-            url,
-            method,
-            status: mutationResult.status,
-            responseLength: mutationResult.length,
-            preview: mutationResult.body?.substring(0, 80),
-            verdict: writeSucceeded ? 'VULNERABLE' : 'SAFE',
-            severity: writeSucceeded ? 'critical' : 'none',
-            note: writeSucceeded
-              ? `[${method}] ${mutShort} → ${mutationResult.status}: User B successfully ${method === 'PUT' ? 'modified' : 'deleted'} User A's record — confirmed write-side IDOR`
-              : `[${method}] ${mutShort} → ${mutationResult.status}: blocked`,
-          });
-        } catch {}
-      }
+    for (const call of destructive && crossAccountTestable ? writeCalls : []) {
+      try {
+        const aAuth = call.headers?.authorization;
+        let host = null; try { host = new URL(call.url).host; } catch {}
+        const bAuth = aAuth ? (authByHostB.get(host) || null) : null;
+        const mutShort = shortUrlOf(call.url);
+        if (aAuth && !bAuth) {
+          results.push({ type: 'mutation', level: 4, url: call.url, method: call.method, verdict: 'INCONCLUSIVE', severity: 'none', note: `[${call.method}] ${mutShort}: no User B token captured for ${host} — NOT tested.` });
+          continue;
+        }
+        const mutationResult = await replayVia(ctxB.request, call, bAuth ? { authorization: bAuth } : {});
+        const writeSucceeded = mutationResult.reached && mutationResult.status >= 200 && mutationResult.status < 300;
+        const refused = mutationResult.reached && [401, 403, 404].includes(mutationResult.status);
+        results.push({
+          type: 'mutation',
+          level: 4,
+          url: call.url,
+          method: call.method,
+          status: mutationResult.status,
+          responseLength: mutationResult.length,
+          preview: mutationResult.body?.substring(0, 80),
+          verdict: writeSucceeded ? 'VULNERABLE' : refused ? 'SAFE' : 'INCONCLUSIVE',
+          severity: writeSucceeded ? 'critical' : 'none',
+          note: writeSucceeded
+            ? `[${call.method}] ${mutShort} → ${mutationResult.status}: User B replayed a write against User A's record and the app accepted it — confirmed write-side IDOR`
+            : refused
+              ? `[${call.method}] ${mutShort} → ${mutationResult.status}: app refused User B's write — blocked`
+              : `[${call.method}] ${mutShort} → ${mutationResult.reached ? mutationResult.status : 'no response'}: not an authorization decision — NOT tested`,
+        });
+      } catch {}
     }
 
     // ── LEVEL 6: Mass Assignment (destructive only) ──
@@ -13984,12 +14084,10 @@ app.post('/api/security/api-intercept', async (req, res) => {
     // etc.) accept a body but ignore unknown fields — running the probe
     // against them was generating false SUSPICIOUS findings on every 2xx
     // read response. Exclude paths matching read patterns.
-    const READ_RPC_PATTERN = /\/(list|read|get|fetch|search|find|load|view|show|export|count|stats|summary)|\/by[-_](id|name|slug|email)|\/me\b|\/whoami\b|\/version\b|\/health\b|\/ping\b|\/log[-_]?user|app-logs/i;
-    const massAssignTargets = destructive
-      ? capturedRequests
+    const massAssignTargets = destructive && crossAccountTestable
+      ? uniqueApis
           .filter(r => (r.method === 'PUT' || r.method === 'POST' || r.method === 'PATCH') && r.postData)
-          .filter(r => !READ_RPC_PATTERN.test(r.url))
-          .filter((v, i, a) => a.findIndex(x => x.url === v.url && x.method === v.method) === i)
+          .filter(r => !r.isRead && !r.isAuthEndpoint)
           .slice(0, 8)
       : [];
 
@@ -14017,30 +14115,20 @@ app.post('/api/security/api-intercept', async (req, res) => {
 
         const tamperedBody = { ...originalBody, ...PRIVILEGED_FIELDS };
 
-        const maResult = await pageB.evaluate(async ({ url, method, body }) => {
-          try {
-            const res = await fetch(url, {
-              credentials: 'include',
-              method,
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(body),
-            });
-            const text = await res.text();
-            return { status: res.status, length: text.length, body: text.substring(0, 400) };
-          } catch (e) {
-            return { status: 0, error: e.message };
-          }
-        }, { url: apiCall.url, method: apiCall.method, body: tamperedBody });
+        let maHost = null; try { maHost = new URL(apiCall.url).host; } catch {}
+        const maAuth = apiCall.headers?.authorization ? (authByHostB.get(maHost) || null) : null;
+        const maResult = await replayVia(ctxB.request, { ...apiCall, postData: JSON.stringify(tamperedBody), headers: { ...apiCall.headers, 'content-type': 'application/json' } }, maAuth ? { authorization: maAuth } : {});
 
-        const succeeded = maResult.status >= 200 && maResult.status < 300;
+        const succeeded = maResult.reached && maResult.status >= 200 && maResult.status < 300;
         // If the response echoes back any privileged value we set, that's
         // strong evidence of mass-assignment. Crude but workable signal.
         const echoesPrivileged = succeeded && /["']?(is_admin|isAdmin|role|owner_id|tenant_id)["']?\s*:\s*["']?(true|admin)/i.test(maResult.body || '');
 
-        let verdict = 'SAFE';
+        let verdict = 'INCONCLUSIVE';
         let severity = 'none';
         if (echoesPrivileged) { verdict = 'VULNERABLE'; severity = 'critical'; }
         else if (succeeded) { verdict = 'SUSPICIOUS'; severity = 'high'; }
+        else if (maResult.reached && (maResult.status === 400 || maResult.status === 401 || maResult.status === 403 || maResult.status === 422)) verdict = 'SAFE';
 
         results.push({
           type: 'mass_assignment',
@@ -14056,7 +14144,9 @@ app.post('/api/security/api-intercept', async (req, res) => {
             ? 'API accepted privileged fields and echoed them back — mass-assignment confirmed'
             : succeeded
               ? 'API accepted the extra fields with 2xx — manual verify needed to confirm they persisted'
-              : `Blocked (${maResult.status})`,
+              : verdict === 'SAFE'
+                ? `Rejected (${maResult.status})`
+                : `Request returned ${maResult.reached ? maResult.status : 'no response'} — not a validation decision; NOT tested`,
         });
       } catch {}
     }
@@ -14071,68 +14161,52 @@ app.post('/api/security/api-intercept', async (req, res) => {
     }
 
     // ── LEVEL 4b: Unauthenticated API access ──
-    // Try User A's API calls with NO authentication at all
-    const noAuthBrowser = await launchBrowser();
-    const noAuthCtx = await noAuthBrowser.newContext({ viewport: { width: 1280, height: 800 } });
-    const noAuthPage = await noAuthCtx.newPage();
-    await noAuthPage.goto(baseUrl, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
-
-    // Only User A's READ calls: GET-ing a URL that was captured as a POST
-    // tests nothing (most APIs 404/405 a wrong method). Same 25 cap as Level 1
-    // (was 10, which skipped most of a typical app's API surface).
-    for (const apiCall of uniqueApis.filter(r => isReadMethod(r.method)).slice(0, 25)) {
+    // The probe itself ran earlier (noAuthByKey, before Level 1). Every read
+    // call — GET and POST reads alike — was re-sent with no cookie and no
+    // Authorization, keeping the app's own non-identity headers (apikey).
+    for (const apiCall of replayList) {
+      const noAuthResult = noAuthByKey.get(apiCall.key);
+      if (!noAuthResult) continue;
       try {
-        // Keep the app's own non-identity headers (e.g. Supabase's apikey) so
-        // the request reaches the auth check instead of failing before it.
-        const noAuthResult = await noAuthPage.evaluate(async ({ url, headers }) => {
-          try {
-            const res = await fetch(url, { credentials: 'omit', headers });
-            const text = await res.text();
-            return { status: res.status, length: text.length, body: text.substring(0, 200) };
-          } catch (e) {
-            return { status: 0, error: e.message };
-          }
-        }, { url: apiCall.url, headers: replayHeaders(apiCall.headers) });
-
-        const hasData = noAuthResult.status === 200 && noAuthResult.length > 50 &&
-          !noAuthResult.body.includes('<!DOCTYPE') && !noAuthResult.body.includes('"data":[]');
-
-        const noAuthShort = apiCall.url.length > 80 ? apiCall.url.substring(0, 77) + '...' : apiCall.url;
-        // A 200-without-auth on a "/public/" path (login-info, public settings,
-        // domain config, etc.) is BY DESIGN — not an auth bypass. Flag those at
-        // most as low/suspicious ("confirm nothing sensitive is exposed"), and
-        // reserve VULNERABLE for genuinely non-public endpoints. Severity is
-        // HIGH, not auto-CRITICAL: an unauth-readable endpoint is serious but
-        // its criticality depends on what it actually exposes.
+        const hasData = noAuthResult.hasData;
+        const noAuthShort = shortUrlOf(apiCall.url);
+        // A 200-without-auth on a "/public/" path (login-info, public settings)
+        // is BY DESIGN — flag at most as low/suspicious. VULNERABLE is reserved
+        // for genuinely non-public endpoints; HIGH not auto-CRITICAL because
+        // criticality depends on what the endpoint actually exposes.
         const isPublicNoAuth = isPublicPath(apiCall.url);
         // ESCAPE HATCH: even on a /public/ path, if the unauthenticated body
-        // actually contains User A's PRIVATE identifying data, that's a real
-        // leak — noAuthVerdict() escalates to critical regardless of path.
-        const leaksPrivateData = hasData && userAMarkers.some(m => noAuthResult.body?.toLowerCase().includes(m.toLowerCase()));
-        const noAuthVuln = hasData && (!isPublicNoAuth || leaksPrivateData);
-        const naV = noAuthVerdict({ hasData, isPublic: isPublicNoAuth, leaksPrivateData }); // routes/sec-classify.js (tested)
+        // contains one of User A's exclusive records, that's a real leak —
+        // noAuthVerdict() escalates to critical regardless of path.
+        const naLeak = hasData ? findLeakedIdentity({ body: noAuthResult.body, exclusiveIds: exclusiveIdsA, exclusiveOwners: exclusiveOwnersA, markers: exclusiveMarkers }) : { idMatches: [], ownerMatches: [], markerMatches: [] };
+        const leaksPrivateData = naLeak.idMatches.length > 0 || naLeak.ownerMatches.length > 0 || naLeak.markerMatches.length > 0;
+        const naV = noAuthVerdict({ hasData, isPublic: isPublicNoAuth, leaksPrivateData, reached: noAuthResult.reached, status: noAuthResult.status, aStatus: apiCall.aStatus }); // routes/sec-classify.js (tested)
+        const st = noAuthResult.reached ? noAuthResult.status : 'no response';
         results.push({
           type: 'no_auth',
           level: 4,
           url: apiCall.url,
-          method: 'GET (no auth)',
+          method: `${apiCall.method} (no auth)`,
           status: noAuthResult.status,
           dataLength: noAuthResult.length,
           preview: noAuthResult.body?.substring(0, 80),
           verdict: naV.verdict,
           severity: naV.severity,
-          note: leaksPrivateData
-            ? `${noAuthShort} → ${noAuthResult.status}: returns ${noAuthResult.length} bytes WITHOUT authentication AND the body contains User A's private data — confirmed unauthenticated exposure of private data (the "/public/" path does NOT make this safe)`
-            : noAuthVuln
-              ? `${noAuthShort} → ${noAuthResult.status}: returns ${noAuthResult.length} bytes WITHOUT authentication — endpoint is readable unauthenticated; verify whether this data is meant to be public`
-              : (hasData && isPublicNoAuth)
-                ? `${noAuthShort} → ${noAuthResult.status}: returns ${noAuthResult.length} bytes without auth, but the path is "/public/" — public-by-design (e.g. login-info); confirm it contains nothing sensitive`
-                : `${noAuthShort} → ${noAuthResult.status}: properly requires auth`
+          note: naV.kind === 'unreachable'
+            ? `${noAuthShort}: request never reached the app (${noAuthResult.error || 'network error'}) — NOT tested`
+            : leaksPrivateData
+              ? `${noAuthShort} → ${st}: returns ${noAuthResult.length} bytes WITHOUT authentication AND the body contains User A's records — confirmed unauthenticated exposure of private data (a "/public/" path does NOT make this safe)`
+              : naV.kind === 'open'
+                ? `${noAuthShort} → ${st}: returns ${noAuthResult.length} bytes WITHOUT authentication — endpoint is readable unauthenticated; verify whether this data is meant to be public`
+                : naV.kind === 'public'
+                  ? `${noAuthShort} → ${st}: returns ${noAuthResult.length} bytes without auth, but the path is "/public/" — public-by-design (e.g. login-info); confirm it contains nothing sensitive`
+                  : naV.verdict === 'SAFE'
+                    ? `${noAuthShort} → ${st}: ${naV.kind === 'empty' ? 'no data returned without auth' : 'properly requires auth'}`
+                    : `${noAuthShort} → ${st}: not an authorization decision — NOT tested`
         });
       } catch {}
     }
 
-    await noAuthBrowser.close();
     await browserB.close();
     browserB = null;
 
@@ -14432,36 +14506,27 @@ app.post('/api/security/api-intercept', async (req, res) => {
     // Find the login endpoint from captured POSTs that look auth-related,
     // then hammer with bad creds. If all attempts return non-429, the
     // endpoint lacks rate limiting → credential stuffing risk.
+    // The probe body carries a FABRICATED, non-existent email (never User A's):
+    // an app that locks accounts after N failures would otherwise lock the
+    // customer's real test account. If no identity field can be swapped the
+    // probe is not sent at all.
     const LOGIN_HINT = /login|sign[_-]?in|auth|session|token/i;
     const loginCandidate = capturedRequests.find(r =>
-      r.method === 'POST' && LOGIN_HINT.test(r.url) && r.postData
+      r.method === 'POST' && LOGIN_HINT.test(r.url) && r.postData && /pass/i.test(r.postData)
     );
-    if (loginCandidate) {
+    const fabricated = loginCandidate ? fabricateLoginBody(loginCandidate.postData) : { ok: false, reason: 'no login POST captured during crawl' };
+    if (loginCandidate && fabricated.ok) {
       try {
         const attempts = 10;
         const statuses = [];
         let saw429 = false;
-        // Construct a bad-creds body. If captured body has email/password
-        // fields, reuse the keys with garbage values. Otherwise send the
-        // captured body verbatim (still bad — wrong password OR same
-        // login attempted repeatedly, which itself should be throttled).
-        let badBody = loginCandidate.postData;
-        try {
-          const parsed = JSON.parse(loginCandidate.postData);
-          if (parsed && typeof parsed === 'object') {
-            const tampered = { ...parsed };
-            for (const k of Object.keys(tampered)) {
-              if (/pass/i.test(k)) tampered[k] = 'WRONGPASS' + Math.random();
-            }
-            badBody = JSON.stringify(tampered);
-          }
-        } catch {}
+        const probeHeaders = replayHeaders(loginCandidate.headers);
         for (let i = 0; i < attempts; i++) {
           try {
             const r = await fetchWithTimeout(loginCandidate.url, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: badBody,
+              headers: probeHeaders,
+              body: fabricated.body,
               redirect: 'manual',
             });
             statuses.push(r.status);
@@ -14470,6 +14535,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
             statuses.push(0);
           }
         }
+        const reachedCount = statuses.filter(s => s > 0).length;
         results.push({
           type: 'rate_limit',
           level: 5,
@@ -14477,11 +14543,14 @@ app.post('/api/security/api-intercept', async (req, res) => {
           url: loginCandidate.url.substring(0, 120),
           attempts: statuses.length,
           statuses,
-          verdict: saw429 ? 'SAFE' : 'VULNERABLE',
-          severity: saw429 ? 'none' : 'high',
-          note: saw429
+          verdict: saw429 ? 'SAFE' : reachedCount === 0 ? 'INCONCLUSIVE' : 'VULNERABLE',
+          severity: saw429 ? 'none' : reachedCount === 0 ? 'none' : 'high',
+          note: (saw429
             ? `Rate-limited after ${statuses.length} bad-cred attempts (429 received)`
-            : `${attempts} bad-cred attempts allowed without 429 — credential stuffing risk`,
+            : reachedCount === 0
+              ? `Probe requests never reached the login endpoint — NOT tested`
+              : `${attempts} bad-cred attempts allowed without 429 — credential stuffing risk`)
+            + ` [probed with a fabricated address ${fabricated.probeEmail}; account lockout on the real test account was not tested by design]`,
         });
       } catch (e) {
         results.push({ type: 'rate_limit', level: 5, verdict: 'INCONCLUSIVE', severity: 'none', note: `Could not test rate limiting (probe error): ${e.message}` });
@@ -14492,7 +14561,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
         level: 5,
         verdict: 'INCONCLUSIVE',
         severity: 'none',
-        note: 'Not tested — no login POST captured during crawl',
+        note: `Not tested — ${fabricated.reason || 'no login POST captured during crawl'}`,
       });
     }
 
@@ -14583,7 +14652,8 @@ app.post('/api/security/api-intercept', async (req, res) => {
     try {
       const SENSITIVE = /"(password|passwd|pwd|password_hash|pass_hash|hashed_password|encrypted_password|secret|client_secret|private_key|priv_key|api_key|apikey|access_key|secret_key|aws_secret_access_key|encryption_key|refresh_token|ssn|social_security|tax_id|credit_card|card_number|cardnumber|cvv|cvc|card_cvc|iban|routing_number|bank_account|account_number)"\s*:\s*("(?!\s*"|null|\[REDACTED\])[^"]{2,}"|\d{3,})/gi;
       const exposures = [];
-      for (const [u, resp] of capturedResponses) {
+      for (const resp of capturedResponses.values()) {
+        const u = resp.url;
         // Auth/login/token endpoints legitimately carry tokens — exclude them.
         if (/\/(login|sign-?in|signin|auth|token|oauth|session|refresh)\b/i.test(u)) continue;
         if (!resp || !resp.body) continue;
@@ -14672,55 +14742,6 @@ app.post('/api/security/api-intercept', async (req, res) => {
       results.push({ type: 'session_fixation', level: 9, verdict: 'INCONCLUSIVE', severity: 'none', note: `Could not run session-fixation check: ${e.message}` });
     }
 
-    // ── LOGOUT INVALIDATION (WSTG-v42-SESS-06) — level 9 ──
-    // After logout, does User A's OLD credential still authenticate? If yes, a
-    // stolen cookie/token stays valid — logout didn't revoke it server-side.
-    try {
-      const authGet = capturedRequests.find(r => r.method === 'GET'
-        && /\/(api|rest|graphql|entities|v1|users?|me|account|profile)\b/i.test(r.url)
-        && (capturedResponses.get(r.url) || {}).status === 200
-        && !/\/(login|sign-?in|auth\/|token|oauth)\b/i.test(r.url));
-      const authHeader = authGet && authGet.headers && (authGet.headers.authorization || authGet.headers.Authorization);
-      const cookieHeader = (cookiesA || []).filter(c => /sess|auth|token|sid|jwt|connect|login/i.test(c.name)).map(c => `${c.name}=${c.value}`).join('; ');
-      if (!authGet || (!authHeader && !cookieHeader)) {
-        results.push({ type: 'logout_invalidation', level: 9, verdict: 'INCONCLUSIVE', severity: 'none', note: 'Logout invalidation not tested — no authenticated data endpoint or captured credential found.' });
-      } else {
-        // Log out on pageA (click a logout affordance; else hit common endpoints).
-        let loggedOut = false;
-        try {
-          const btn = await pageA.$('button:has-text("Log out"), button:has-text("Logout"), button:has-text("Sign out"), button:has-text("Salir"), a:has-text("Cerrar sesión"), a:has-text("Log out"), [aria-label*="logout" i], [aria-label*="log out" i]');
-          if (btn) { await btn.click({ timeout: 4000 }).catch(() => {}); await pageA.waitForTimeout(2500); loggedOut = true; }
-        } catch {}
-        if (!loggedOut) {
-          for (const p of ['/api/auth/logout', '/auth/logout', '/logout', '/api/logout', '/users/sign_out']) {
-            try { const u = new URL(p, baseUrl).toString(); await pageA.evaluate(async (uu) => { await fetch(uu, { method: 'POST', credentials: 'include' }).catch(() => {}); await fetch(uu, { credentials: 'include' }).catch(() => {}); }, u); } catch {}
-          }
-          await pageA.waitForTimeout(1000);
-        }
-        // Replay the authenticated GET with the OLD credential (stolen-credential sim).
-        const headers = {};
-        if (authHeader) headers['authorization'] = authHeader;
-        if (cookieHeader) headers['cookie'] = cookieHeader;
-        let replay = { status: 0, len: 0, empty: true };
-        try {
-          const rr = await fetchWithTimeout(authGet.url, { method: 'GET', headers, redirect: 'manual' });
-          const body = await rr.text().catch(() => '');
-          replay = { status: rr.status, len: body.length, empty: /"(data|results|items)"\s*:\s*\[\s*\]/.test(body) || body.length < 30 };
-        } catch (e) { replay.err = e.message; }
-        if (replay.status === 200 && !replay.empty && replay.len > 30) {
-          if (cookieHeader && !authHeader) {
-            results.push({ type: 'logout_invalidation', level: 9, verdict: 'VULNERABLE', severity: 'high', note: `After logout, User A's old SESSION COOKIE still returned authenticated data from ${authGet.url.slice(0, 70)} (HTTP 200, ${replay.len}b). Logout didn't invalidate the server session — a stolen cookie stays valid.` });
-          } else {
-            results.push({ type: 'logout_invalidation', level: 9, verdict: 'SUSPICIOUS', severity: 'medium', note: `After logout, a captured bearer token still returned data from ${authGet.url.slice(0, 70)} (HTTP 200). Common for STATELESS JWTs (can't revoke without a server-side denylist) — a stolen token stays valid until it expires. Confirm whether logout should revoke it.` });
-          }
-        } else {
-          results.push({ type: 'logout_invalidation', level: 9, verdict: 'SAFE', severity: 'none', note: `Old credential rejected after logout (replay → HTTP ${replay.status}${replay.empty ? '/empty' : ''}) — session invalidated server-side.` });
-        }
-      }
-    } catch (e) {
-      results.push({ type: 'logout_invalidation', level: 9, verdict: 'INCONCLUSIVE', severity: 'none', note: `Could not run logout-invalidation check: ${e.message}` });
-    }
-
     for (const r of results) stampFinding(r);
     // Headline = only confirmed (★★★★☆+) VULNERABLE findings. Lower-confidence
     // ones are surfaced separately so the report never over-claims.
@@ -14736,9 +14757,31 @@ app.post('/api/security/api-intercept', async (req, res) => {
     const safeResults = results.filter(r => r.verdict === 'SAFE');
     const inconclusiveResults = results.filter(r => r.verdict === 'INCONCLUSIVE');
     const skippedResults = results.filter(r => r.verdict === 'SKIPPED');
-    
+
+    // Coverage: how many data endpoints actually got a cross-account verdict.
+    // A scan that captured 149 calls and judged 0 must read as untested, not
+    // as all-safe.
+    const dataEndpoints = uniqueApis.filter(c => !c.isAuthEndpoint);
+    const crossRows = results.filter(r => (r.type === 'api_replay' || r.type === 'idor_direct') && r.url);
+    const coverage = {
+      apiCallsCaptured: capturedRequests.length,
+      dataEndpointsCaptured: dataEndpoints.length,
+      crossAccountTested: level1Verdicts.size,
+      crossAccountVulnerable: crossRows.filter(r => r.verdict === 'VULNERABLE').length,
+      crossAccountSafe: crossRows.filter(r => r.verdict === 'SAFE').length,
+      crossAccountInconclusive: crossRows.filter(r => r.verdict === 'INCONCLUSIVE').length,
+      writesSkippedReadOnly: replayWritesSkipped,
+      untestedByCap,
+      noAuthTested: [...noAuthByKey.values()].filter(v => v.reached).length,
+      exclusiveRecordIdsA: exclusiveIdsA.length,
+      exclusiveOwnersA: exclusiveOwnersA.length,
+      loginVerified: { userA: authOkA, userB: authOkB },
+    };
+
     res.json({
       mode: destructive ? 'destructive' : 'read-only',
+      beta: true,
+      coverage,
       totalTests: results.length,
       vulnerabilities: vulns.length,
       confirmedVulnerabilities: confirmedVulns.length, // ★★★★☆+ — safe to headline
@@ -14750,7 +14793,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
       capturedApiCalls: capturedRequests.length,
       uniqueApisTested: uniqueApis.length,
       idorUrlsTested: idorUrls.length,
-      writeTestsRun: destructive ? writeTestUrls.length * 2 : 0,
+      writeTestsRun: destructive ? writeCalls.length : 0,
       results,
       cookieAnalysis: {
         userA: { count: cookiesA.length, names: cookiesA.map(c => c.name) },

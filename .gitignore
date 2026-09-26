@@ -29,7 +29,8 @@ _dev_utils/
 *.out
 
 # ── Dev tests, fixtures & old artifacts (not part of the runtime baseline) ──
-test/
+test/*
+!test/sec-classify.test.mjs
 tests/
 _bak/
 *.backup*
