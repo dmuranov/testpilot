@@ -6118,8 +6118,13 @@ async function secDeepScan() {
     // Show level-by-level summary
     if (data.levels) {
       for (const [key, lvl] of Object.entries(data.levels)) {
-        const icon = lvl.vulns > 0 ? '⚠️' : '✅';
-        state.secStream.push({ type: lvl.vulns > 0 ? 'fail' : 'pass', message: `${icon} ${lvl.name}: ${lvl.tests} tests, ${lvl.vulns} vulnerabilities` });
+        // A level whose rows were all "not tested" used to render as a green
+        // "N tests, 0 vulnerabilities". Only judged rows count as checked.
+        const untested = lvl.inconclusive || 0;
+        const judged = lvl.tests - untested;
+        const icon = lvl.vulns > 0 ? '⚠️' : judged === 0 ? '❔' : '✅';
+        const tail = untested ? `, ${untested} not tested` : '';
+        state.secStream.push({ type: lvl.vulns > 0 ? 'fail' : judged === 0 ? 'info' : 'pass', message: `${icon} ${lvl.name}: ${judged} checked${tail}, ${lvl.vulns} vulnerabilities` });
       }
       render();
     }
