@@ -14204,7 +14204,21 @@ app.post('/api/security/api-intercept', async (req, res) => {
         // noAuthVerdict() escalates to critical regardless of path.
         const naLeak = hasData ? findLeakedIdentity({ body: noAuthResult.body, exclusiveIds: exclusiveIdsA, exclusiveOwners: exclusiveOwnersA, markers: exclusiveMarkers }) : { idMatches: [], ownerMatches: [], markerMatches: [] };
         const leaksPrivateData = naLeak.idMatches.length > 0 || naLeak.ownerMatches.length > 0 || naLeak.markerMatches.length > 0;
-        const naV = noAuthVerdict({ hasData, isPublic: isPublicNoAuth, leaksPrivateData, reached: noAuthResult.reached, status: noAuthResult.status, aStatus: apiCall.aStatus }); // routes/sec-classify.js (tested)
+        let naV = noAuthVerdict({ hasData, isPublic: isPublicNoAuth, leaksPrivateData, reached: noAuthResult.reached, status: noAuthResult.status, aStatus: apiCall.aStatus }); // routes/sec-classify.js (tested)
+        // EVIDENCE GATE: "readable unauthenticated" (kind 'open', HIGH) must be
+        // backed by actual records in the body. A 200 carrying a short error or
+        // empty envelope passes bodyHasData() but proves nothing — Base44
+        // functions answer no-auth calls with 200 + a ~370-byte error blob, and
+        // a run where the same endpoint 500s then reads as "not tested". Without
+        // this gate one endpoint blinked between 11×HIGH and gone across two runs
+        // of the same app. If the body holds no identifiable record, downgrade
+        // to INCONCLUSIVE so a status-code flake can't manufacture a HIGH.
+        let naRecordCount = 0;
+        if (hasData && naV.kind === 'open') {
+          const naIdn = extractRecordIdentity(noAuthResult.body);
+          naRecordCount = naIdn.ids.length + naIdn.owners.length;
+          if (naRecordCount === 0) naV = { verdict: 'INCONCLUSIVE', severity: 'none', kind: 'open-no-records' };
+        }
         const st = noAuthResult.reached ? noAuthResult.status : 'no response';
         results.push({
           type: 'no_auth',
@@ -14213,15 +14227,20 @@ app.post('/api/security/api-intercept', async (req, res) => {
           method: `${apiCall.method} (no auth)`,
           status: noAuthResult.status,
           dataLength: noAuthResult.length,
-          preview: noAuthResult.body?.substring(0, 80),
+          recordCount: naRecordCount,
+          // Wider preview (was 80) so an unauthenticated 200 can actually be
+          // eyeballed — the whole point of confirming what the bytes are.
+          preview: noAuthResult.body?.substring(0, 300),
           verdict: naV.verdict,
           severity: naV.severity,
           note: naV.kind === 'unreachable'
             ? `${noAuthShort}: request never reached the app (${noAuthResult.error || 'network error'}) — NOT tested`
             : leaksPrivateData
               ? `${noAuthShort} → ${st}: returns ${noAuthResult.length} bytes WITHOUT authentication AND the body contains User A's records — confirmed unauthenticated exposure of private data (a "/public/" path does NOT make this safe)`
-              : naV.kind === 'open'
-                ? `${noAuthShort} → ${st}: returns ${noAuthResult.length} bytes WITHOUT authentication — endpoint is readable unauthenticated; verify whether this data is meant to be public`
+              : naV.kind === 'open-no-records'
+                ? `${noAuthShort} → ${st}: responded 200 with ${noAuthResult.length} bytes but NO identifiable records — likely an error or empty envelope, not readable data. NOT confirmed (first 300 bytes kept below for review).`
+                : naV.kind === 'open'
+                  ? `${noAuthShort} → ${st}: returns ${noAuthResult.length} bytes WITHOUT authentication AND the body holds ${naRecordCount} identifiable record field(s) — endpoint is readable unauthenticated; verify whether this data is meant to be public`
                 : naV.kind === 'public'
                   ? `${noAuthShort} → ${st}: returns ${noAuthResult.length} bytes without auth, but the path is "/public/" — public-by-design (e.g. login-info); confirm it contains nothing sensitive`
                   : naV.verdict === 'SAFE'
@@ -14717,8 +14736,15 @@ app.post('/api/security/api-intercept', async (req, res) => {
           type: 'data_exposure', level: 7, verdict: 'VULNERABLE', severity: 'high',
           note: `API responses expose sensitive field(s) the client should never receive: ${uniqFields.slice(0, 8).join(', ')}${uniqFields.length > 8 ? ` …+${uniqFields.length - 8}` : ''}. e.g. ${(exposures[0].url || '').slice(0, 80)}. An authorized user can still steal these (OWASP API3: Excessive Data Exposure).`,
         });
+      } else if ((identityA.ids.size + identityA.owners.size) < 5) {
+        // STARVATION GUARD: "no sensitive fields found" is only meaningful if
+        // the crawl actually surfaced User A's data. One run surfaced 150
+        // records, a re-run of the same app surfaced 1 and then reported SAFE —
+        // a pass by under-testing, not by being clean. Too little authenticated
+        // data captured → INCONCLUSIVE, not SAFE.
+        results.push({ type: 'data_exposure', level: 7, verdict: 'INCONCLUSIVE', severity: 'none', note: `Only ${identityA.ids.size + identityA.owners.size} record field(s) surfaced from User A's session — too little authenticated data captured to judge excessive exposure. NOT tested (re-run; a thin crawl is not a clean result).` });
       } else {
-        results.push({ type: 'data_exposure', level: 7, verdict: 'SAFE', severity: 'none', note: `No credential/secret/PII fields found in ${capturedResponses.size} captured API response(s).` });
+        results.push({ type: 'data_exposure', level: 7, verdict: 'SAFE', severity: 'none', note: `No credential/secret/PII fields found in ${capturedResponses.size} captured API response(s) (${identityA.ids.size + identityA.owners.size} record field(s) examined).` });
       }
     } catch (e) {
       results.push({ type: 'data_exposure', level: 7, verdict: 'INCONCLUSIVE', severity: 'none', note: `Could not run data-exposure check: ${e.message}` });
@@ -14828,6 +14854,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
       writesSkippedReadOnly: replayWritesSkipped,
       untestedByCap,
       noAuthTested: [...noAuthByKey.values()].filter(v => v.reached).length,
+      recordsSurfacedA: identityA.ids.size + identityA.owners.size,
       exclusiveRecordIdsA: exclusiveIdsA.length,
       exclusiveOwnersA: exclusiveOwnersA.length,
       loginVerified: { userA: authOkA, userB: authOkB },
