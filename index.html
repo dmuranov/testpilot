@@ -2234,6 +2234,7 @@ let state = {
   secLoading: false,
   secUiLoading: false,
   secDeepLoading: false,
+  secCoverage: null,
   secPhase: 'setup',     // setup | matrix | running | results
   secStream: [],
 
@@ -4221,8 +4222,9 @@ function renderSecMatrix() {
   return `
     <div class="page-header">
       <div>
-        <h2>Security Scan Results</h2>
+        <h2>Security Scan Results <span style="font-size:10px;font-weight:600;vertical-align:middle;padding:2px 7px;border-radius:3px;background:#fef3c7;color:#92400e;letter-spacing:.3px" title="Some checks may be incomplete. A 'Safe' row means the app was reached and refused; 'Not Conclusive' means it could not be tested.">BETA — some checks may be incomplete</span></h2>
         <div style="font-size:12px;color:var(--text-muted);margin-top:2px">${escapeHtml(state.secConfig.userA.name)} vs ${escapeHtml(state.secConfig.userB.name)} — ${headerStatus}</div>
+        ${state.secCoverage ? `<div style="font-size:12px;margin-top:4px;color:${state.secCoverage.dataEndpointsCaptured > 0 && state.secCoverage.crossAccountTested < Math.ceil(state.secCoverage.dataEndpointsCaptured / 2) ? 'var(--red)' : 'var(--text-muted)'}">Cross-account coverage: <strong>${state.secCoverage.crossAccountTested} of ${state.secCoverage.dataEndpointsCaptured}</strong> data endpoints got a real verdict</div>` : ''}
       </div>
       <div style="display:flex;gap:8px">
         <button class="btn btn-primary" onclick="secRunScan()" ${state.secDeepLoading ? 'disabled' : ''}>
@@ -4255,7 +4257,7 @@ function renderSecMatrix() {
       ${notConclusiveCount > 0 ? `
       <div class="stat-card" title="Checks that could not be completed — neither passed nor failed. Not counted as safe.">
         <div class="stat-value" style="color:var(--text-muted)">${notConclusiveCount}</div>
-        <div class="stat-label">Not Conclusive</div>
+        <div class="stat-label">Could Not Test</div>
       </div>` : ''}
     </div>` : ''}
 
@@ -6051,6 +6053,7 @@ async function secDeepScan() {
   if (!isFree && (!cfg.userB.email && !cfg.userB.sessionState)) { tpToast('Provide User B too (email+password or a captured session)'); return; }
 
   state.secDeepLoading = true;
+  state.secCoverage = null;
   state.secStream = [{ type: 'info', message: '🔬 Starting Deep Security Scan (API Interception + IDOR)...' }];
   render();
 
@@ -6097,7 +6100,19 @@ async function secDeepScan() {
     const data = await res.json();
 
     state.secStream.push({ type: 'info', message: `📡 Captured ${data.capturedApiCalls} API calls from User A's session` });
-    state.secStream.push({ type: 'info', message: `🔄 Tested ${data.uniqueApisTested} unique APIs + ${data.idorUrlsTested} IDOR URLs + ${data.writeTestsRun || 0} mutation tests` });
+    state.secStream.push({ type: 'info', message: `🔄 Replayed ${data.uniqueApisTested} unique APIs + ${data.idorUrlsTested} record reads + ${data.writeTestsRun || 0} mutation tests` });
+    // Coverage is the headline number: how many data endpoints actually got a
+    // cross-account verdict. Zero means the isolation checks tested nothing.
+    if (data.coverage) {
+      state.secCoverage = data.coverage;
+      const c = data.coverage;
+      const low = c.dataEndpointsCaptured > 0 && c.crossAccountTested < Math.ceil(c.dataEndpointsCaptured / 2);
+      state.secStream.push({
+        type: low ? 'fail' : 'pass',
+        message: `🎯 Coverage: ${c.crossAccountTested} of ${c.dataEndpointsCaptured} data endpoints got a real cross-account verdict (${c.crossAccountSafe} defended, ${c.crossAccountVulnerable} leaked, ${c.crossAccountInconclusive} could not be tested${c.writesSkippedReadOnly ? `, ${c.writesSkippedReadOnly} writes skipped in read-only` : ''}${c.untestedByCap ? `, ${c.untestedByCap} beyond the cap` : ''})${low ? ' — LOW: treat the isolation checks as largely untested' : ''}`,
+      });
+      if (!c.loginVerified.userA || !c.loginVerified.userB) state.secStream.push({ type: 'fail', message: `⚠ Login not verified for ${!c.loginVerified.userA ? 'User A' : 'User B'} — cross-account checks were not run.` });
+    }
     render();
 
     // Show level-by-level summary
@@ -6122,13 +6137,17 @@ async function secDeepScan() {
       let msg = '';
       switch (r.type) {
         case 'api_replay':
-          msg = `L1 API Replay [${r.method}] ${r.url.substring(0, 70)} → ${r.status} ${r.verdict}${sevLabel}${r.containsUserAData ? ' ⚡ Contains User A data!' : ''}`;
+          msg = r.url
+            ? `L1 API Replay [${r.method}] ${r.url.substring(0, 70)} → ${r.status ?? '—'} ${r.verdict}${sevLabel}${r.containsUserAData ? ' ⚡ Contains User A records!' : ''}`
+            : `L1 API Replay: ${r.note}`;
           break;
         case 'api_replay_skipped':
           msg = `L1 API Replay: ${r.note}`;
           break;
         case 'idor_direct':
-          msg = `L2 IDOR ${r.url.substring(0, 70)} → ${r.blocked ? 'BLOCKED' : 'ACCESSIBLE'}${sevLabel}${r.showsUserAData ? ' ⚡ Shows User A data!' : ''}`;
+          msg = r.url
+            ? `L2 IDOR [${r.method || 'GET'}] ${r.url.substring(0, 70)} → ${r.status ?? '—'} ${r.verdict}${sevLabel}${r.showsUserAData ? ' ⚡ Returns User A records!' : ''}`
+            : `L2 IDOR: ${r.note}`;
           break;
         case 'token_swap':
           msg = `L3 Token Swap: ${r.note}${sevLabel} (${r.cookiesInjected} cookies, ${r.localStorageKeysInjected} tokens injected)`;
@@ -6347,7 +6366,10 @@ function downloadSecReport() {
   const suspicious = state.secResults.filter(r => r.result === 'suspicious');
   const safe = state.secResults.filter(r => r.result === 'safe');
   const inconclusive = state.secResults.filter(r => r.result === 'inconclusive');
+  const skipped = state.secResults.filter(r => r.result === 'skipped');
   const unknown = state.secResults.filter(r => r.result === 'unknown');
+  const cov = state.secCoverage;
+  const lowCoverage = !!cov && cov.dataEndpointsCaptured > 0 && cov.crossAccountTested < Math.ceil(cov.dataEndpointsCaptured / 2);
   const scanDate = new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'long', year: 'numeric' });
   const totalTests = state.secResults.length;
   const executed = safe.length + vulns.length + suspicious.length;
@@ -6371,8 +6393,8 @@ function downloadSecReport() {
     const medCount = vulns.length - critCount - highCount;
     if (medCount > 0) breakdown.push(`${medCount} medium/low`);
     summaryEnd = `<strong>${vulns.length} ${vulns.length === 1 ? 'vulnerability was' : 'vulnerabilities were'} identified${breakdown.length ? ` (${breakdown.join(', ')})` : ''}.</strong>${suspicious.length > 0 ? ` ${suspicious.length} additional suspicious findings need manual verification.` : ''}`;
-  } else if (inconclusive.length + unknown.length > totalTests / 3) {
-    summaryEnd = `<strong style="color:#92400e">${executed} of ${totalTests} tests produced a usable verdict (${safe.length} safe, ${vulns.length} vulnerable, ${suspicious.length} suspicious). ${inconclusive.length + unknown.length} did not — see details below.</strong>`;
+  } else if (lowCoverage || inconclusive.length + unknown.length > totalTests / 3) {
+    summaryEnd = `<strong style="color:#92400e">${executed} of ${totalTests} tests produced a usable verdict (${safe.length} safe, ${vulns.length} vulnerable, ${suspicious.length} suspicious). ${inconclusive.length + unknown.length} could not be tested${lowCoverage ? `, and only ${cov.crossAccountTested} of ${cov.dataEndpointsCaptured} data endpoints received a cross-account verdict` : ''} — this is NOT an all-clear; see details below.</strong>`;
   } else {
     summaryEnd = `<strong>${safe.length} of ${totalTests} tests passed cleanly. No vulnerabilities identified.</strong>${suspicious.length > 0 ? ` ${suspicious.length} suspicious findings flagged for manual verification.` : ''}`;
   }
@@ -6389,6 +6411,9 @@ function downloadSecReport() {
   } else if (suspicious.length > 0) {
     headlineColor = '#d97706';
     headlineText = suspicious.length + ' SUSPICIOUS';
+  } else if (lowCoverage) {
+    headlineColor = '#92400e';
+    headlineText = `NO ISSUES FOUND — LOW COVERAGE (${cov.crossAccountTested}/${cov.dataEndpointsCaptured} ENDPOINTS TESTED)`;
   } else if (unverifiedCount > 0) {
     headlineColor = '#92400e';
     headlineText = `NO ISSUES FOUND — ${unverifiedCount} CHECK${unverifiedCount === 1 ? '' : 'S'} UNVERIFIED`;
@@ -6444,7 +6469,16 @@ function downloadSecReport() {
   const passedHtml = safe.map(r => {
     const test = state.secTests.find(t => t.id === r.id);
     const label = test?.name || r.reason || 'Safe';
-    return `<div class="pass-item">✓ ${escapeHtml(label.substring(0, 100))}</div>`;
+    return `<div class="pass-item">✓ Passed — ${escapeHtml(label.substring(0, 100))}</div>`;
+  }).join('');
+  // Every check the scan could NOT run is listed by name with its reason, so a
+  // reader can never mistake an untested endpoint for a passed one.
+  const notTested = [...inconclusive, ...skipped, ...unknown];
+  const notTestedHtml = notTested.map(r => {
+    const test = state.secTests.find(t => t.id === r.id);
+    const label = test?.name || r.reason || r.detailType || 'Check';
+    const where = r.detailUrl ? `<span style="font-family:monospace;color:#888">${escapeHtml((r.detailMethod || '') + ' ' + r.detailUrl.substring(0, 60))}</span> — ` : '';
+    return `<div class="pass-item" style="background:#fffbeb;color:#78350f">❔ Could not test — ${where}${escapeHtml(label.substring(0, 160))}</div>`;
   }).join('');
 
   // Stream log HTML
@@ -6505,7 +6539,7 @@ function downloadSecReport() {
 <div class="header">
   <div>
     <div class="logo">Test<span>Pilot</span></div>
-    <div style="font-size:12px;color:#666;margin-top:4px">Security Scan Report</div>
+    <div style="font-size:12px;color:#666;margin-top:4px">Security Scan Report <span style="font-size:10px;font-weight:700;padding:2px 6px;border-radius:3px;background:#fef3c7;color:#92400e;margin-left:6px">BETA — some checks may be incomplete</span></div>
   </div>
   <div style="text-align:right">
     <div style="font-size:13px;color:#666">${scanDate}</div>
@@ -6527,11 +6561,19 @@ function downloadSecReport() {
   <div class="stat green"><div class="stat-num">${safe.length}</div><div class="stat-label">Safe</div></div>
   <div class="stat red"><div class="stat-num">${vulns.length}</div><div class="stat-label">Vulnerable</div></div>
   ${suspicious.length > 0 ? `<div class="stat neutral" style="border-color:#fdba74;background:#fff7ed"><div class="stat-num" style="color:#c2410c">${suspicious.length}</div><div class="stat-label">Suspicious</div></div>` : ''}
-  ${(inconclusive.length + unknown.length) > 0 ? `<div class="stat neutral" style="border-color:#fcd34d;background:#fffbeb"><div class="stat-num" style="color:#92400e">${inconclusive.length + unknown.length}</div><div class="stat-label">Did Not Run</div></div>` : ''}
-</div>${(inconclusive.length + unknown.length) > 0 ? `
+  ${notTested.length > 0 ? `<div class="stat neutral" style="border-color:#fcd34d;background:#fffbeb"><div class="stat-num" style="color:#92400e">${notTested.length}</div><div class="stat-label">Could Not Test</div></div>` : ''}
+  ${cov ? `<div class="stat neutral" style="border-color:${lowCoverage ? '#fca5a5' : '#e5e5e5'};background:${lowCoverage ? '#fff5f5' : '#fff'}"><div class="stat-num" style="color:${lowCoverage ? '#dc2626' : '#374151'}">${cov.crossAccountTested}/${cov.dataEndpointsCaptured}</div><div class="stat-label">Endpoints With Cross-Account Verdict</div></div>` : ''}
+</div>${lowCoverage ? `
+<div style="background:#fff5f5;border-left:4px solid #dc2626;padding:12px 16px;margin:-12px 0 16px;font-size:12px;color:#7f1d1d;line-height:1.5">
+  <strong>⚠ Low coverage: only ${cov.crossAccountTested} of ${cov.dataEndpointsCaptured} captured data endpoints received a cross-account verdict.</strong>
+  ${cov.writesSkippedReadOnly ? `${cov.writesSkippedReadOnly} write call(s) were skipped in read-only mode.` : ''}
+  ${cov.untestedByCap ? `${cov.untestedByCap} endpoint(s) were beyond the per-scan cap.` : ''}
+  ${(!cov.loginVerified.userA || !cov.loginVerified.userB) ? `Login could not be verified for ${!cov.loginVerified.userA ? 'User A' : 'User B'}, so the isolation checks did not run.` : ''}
+  The isolation checks are largely untested — do not read "no vulnerabilities" as an all-clear.
+</div>` : ''}${notTested.length > 0 ? `
 <div style="background:#fffbeb;border-left:4px solid #f59e0b;padding:12px 16px;margin:-12px 0 24px;font-size:12px;color:#78350f;line-height:1.5">
-  <strong>⚠ ${inconclusive.length + unknown.length} of ${totalTests} tests did not produce a verdict.</strong>
-  ${inconclusive.length > 0 ? `${inconclusive.length} were <strong>inconclusive</strong> (test agent refused to execute the probe; re-run after upgrading to Security Mode).` : ''}
+  <strong>⚠ ${notTested.length} of ${totalTests} checks could not be tested.</strong>
+  Each one is listed in "Could Not Test" below with the reason (request never reached the app, login unverified, skipped in read-only mode, nothing to compare).
   ${unknown.length > 0 ? ` ${unknown.length} had <strong>verdict-call failures</strong> (judge timed out or returned malformed output).` : ''}
   Treat these as untested, not as passing.
 </div>` : ''}
@@ -6549,7 +6591,12 @@ ${suspiciousHtml}
 ` : ''}
 
 <h2>Tests Passed (${safe.length} of ${totalTests})</h2>
+<p style="font-size:12px;color:#666;margin-bottom:10px">"Passed" means the request reached the app and the app refused it or returned none of the other user's records. Checks the scan could not complete are listed separately below — they are not passes.</p>
 <div class="pass-grid">${passedHtml}</div>
+${notTested.length > 0 ? `
+<h2>Could Not Test (${notTested.length} of ${totalTests})</h2>
+<div class="pass-grid" style="grid-template-columns:1fr">${notTestedHtml}</div>
+` : ''}
 
 <h2>Full Scan Log</h2>
 <div class="log-section">${logHtml}</div>

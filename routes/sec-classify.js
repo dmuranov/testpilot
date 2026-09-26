@@ -8,6 +8,8 @@
 // Each function is lifted verbatim from the corresponding server.js site; if
 // you change behavior here, update the test.
 
+import { createHash } from 'crypto';
+
 // ── SCOPE CAP (count enforcement) ──────────────────────────────
 // Parse a cap ONLY from explicit limit phrasing. Returns the integer cap or
 // null. Must NOT match "at least N" or benign prose ("only 5 tickets visible").
@@ -79,7 +81,21 @@ export function classifyCommit({ action, outcome, status }) {
 }
 
 // ── SECURITY: public-path + auth-endpoint heuristics ───────────
-export function isPublicPath(url) { return /\/public\//i.test(String(url || '')); }
+// "public" must be a whole PATH SEGMENT (/api/public/…, /public/config). A
+// route that merely contains the word (/publications, ?tab=public) gets no
+// free pass. The path alone is only a HINT — the scan confirms it by probing
+// the endpoint logged-out (see isConfirmedPublic).
+export function isPublicPath(url) {
+  let path = String(url || '');
+  try { path = new URL(path).pathname; } catch { path = path.split('?')[0]; }
+  return /(?:^|\/)public(?:\/|$)/i.test(path);
+}
+
+// Public-by-design only when the path says so AND the unauthenticated probe
+// actually got data back. A "/public/" path that 401s logged-out is NOT public.
+export function isConfirmedPublic(url, noAuthProbe) {
+  return isPublicPath(url) && !!noAuthProbe && noAuthProbe.status === 200 && !!noAuthProbe.hasData;
+}
 
 // Replaying a captured auth/login/token request re-sends the original user's
 // credentials, so a response containing that user's data is EXPECTED, not a
@@ -103,22 +119,245 @@ export function corsVerdict({ acao, acac, evilOrigin }) {
 // ── SECURITY: no-auth verdict ──────────────────────────────────
 // data without auth on a non-/public/ path = VULNERABLE/high. On /public/ =
 // low hygiene — UNLESS it leaks User A's private data, then critical regardless.
-export function noAuthVerdict({ hasData, isPublic, leaksPrivateData }) {
-  if (!hasData) return { verdict: 'SAFE', severity: 'none' };
-  if (leaksPrivateData) return { verdict: 'VULNERABLE', severity: 'critical' };
-  if (!isPublic) return { verdict: 'VULNERABLE', severity: 'high' };
-  return { verdict: 'SUSPICIOUS', severity: 'low' };
+// No data is SAFE only when the app actually answered with a refusal (401/403,
+// a 404 for a resource User A could read, or an empty 2xx). A request that never
+// arrived, a server error or a malformed-request 4xx tested nothing.
+export function noAuthVerdict({ hasData, isPublic, leaksPrivateData, reached = true, status = 200, aStatus }) {
+  if (!reached) return { verdict: 'INCONCLUSIVE', severity: 'none', kind: 'unreachable' };
+  if (hasData) {
+    if (leaksPrivateData) return { verdict: 'VULNERABLE', severity: 'critical', kind: 'leak' };
+    if (!isPublic) return { verdict: 'VULNERABLE', severity: 'high', kind: 'open' };
+    return { verdict: 'SUSPICIOUS', severity: 'low', kind: 'public' };
+  }
+  if (status === 401 || status === 403) return { verdict: 'SAFE', severity: 'none', kind: 'refused' };
+  if ((status === 404 || status === 410) && aStatus === 200) return { verdict: 'SAFE', severity: 'none', kind: 'refused' };
+  if (status >= 200 && status < 300) return { verdict: 'SAFE', severity: 'none', kind: 'empty' };
+  return { verdict: 'INCONCLUSIVE', severity: 'none', kind: status >= 500 ? 'server-error' : 'rejected' };
+}
+
+// ── SECURITY: request identity ─────────────────────────────────
+// Exact key for one captured call. RPC/GraphQL/tRPC apps POST different bodies
+// to the SAME url (listEntity Job vs listEntity Invoice), so a url-only map
+// overwrote earlier responses and the A/B comparison compared the wrong pair.
+export function requestKey({ method, url, postData }) {
+  const m = String(method || 'GET').toUpperCase();
+  const body = postData ? ` #${createHash('sha1').update(String(postData)).digest('hex').slice(0, 12)}` : '';
+  return `${m} ${String(url || '')}${body}`;
+}
+
+const VOLATILE_QUERY = /^(_|t|ts|timestamp|nonce|cb|cache|rand|r|_t|__t)$/i;
+const ID_TOKEN = /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{8,}|\d{2,}|[A-Za-z0-9_-]{20,})$/i;
+function normalizeIdsInText(s) {
+  return String(s || '')
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, 'ID')
+    .replace(/\b[0-9a-f]{16,}\b/gi, 'ID')
+    .replace(/\b\d{3,}\b/g, 'ID');
+}
+// Dedupe key: same endpoint SHAPE. Hex / numeric / uuid path segments collapse to
+// :id, volatile cache-buster params are dropped, id-like param values collapse
+// to *, and the body is hashed with its ids normalized — so /jobs/1 and /jobs/2
+// dedupe, but listEntity{Job} and listEntity{Invoice} stay separate endpoints.
+export function endpointKey({ method, url, postData }) {
+  const m = String(method || 'GET').toUpperCase();
+  let u;
+  try { u = new URL(String(url || '')); } catch { return `${m} ${normalizeIdsInText(url)}`; }
+  const path = u.pathname.split('/').map(seg => (seg && ID_TOKEN.test(seg) ? ':id' : seg)).join('/');
+  const params = [];
+  for (const [k, v] of u.searchParams) {
+    if (VOLATILE_QUERY.test(k)) continue;
+    params.push(`${k}=${ID_TOKEN.test(v) ? '*' : v}`);
+  }
+  params.sort();
+  const q = params.length ? `?${params.join('&')}` : '';
+  const body = postData ? ` #${createHash('sha1').update(normalizeIdsInText(postData)).digest('hex').slice(0, 12)}` : '';
+  return `${m} ${u.origin}${path}${q}${body}`;
+}
+
+// ── SECURITY: read vs write classification ─────────────────────
+// Read-only mode may replay a call as User B ONLY if it is side-effect-free.
+// GET/HEAD always are. Base44 / GraphQL / tRPC apps fetch data with POST, so a
+// POST is a read when its path verb or body says so; an AMBIGUOUS POST (a REST
+// create, an unknown RPC) is treated as a write and never replayed read-only.
+const READ_TOKENS = new Set(['list', 'get', 'fetch', 'search', 'find', 'load', 'read', 'view', 'show', 'count', 'query', 'stats', 'summary', 'describe', 'lookup', 'me', 'context', 'whoami', 'profile', 'settings', 'config', 'history', 'export', 'preview', 'check', 'exists', 'filter', 'paginate', 'options', 'metadata', 'status', 'health', 'version']);
+const WRITE_TOKENS = new Set(['create', 'update', 'delete', 'remove', 'save', 'set', 'upsert', 'insert', 'send', 'submit', 'post', 'put', 'patch', 'write', 'mutate', 'add', 'assign', 'invoke', 'run', 'execute', 'trigger', 'start', 'stop', 'cancel', 'approve', 'reject', 'publish', 'upload', 'import', 'sync', 'reset', 'register', 'login', 'signup', 'logout', 'invite', 'mark', 'toggle', 'archive', 'restore', 'generate', 'process', 'bulk', 'batch', 'edit', 'change', 'move', 'copy', 'duplicate', 'complete', 'finish', 'pay', 'charge', 'refund', 'notify', 'email', 'clear', 'purge', 'destroy', 'increment', 'decrement', 'join', 'leave', 'accept', 'decline', 'confirm', 'verify', 'resend', 'refresh', 'revoke', 'rotate', 'grant', 'transfer']);
+function pathTokens(url) {
+  let path = String(url || '');
+  try { path = new URL(path).pathname; } catch { path = path.split('?')[0]; }
+  return path.split('/').filter(Boolean)
+    .flatMap(seg => seg.replace(/([a-z0-9])([A-Z])/g, '$1 $2').split(/[\s_\-.]+/))
+    .map(t => t.toLowerCase()).filter(Boolean);
+}
+export function isReadRequest({ method, url, postData }) {
+  const m = String(method || 'GET').toUpperCase();
+  if (m === 'GET' || m === 'HEAD' || m === 'OPTIONS') return true;
+  if (m !== 'POST') return false;
+  const tokens = pathTokens(url);
+  if (tokens.some(t => WRITE_TOKENS.has(t))) return false;
+  if (tokens.some(t => READ_TOKENS.has(t))) return true;
+  const body = String(postData || '');
+  if (/"query"\s*:\s*"\s*(query\b|\{)/i.test(body) && !/"query"\s*:\s*"\s*mutation\b/i.test(body)) return true; // GraphQL query
+  if (/"(operation|action|op|type|method)"\s*:\s*"(list|get|read|search|find|fetch|query|count)"/i.test(body)) return true;
+  return false;
+}
+
+// ── SECURITY: record identity extraction ───────────────────────
+// A cross-account leak is decided by OWNERSHIP, not by whether User A's email
+// happens to appear in the body: most leaked records (a job card, an invoice)
+// never repeat their owner's email. We collect the record ids and the
+// owner-field values in a JSON body; the scan then compares User A's set with
+// what User B's replay returned.
+const ID_KEY = /^(id|_id|uuid|pk|record_id|recordId|objectId|object_id)$/i;
+const REF_KEY = /(?:[a-z_]_id|[a-z]Id|[a-z_]ID|_uuid|[a-z]Uuid)$/;
+const OWNER_KEY = /^(created_by|createdBy|created_by_id|createdById|owner|owner_id|ownerId|user_id|userId|author|author_id|authorId|org_id|orgId|organization_id|organizationId|tenant_id|tenantId|account_id|accountId|company_id|companyId|customer_id|customerId|assigned_to|assignedTo|email|user_email|userEmail)$/i;
+// Small integers and short strings under a reference key (status_id: 1,
+// type_id: "A") are enums, not records — they would collide across tenants.
+function identityValue(v, { primary = true, minLen = 3 } = {}) {
+  if (typeof v === 'number' && Number.isFinite(v)) return (primary || v >= 100) ? String(v) : null;
+  if (typeof v === 'string') { const s = v.trim(); return s.length >= minLen && s.length <= 200 ? s : null; }
+  return null;
+}
+export function extractRecordIdentity(body) {
+  const ids = new Set(), owners = new Set();
+  let root;
+  try { root = typeof body === 'string' ? JSON.parse(body) : body; } catch { return { ids: [], owners: [] }; }
+  let visited = 0;
+  const walk = (node, depth) => {
+    if (!node || typeof node !== 'object' || depth > 10 || visited++ > 5000) return;
+    if (Array.isArray(node)) { for (const x of node) walk(x, depth + 1); return; }
+    for (const [k, v] of Object.entries(node)) {
+      if (OWNER_KEY.test(k)) { const val = identityValue(v); if (val !== null) owners.add(val); }
+      else if (ID_KEY.test(k)) { const val = identityValue(v); if (val !== null) ids.add(val); }
+      else if (REF_KEY.test(k)) { const val = identityValue(v, { primary: false, minLen: 6 }); if (val !== null) ids.add(val); }
+      if (v && typeof v === 'object') walk(v, depth + 1);
+    }
+  };
+  walk(root, 0);
+  return { ids: [...ids], owners: [...owners] };
+}
+
+// Does a JSON body carry a record id (a POST-style record read: getEntity
+// {"id":…}, {"job_id":…})? Used to pick IDOR candidates on RPC apps.
+export function hasRecordIdInBody(postData) {
+  return extractRecordIdentity(postData).ids.some(v => /^(?:[0-9a-f-]{8,}|\d+)$/i.test(v));
+}
+
+// Which of User A's EXCLUSIVE identifiers (never seen in User B's own session,
+// never returned unauthenticated) appear in a body User B received.
+export function findLeakedIdentity({ body, exclusiveIds = [], exclusiveOwners = [], markers = [] }) {
+  const text = String(body || '');
+  const lower = text.toLowerCase();
+  const own = new Set(extractRecordIdentity(text).ids);
+  const ownOwners = new Set(extractRecordIdentity(text).owners);
+  const idMatches = exclusiveIds.filter(id => own.has(id));
+  const ownerMatches = exclusiveOwners.filter(o => ownOwners.has(o));
+  const markerMatches = markers.filter(m => lower.includes(String(m).toLowerCase()));
+  return { idMatches, ownerMatches, markerMatches };
 }
 
 // ── SECURITY: cross-tenant (API replay) verdict ────────────────
-// Confirmed leak (User B's response contains User A's private data) always wins.
-// /public/ endpoints: identical/non-empty across users is expected → SAFE.
-// Unconfirmed match on a non-public endpoint → SUSPICIOUS (never a HIGH "likely").
-export function crossTenantVerdict({ gotUserAData, isPublic, responsesMatch, hasRealData }) {
-  if (gotUserAData) return { verdict: 'VULNERABLE', severity: 'critical' };
-  if (!isPublic && responsesMatch && hasRealData) return { verdict: 'SUSPICIOUS', severity: 'medium' };
-  if (!isPublic && hasRealData) return { verdict: 'SUSPICIOUS', severity: 'medium' };
-  return { verdict: 'SAFE', severity: 'none' };
+// The single rule: SAFE only when the request genuinely REACHED the app and the
+// app genuinely REFUSED (or returned none of User A's records). Anything the
+// scan could not judge is INCONCLUSIVE — never SAFE.
+//   reached        — a response actually arrived (status > 0; not CORS/network)
+//   status         — HTTP status of User B's replay
+//   aStatus        — HTTP status User A's own session got for the same call
+//   hasRealData    — 2xx with a non-empty, non-HTML body
+//   comparable     — User A's response held identifiable records to compare
+//   ownerMatches / idMatches / markerMatches — from findLeakedIdentity
+//   isPublic       — path says public AND the logged-out probe confirmed it
+//   responsesMatch — A's and B's bodies are byte-identical
+export function crossTenantVerdict({ reached, status, aStatus, hasRealData, comparable, ownerMatches = [], idMatches = [], markerMatches = [], isPublic, responsesMatch }) {
+  if (!reached) return { verdict: 'INCONCLUSIVE', severity: 'none', kind: 'unreachable' };
+  if (ownerMatches.length || markerMatches.length) return { verdict: 'VULNERABLE', severity: 'critical', kind: 'owner' };
+  if (idMatches.length) return { verdict: 'VULNERABLE', severity: 'high', kind: 'record-id' };
+  if (status >= 500) return { verdict: 'INCONCLUSIVE', severity: 'none', kind: 'server-error' };
+  if (status === 401 || status === 403) return { verdict: 'SAFE', severity: 'none', kind: 'refused' };
+  if (status === 404 || status === 410) {
+    return aStatus === 200 ? { verdict: 'SAFE', severity: 'none', kind: 'refused' } : { verdict: 'INCONCLUSIVE', severity: 'none', kind: 'not-found' };
+  }
+  if (status >= 400) return { verdict: 'INCONCLUSIVE', severity: 'none', kind: 'rejected' };
+  if (isPublic) return { verdict: 'SAFE', severity: 'none', kind: 'public' };
+  if (!hasRealData) {
+    return comparable ? { verdict: 'SAFE', severity: 'none', kind: 'isolated-empty' } : { verdict: 'INCONCLUSIVE', severity: 'none', kind: 'nothing-to-compare' };
+  }
+  if (comparable) return { verdict: 'SAFE', severity: 'none', kind: 'isolated' };
+  if (responsesMatch) return { verdict: 'SUSPICIOUS', severity: 'medium', kind: 'identical' };
+  return { verdict: 'INCONCLUSIVE', severity: 'none', kind: 'no-baseline' };
+}
+
+// ── SECURITY: replay prioritisation ────────────────────────────
+// Only the first N unique endpoints get replayed; put the ones that can
+// actually leak first: authenticated data reads whose User A response held
+// records. Auth/login endpoints go last (they are excluded anyway).
+export function prioritizeEndpoints(list) {
+  const score = e => (e.aHasRecords ? 4 : 0) + (e.authed ? 3 : 0) + (e.isRead ? 2 : 0) + (e.aStatus === 200 ? 1 : 0) - (e.isAuthEndpoint ? 10 : 0);
+  return [...list].map((e, i) => ({ e, i, s: score(e) })).sort((a, b) => b.s - a.s || a.i - b.i).map(x => x.e);
+}
+
+// ── SECURITY: login rate-limit probe body ──────────────────────
+// The probe must never touch the customer's REAL test account: a login endpoint
+// that locks accounts would lock User A. Swap every identity field for a
+// fabricated address and every password for garbage. If no identity field can
+// be found the probe is not safe to send — return ok:false and skip.
+const IDENTITY_KEY = /^(email|e-?mail|username|user_?name|user|login|identifier|account|handle|phone)$/i;
+export function fabricateLoginBody(postData, probeEmail) {
+  const raw = String(postData || '');
+  const probe = probeEmail || `tp-probe-${Math.random().toString(36).slice(2, 10)}@example.com`;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      let swapped = false;
+      const walk = (o) => {
+        for (const k of Object.keys(o)) {
+          if (o[k] && typeof o[k] === 'object') { walk(o[k]); continue; }
+          if (IDENTITY_KEY.test(k)) { o[k] = probe; swapped = true; }
+          else if (/pass/i.test(k)) o[k] = 'WRONGPASS-' + Math.random().toString(36).slice(2);
+        }
+      };
+      walk(parsed);
+      return swapped ? { ok: true, body: JSON.stringify(parsed), probeEmail: probe } : { ok: false, reason: 'no identity field in login body' };
+    }
+  } catch {}
+  if (/^[^=&\s]+=[^&]*(&[^=&\s]+=[^&]*)*$/.test(raw)) {
+    const p = new URLSearchParams(raw);
+    let swapped = false;
+    for (const k of [...p.keys()]) {
+      if (IDENTITY_KEY.test(k)) { p.set(k, probe); swapped = true; }
+      else if (/pass/i.test(k)) p.set(k, 'WRONGPASS-' + Math.random().toString(36).slice(2));
+    }
+    return swapped ? { ok: true, body: p.toString(), probeEmail: probe } : { ok: false, reason: 'no identity field in login body' };
+  }
+  return { ok: false, reason: 'login body is not JSON or form-encoded' };
+}
+
+// ── SECURITY: IDOR candidate detection ─────────────────────────
+// URLs that name a specific record. REST paths (/users/12345), hex/uuid
+// segments, ?id= style params, numeric segments.
+const ID_BEARING_PATTERNS = [
+  /[?&]id=/i,
+  /[?&](user|order|account|record|item|doc|invoice|client|job|ticket|post)Id=/i,
+  /\/[a-f0-9]{8,}(?:\/|$|\?)/i,
+  /\/(users|orders|accounts|records|items|docs|invoices|clients|jobs|tickets|posts|profile|account)\/[^\/?]+/i,
+  /\/\d{3,}(?:\/|$|\?)/,
+];
+export function isIdBearingUrl(url) { return ID_BEARING_PATTERNS.some(p => p.test(String(url || ''))); }
+export function isIdorCandidate({ method, url, postData }) {
+  if (!isReadRequest({ method, url, postData })) return false;
+  if (isAuthReplayEndpoint(url, postData)) return false;
+  const m = String(method || 'GET').toUpperCase();
+  if (m === 'GET' || m === 'HEAD') return isIdBearingUrl(url);
+  return isIdBearingUrl(url) || hasRecordIdInBody(postData);
+}
+
+// Is a 2xx body real data (not an empty collection / HTML shell)?
+export function bodyHasData(status, body) {
+  const t = String(body || '');
+  if (status < 200 || status >= 300) return false;
+  if (t.length <= 20) return false;
+  if (/<!doctype|<html/i.test(t.slice(0, 200))) return false;
+  if (/^\s*(\[\s*\]|\{\s*\}|null)\s*$/.test(t)) return false;
+  if (/^\s*\{\s*"(data|results|items|rows|records|result)"\s*:\s*(\[\s*\]|null|\{\s*\})\s*\}\s*$/.test(t)) return false;
+  return true;
 }
 
 // ── SECURITY: WSTG IDs + trustworthiness stamping ──────────────
@@ -206,7 +445,7 @@ export function stampFinding(r) {
   let trust = meta ? meta.trust : '★★★★☆';
   if (r.verdict === 'SUSPICIOUS' || r.verdict === 'INCONCLUSIVE' || r.verdict === 'POTENTIAL_VULNERABILITY') trust = '★★★☆☆';
   r.trust = trust;
-  if (trust === '★★★☆☆' && r.note && !/manual|confirm|indicative|verify/i.test(r.note)) {
+  if (trust === '★★★☆☆' && r.note && !/manual|confirm|indicative|verify|not tested|not run/i.test(r.note)) {
     r.note += ' [INDICATIVE — not auto-confirmed; manual verification needed before treating as a real finding].';
   }
   return r;
