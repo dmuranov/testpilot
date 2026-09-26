@@ -13532,7 +13532,8 @@ app.post('/api/security/api-intercept', async (req, res) => {
     try {
       const sb = extractSupabaseConfig(bundleTexts);
       if (!sb) {
-        results.push({ type: 'rls_exposure', level: 11, verdict: 'SAFE', severity: 'none', note: 'No Supabase project detected in the client bundle — anon-key/RLS probe not applicable.' });
+        // Not applicable is neutral — it must not count as a passed check.
+        results.push({ type: 'rls_exposure', level: 11, verdict: 'SKIPPED', severity: 'none', note: 'No Supabase project detected in the client bundle — anon-key/RLS probe not applicable.' });
       } else {
         const H = { apikey: sb.anonKey, Authorization: `Bearer ${sb.anonKey}` };
         const sbFetch = async (u, opts = {}) => {
@@ -14620,21 +14621,21 @@ app.post('/api/security/api-intercept', async (req, res) => {
       const nonEssential = preCookies.filter(c => /_ga|_gid|_gat|_fbp|_hj|mixpanel|amplitude|mp_|intercom|hubspot|__stripe|ajs_|_clck|_clsk|tiktok/i.test(c.name));
       await pBrowser.close();
       results.push({
-        type: 'privacy_tracking', level: 6,
+        type: 'privacy_tracking', level: 13,
         verdict: trackerHits.size ? 'VULNERABLE' : 'SAFE', severity: trackerHits.size ? 'medium' : 'none',
         note: trackerHits.size
           ? `${trackerHits.size} third-party tracker(s) loaded BEFORE any consent: ${[...trackerHits].join(', ')}. Under GDPR/ePrivacy, analytics/marketing trackers require prior consent. (Technical observation — not a legal determination.)`
           : `No known third-party trackers fired before consent.`,
       });
       results.push({
-        type: 'privacy_cookie', level: 6,
+        type: 'privacy_cookie', level: 13,
         verdict: nonEssential.length ? 'VULNERABLE' : 'SAFE', severity: nonEssential.length ? 'low' : 'none',
         note: nonEssential.length
           ? `${nonEssential.length} non-essential cookie(s) set before consent: ${nonEssential.map(c => c.name).slice(0, 8).join(', ')}. Setting analytics/marketing cookies pre-consent is a technical non-conformance with GDPR Art.5(3). (Not a legal determination.)`
           : `No non-essential cookies set before consent.`,
       });
     } catch (e) {
-      results.push({ type: 'privacy_tracking', level: 6, verdict: 'INCONCLUSIVE', severity: 'none', note: `Could not run pre-consent privacy check: ${e.message}` });
+      results.push({ type: 'privacy_tracking', level: 13, verdict: 'INCONCLUSIVE', severity: 'none', note: `Could not run pre-consent privacy check: ${e.message}` });
     }
 
     // ── COOKIE SECURITY ATTRIBUTES (TP-SESS-01 / WSTG-v42-SESS-02) ──
@@ -14644,8 +14645,12 @@ app.post('/api/security/api-intercept', async (req, res) => {
     // rather than inventing a finding.)
     try {
       const sessionish = (cookiesA || []).filter(c => /sess|auth|token|sid|jwt|csrf|login|connect/i.test(c.name) && !/stripe|mixpanel|_ga|_gid|hotjar/i.test(c.name));
-      if (sessionish.length === 0) {
-        results.push({ type: 'cookie', level: 2, verdict: 'SAFE', severity: 'none', note: `No classic session cookie found — auth appears to be token-based (localStorage). Cookie-attribute checks N/A.` });
+      if (!authOkA) {
+        // No login → no session cookie can exist; "none found" is not a pass.
+        results.push({ type: 'cookie', level: 12, verdict: 'INCONCLUSIVE', severity: 'none', note: `Cookie-attribute check NOT tested — ${authNoteA}, so no session cookie could be observed.` });
+      } else if (sessionish.length === 0) {
+        // Not applicable is neutral, not SAFE — it must not inflate the safe count.
+        results.push({ type: 'cookie', level: 12, verdict: 'SKIPPED', severity: 'none', note: `No classic session cookie found — auth appears to be token-based (localStorage). Cookie-attribute checks not applicable.` });
       } else {
         for (const c of sessionish) {
           const missing = [];
@@ -14653,7 +14658,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
           if (!c.httpOnly) missing.push('HttpOnly');
           if (!c.sameSite || c.sameSite === 'None') missing.push(`SameSite (is "${c.sameSite || 'unset'}")`);
           results.push({
-            type: 'cookie', level: 2,
+            type: 'cookie', level: 12,
             verdict: missing.length ? 'VULNERABLE' : 'SAFE',
             severity: missing.length ? (missing.includes('HttpOnly') || missing.includes('Secure') ? 'medium' : 'low') : 'none',
             note: missing.length
@@ -14663,7 +14668,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
         }
       }
     } catch (e) {
-      results.push({ type: 'cookie', level: 2, verdict: 'INCONCLUSIVE', severity: 'none', note: `Could not run cookie-attribute check: ${String(e.message || e).slice(0, 120)} — NOT tested` });
+      results.push({ type: 'cookie', level: 12, verdict: 'INCONCLUSIVE', severity: 'none', note: `Could not run cookie-attribute check: ${String(e.message || e).slice(0, 120)} — NOT tested` });
     }
 
     // ── BROKEN RESOURCES (TP-PERF-04 / browser-observed) ──
@@ -14672,11 +14677,11 @@ app.post('/api/security/api-intercept', async (req, res) => {
     if (Array.isArray(brokenResources) && brokenResources.length) {
       const uniq = [...new Map(brokenResources.map(b => [b.url, b])).values()].slice(0, 15);
       results.push({
-        type: 'broken_resource', level: 5, verdict: 'VULNERABLE', severity: 'low',
+        type: 'broken_resource', level: 14, verdict: 'VULNERABLE', severity: 'low',
         note: `${uniq.length} broken page resource(s) (HTTP 4xx) loaded during navigation: ${uniq.map(b => `${b.type} ${b.status} ${b.url}`).slice(0, 6).join(' | ')}${uniq.length > 6 ? ` …+${uniq.length - 6} more` : ''}`,
       });
     } else {
-      results.push({ type: 'broken_resource', level: 5, verdict: 'SAFE', severity: 'none', note: 'No broken (4xx) page resources detected during navigation.' });
+      results.push({ type: 'broken_resource', level: 14, verdict: 'SAFE', severity: 'none', note: 'No broken (4xx) page resources detected during navigation.' });
     }
 
     // ── WSTG-ID + TRUSTWORTHINESS STAMPING (#1, #2) ──
@@ -14690,6 +14695,10 @@ app.post('/api/security/api-intercept', async (req, res) => {
     // Supabase-style entity APIs commonly return every column, so a legitimately
     // authorized user can still exfiltrate secrets the UI never shows.
     try {
+      // This check reads User A's AUTHENTICATED responses. Without a verified
+      // login only pre-login traffic was captured, and "nothing found" in that
+      // is not a pass — it used to report SAFE anyway.
+      if (!authOkA) throw new Error(`${authNoteA}; only pre-login responses were captured — NOT tested`);
       const SENSITIVE = /"(password|passwd|pwd|password_hash|pass_hash|hashed_password|encrypted_password|secret|client_secret|private_key|priv_key|api_key|apikey|access_key|secret_key|aws_secret_access_key|encryption_key|refresh_token|ssn|social_security|tax_id|credit_card|card_number|cardnumber|cvv|cvc|card_cvc|iban|routing_number|bank_account|account_number)"\s*:\s*("(?!\s*"|null|\[REDACTED\])[^"]{2,}"|\d{3,})/gi;
       const exposures = [];
       for (const resp of capturedResponses.values()) {
@@ -14770,6 +14779,9 @@ app.post('/api/security/api-intercept', async (req, res) => {
     try {
       if (ssA) {
         results.push({ type: 'session_fixation', level: 9, verdict: 'INCONCLUSIVE', severity: 'none', note: 'Session fixation not tested — a captured session was supplied (no login observed). Re-scan with email+password to test.' });
+      } else if (!authOkA) {
+        // "Rotated on login" needs a login to have happened. Used to report SAFE.
+        results.push({ type: 'session_fixation', level: 9, verdict: 'INCONCLUSIVE', severity: 'none', note: `Session fixation NOT tested — ${authNoteA}; no login occurred to compare the session identifier across.` });
       } else {
         const sessRe = /sess|auth|token|sid|jwt|connect\.sid|login/i;
         const skipRe = /stripe|mixpanel|_ga|_gid|hotjar|amplitude|intercom|segment|_fbp/i;
@@ -14852,6 +14864,9 @@ app.post('/api/security/api-intercept', async (req, res) => {
         [5, 'Headers + CORS + Disclosure + Redirect + JWT + RateLimit'], [6, 'Mass Assignment (destructive)'],
         [7, 'Excessive Data Exposure'], [8, 'Reflected XSS'], [9, 'Session Lifecycle (fixation + logout)'],
         [10, 'Exposed Secrets in Client Bundle'], [11, 'Supabase RLS / anon key'],
+        // Own levels: these used to share 2 / 6 / 5 with IDOR, mass assignment
+        // and headers, so their rows were counted under the wrong heading.
+        [12, 'Cookie attributes'], [13, 'Pre-consent privacy'], [14, 'Broken resources'],
       ].map(([n, name]) => {
         const rows = results.filter(r => r.level === n);
         return [`level${n}`, {
