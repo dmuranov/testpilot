@@ -230,10 +230,11 @@ const isSuperAdmin = (e) => !!e && canonicalEmail(e) === canonicalEmail(SUPER_AD
 //
 //   gate    — reserveExtraRun() takes the extra synchronously, so two parallel
 //             requests cannot both take the same last one;
-//   4xx     — the reservation is released when the response finishes without
-//             a commit, so a validation error never costs a run. A client that
-//             disconnects before the response does NOT release it: the handler
-//             may still start the run, and it stays charged;
+//   4xx     — the reservation is released the moment the handler sends any
+//             response without a commit (even to a client that already left),
+//             so a validation error never costs a run. A client that
+//             disconnects while the handler is still running does NOT release
+//             it: the handler may still start the run, and it stays charged;
 //   commit  — right before the success response, at each endpoint's existing
 //             moment of commit;
 //   refund  — a run that ends without a verdict gets back the BASE run through
@@ -245,9 +246,15 @@ const isSuperAdmin = (e) => !!e && canonicalEmail(e) === canonicalEmail(SUPER_AD
 // base run's own check-then-act window (two requests both reading
 // free_run_used=false) predates this and is unchanged.
 //
-// Persisted to ./free-runs-used.json like free-security-used.json, so a deploy
-// does not re-grant anyone. Keyed by canonicalEmail, so gmail dots and
-// plus-aliases are one identity. Mechanism + tests: lib/free-runs.js.
+// Committed spends are persisted to ./free-runs-used.json (tmp+rename) so a
+// deploy does not re-grant anyone; in-flight holds are memory only, so a
+// restart mid-request charges nothing. Keyed by canonicalEmail, so gmail dots
+// and plus-aliases are one identity. Mechanism + tests: lib/free-runs.js.
+//
+// Known limits, accepted for now: /api/test grants extras only to a cookie
+// session (its cookie-less path takes the email from the body), so a
+// header-authenticated integration gets the base run only; and free_run_used
+// on /api/auth/me is the derived "no runs left" value, not the raw flag.
 const TESTER_EMAILS = new Set(
   String(process.env.TESTPILOT_TESTER_EMAILS || '')
     .split(',').map(e => canonicalEmail(e)).filter(Boolean)
@@ -263,7 +270,6 @@ const isTesterEmail = (e) => !!e && TESTER_EMAILS.has(canonicalEmail(e));
 const runsFor = (e) => isTesterEmail(e) ? Math.max(TESTER_RUNS, FREE_RUNS) : FREE_RUNS;
 const freeRuns = createFreeRunAllowance({ canonicalEmail, runsFor, file: './free-runs-used.json', fs });
 freeRuns.load();
-const extraRunsLeft = freeRuns.left;
 const extraRunAvailable = freeRuns.available;
 // Non-consuming: what free_run_used should LOOK like to the client and the
 // funnel — an identity with extra runs left still has a free run.
@@ -271,10 +277,12 @@ function testerFreeRunUsed(email, rawUsed) {
   return !!rawUsed && !extraRunAvailable(email);
 }
 const reserveExtraRun = freeRuns.reserve;
-// App slots widen with the allowance so the extra runs may be on different
-// apps ("3 runs, same app or different ones"), never below the plan's own.
+// App slots widen with the runs still LEFT, so the extra runs may be on
+// different apps ("3 runs, same app or different ones") but an identity that
+// has spent them cannot keep opening new support-key crawls via /api/learn.
+// Never below the plan's own limit.
 const appSlotsFor = (email, planLimits, plan) =>
-  plan === 'free' && runsFor(email) > 1 ? Math.max(planLimits.apps, runsFor(email)) : planLimits.apps;
+  plan === 'free' ? Math.max(planLimits.apps, 1 + freeRuns.left(email)) : planLimits.apps;
 
 // Canonicalize an email for FREE-RUN identity so plus-aliases and gmail dots
 // can't mint unlimited free runs (you+1@ / you+2@ / y.o.u@ → one identity).
