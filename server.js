@@ -244,7 +244,10 @@ const TESTER_EMAILS = new Set(
     .split(',').map(e => canonicalEmail(e)).filter(Boolean)
 );
 const _intEnv = (v, d) => { const n = Number.parseInt(v, 10); return Number.isFinite(n) && n >= 1 ? n : d; };
-const FREE_RUNS = _intEnv(process.env.TESTPILOT_FREE_RUNS, 1);
+// TEMPORARY (2026-09-27): every free identity gets 3 runs so prospects can try
+// scenario + security + flow. Revert this commit to return to the single free
+// run. TESTPILOT_FREE_RUNS still overrides.
+const FREE_RUNS = _intEnv(process.env.TESTPILOT_FREE_RUNS, 3);
 const TESTER_RUNS = _intEnv(process.env.TESTPILOT_TESTER_RUNS, 3);
 const isTesterEmail = (e) => !!e && TESTER_EMAILS.has(canonicalEmail(e));
 const runsFor = (e) => isTesterEmail(e) ? Math.max(TESTER_RUNS, FREE_RUNS) : FREE_RUNS;
