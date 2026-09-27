@@ -5190,7 +5190,15 @@ async function runTest() {
               } else {
                 try {
                   const _me = await fetch('/api/auth/me');
-                  currentUser.free_run_used = _me.ok ? (await _me.json()).free_run_used === true : _spent;
+                  if (_me.ok) {
+                    // Every server-derived field moves together (free_run_used,
+                    // app_slots_limit, …), not just the one we came for.
+                    const _j = await _me.json();
+                    Object.assign(currentUser, _j);
+                    currentUser.free_run_used = _j.free_run_used === true;
+                  } else {
+                    currentUser.free_run_used = _spent;
+                  }
                 } catch { currentUser.free_run_used = _spent; }
               }
               // Never cover the report with a paywall — let them read what

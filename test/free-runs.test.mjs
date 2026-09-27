@@ -210,6 +210,35 @@ test('a corrupt or wrong-shape file is moved aside in full, nothing applied, ear
   assert.equal(warned.length, bads.length);
 });
 
+test('an UNREADABLE file (not missing) is left alone and extras stay disabled', async () => {
+  const warned = [];
+  const log = { log() {}, warn: (...m) => warned.push(m.join(' ')) };
+  const files = { 'x.json': '[["a@x.com",2]]' };
+  const fs = fakeFs(files);
+  fs.readFile = async () => { throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' }); };
+  const a = createFreeRunAllowance({ canonicalEmail, runsFor: () => 3, file: 'x.json', fs, log });
+  await a.load();
+  assert.equal(a.loaded, false);
+  assert.equal(a.available('a@x.com'), false);          // fail closed
+  assert.deepEqual(Object.keys(files), ['x.json']);     // nothing moved, nothing written
+  assert.equal(files['x.json'], '[["a@x.com",2]]');
+  assert.equal(warned.length, 1);
+});
+
+test('the hold restores res.end and lets go of the response once it settles', async () => {
+  const { a } = await make({ runs: 3 });
+  const orig = function () { return 'orig'; };
+  const res1 = { end: orig }, res2 = { end: orig };
+  const h1 = a.reserve(res1, 'a@x.com');
+  assert.notEqual(res1.end, orig);                      // wrapped while held
+  h1.commit();
+  assert.equal(res1.end, orig);                         // restored on commit
+  a.reserve(res2, 'a@x.com');
+  res2.end();                                           // released by the response
+  assert.equal(res2.end, orig);                         // restored on release
+  assert.equal(a.left('a@x.com'), 1);
+});
+
 test('a missing file is not an error', async () => {
   const warned = [];
   const log = { log() {}, warn: (...m) => warned.push(m.join(' ')) };

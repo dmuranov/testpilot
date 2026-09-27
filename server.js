@@ -270,6 +270,12 @@ const isSuperAdmin = (e) => !!e && canonicalEmail(e) === canonicalEmail(SUPER_AD
 //    commit) rather than an env on the box, because the only deploy path from
 //    here is push-to-main; TESTPILOT_FREE_RUNS still wins when set. While it
 //    is 3, TESTER_EMAILS makes no difference.
+//  - The allowance is a second pool beside the legacy free_run_used flag, so
+//    each gate reconciles both (takeExtraRunOrDeny, freeRunExhausted,
+//    appSlotsFor, the !extraRunHold guards) and the "give back what was
+//    spent" pair is repeated in each endpoint's existing refund block. Folding
+//    the base run into the same counter would remove that and the base run's
+//    old check-then-act window in one change; not done here.
 //  - /api/chat/start spends one run per browser session, flat, as it always
 //    has. The dashboard's interactive two-user security flow opens two such
 //    sessions, so on free it costs two runs and needs two available — before
@@ -315,9 +321,11 @@ function takeExtraRunOrDeny(res, email, rawUsed, denial) {
 // /api/funnel/start passes its body email because it is the path that mints
 // the session in the first place.
 // Slots = runs the identity can still start: the base run if unspent, plus
-// the extras left — so it can never hold more apps than it can test.
-const appSlotsFor = (email, planLimits, plan, baseUsed) =>
-  plan === 'free' && email ? Math.max(planLimits.apps, (baseUsed ? 0 : 1) + freeRuns.left(email)) : planLimits.apps;
+// extras — so it can never hold more apps than it can test. Gates pass
+// freeRuns.left() (holds count); reports pass freeRuns.remaining() (they
+// don't, so another tab's in-flight hold never paints a paywall).
+const appSlotsFor = (planLimits, plan, baseUsed, extras) =>
+  plan === 'free' ? Math.max(planLimits.apps, (baseUsed ? 0 : 1) + extras) : planLimits.apps;
 
 // Canonicalize an email for FREE-RUN identity so plus-aliases and gmail dots
 // can't mint unlimited free runs (you+1@ / you+2@ / y.o.u@ → one identity).
@@ -1705,7 +1713,7 @@ app.post('/api/funnel/start', watchOnboarding('signup', (req) => ({ email: onboa
           code: 'FREE_RUN_USED',
         });
       }
-      const slotLimit = appSlotsFor(userEmail, planLimits, userPlan, !!dbUser.free_run_used);
+      const slotLimit = appSlotsFor(planLimits, userPlan, !!dbUser.free_run_used, freeRuns.left(userEmail));
       if (!isExistingForOwner && Number(dbUser.app_slots_used || 0) >= slotLimit) {
         return res.status(402).json({
           ok: false,
@@ -2256,9 +2264,11 @@ app.get('/api/auth/me', (req, res) => {
     email: session.email,
     plan: session.plan,
     free_run_used: freeRunExhausted(session.email, session.free_run_used, session.plan),
-    // How many apps this identity may hold right now (the free allowance
-    // widens it); the dashboard's Learn gate reads this instead of a constant.
-    app_slots_limit: appSlotsFor(session.email, _pl, session.plan, !!session.free_run_used),
+    // How many apps this identity may hold (the free allowance widens it);
+    // the dashboard's Learn gate reads this instead of a constant. Reported
+    // from remaining(), like free_run_used above, so it is not depressed by
+    // another tab's in-flight hold.
+    app_slots_limit: appSlotsFor(_pl, session.plan, !!session.free_run_used, freeRuns.remaining(session.email)),
     terms_accepted_version: session.terms_accepted_version || null,
   });
 });
@@ -9782,7 +9792,7 @@ app.post('/api/learn', watchOnboarding('crawl', (req) => ({ email: onboardingEma
   const isExistingForOwner = !!(existingApp && existingApp.owner_email === ownerEmail);
   if (!isExistingForOwner) {
     const slotsUsed = Number(dbUser.app_slots_used || 0);
-    const slotLimit = appSlotsFor(sessionUser ? ownerEmail : null, planLimits, userPlan, !!dbUser.free_run_used);
+    const slotLimit = appSlotsFor(planLimits, userPlan, !!dbUser.free_run_used, freeRuns.left(sessionUser ? ownerEmail : ''));
     if (slotsUsed >= slotLimit) {
       return res.status(402).json({
         error: userPlan === 'free'
