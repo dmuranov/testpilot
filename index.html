@@ -5180,16 +5180,16 @@ async function runTest() {
                 .includes(state.currentTest?.status);
               // A run that produced no verdict is being refunded server-side
               // (possibly still in flight), so it is never "used". For a charged
-              // run the server is the authority — it also knows about tester
-              // allowances (see TESTER_EMAILS in server.js) — so re-read it and
-              // fall back to the local verdict only if that fails.
+              // run the server is the authority — it also knows about the free
+              // run allowance (FREE RUN ALLOWANCE in server.js) — so re-read it
+              // and fall back to the local verdict (_spent) only if that fails.
               if (!_spent) {
                 currentUser.free_run_used = false;
               } else {
                 try {
                   const _me = await fetch('/api/auth/me');
-                  currentUser.free_run_used = _me.ok ? (await _me.json()).free_run_used === true : true;
-                } catch { currentUser.free_run_used = true; }
+                  currentUser.free_run_used = _me.ok ? (await _me.json()).free_run_used === true : _spent;
+                } catch { currentUser.free_run_used = _spent; }
               }
               // Never cover the report with a paywall — let them read what
               // they paid nothing for first.
