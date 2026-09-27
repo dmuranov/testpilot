@@ -216,6 +216,22 @@ const SUPER_ADMIN_EMAIL = (process.env.SUPER_ADMIN_EMAIL || 'danijel.muranovic@g
 // on the free-run identity path — otherwise danijel.muranovic@ (stored WITH a
 // dot) would never equal the dot-stripped canonical form and the bypass breaks.
 const isSuperAdmin = (e) => !!e && canonicalEmail(e) === canonicalEmail(SUPER_ADMIN_EMAIL);
+
+// ── TESTER RUN ALLOWANCE ──────────────────────────────────────
+// Demo/QA emails listed in TESTPILOT_TESTER_EMAILS start with a small run
+// allowance instead of the single free run, so ONE sitting can cover
+// scenario + security + flow (e.g. recording a product walkthrough).
+// Empty by default: with the env unset nothing below ever fires and free
+// behaves exactly as before. Built on the existing `onerun` plan + `credits`
+// column, so it reuses the reserve/refund path already in place and adds no
+// schema.
+const TESTER_EMAILS = new Set(
+  String(process.env.TESTPILOT_TESTER_EMAILS || '')
+    .split(',').map(e => canonicalEmail(e)).filter(Boolean)
+);
+const TESTER_RUNS = Math.max(1, Number(process.env.TESTPILOT_TESTER_RUNS || 3));
+const isTesterEmail = (e) => !!e && TESTER_EMAILS.has(canonicalEmail(e));
+
 // Canonicalize an email for FREE-RUN identity so plus-aliases and gmail dots
 // can't mint unlimited free runs (you+1@ / you+2@ / y.o.u@ → one identity).
 // Applied ONLY to anonymous funnel/free emails — never to a logged-in session
@@ -1588,6 +1604,22 @@ app.post('/api/funnel/start', watchOnboarding('signup', (req) => ({ email: onboa
         .then(() => console.log('[signup]', userEmail, 'source=' + attribSource))
         .catch(err => console.warn('[signup] source not stored (add signup_source/signup_medium/signup_campaign to users):', err.message));
     }
+    // Tester allowance (see TESTER_EMAILS): grant the listed demo email
+    // TESTER_RUNS credits on `onerun` so the single-free-run gate below is
+    // skipped and scenario + security + flow all fit in one session. Guarded on
+    // the row still being untouched free, so it can never top up a real account
+    // or re-grant on every visit.
+    if (isTesterEmail(userEmail) && (dbUser.plan || 'free') === 'free' && !dbUser.free_run_used) {
+      try {
+        await supabase('PATCH', 'users', { plan: 'onerun', credits: TESTER_RUNS }, `?id=eq.${dbUser.id}`);
+        dbUser.plan = 'onerun';
+        dbUser.credits = TESTER_RUNS;
+        console.log('[tester] granted', TESTER_RUNS, 'runs to', userEmail);
+      } catch (err) {
+        console.warn('[tester] grant failed, continuing as free:', err.message);
+      }
+    }
+
     const userPlan = dbUser.plan || 'free';
     const planLimits = PLAN_LIMITS[userPlan] || PLAN_LIMITS.free;
 
