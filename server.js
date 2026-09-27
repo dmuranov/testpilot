@@ -10,6 +10,7 @@ import psl from 'psl';
 import { loadRecipe, saveRecipe, shouldCaptureRun, isReplayableAction, replayStepHeld, stepIdentity, recipeKey, EMAIL_TOKEN, PASSWORD_TOKEN } from './routes/recipes.js';
 import { assertPublicUrl } from './routes/ssrf.js';
 import { alertOnboardingIssue, watchOnboarding, onOnboardingFailure, isInternal as isInternalEmail } from './lib/onboarding-alert.js';
+import { createFreeRunAllowance } from './lib/free-runs.js';
 import { auditLinks } from './routes/link-audit.js';
 import { scanExposedFiles, tokenFileMatches, metaTagMatches } from './security-exposure.js';
 import express from 'express';
@@ -227,23 +228,32 @@ const isSuperAdmin = (e) => !!e && canonicalEmail(e) === canonicalEmail(SUPER_AD
 // burn/refund path is untouched. An "extra" run is one started while
 // free_run_used is already true (or the free security scan already used):
 //
-//   gate    — reserveExtraRun() takes the run synchronously, so two parallel
-//             requests cannot both pass on the same last run;
+//   gate    — reserveExtraRun() takes the extra synchronously, so two parallel
+//             requests cannot both take the same last one;
 //   4xx     — the reservation is released when the response finishes without
-//             a commit, so a validation error never costs a run;
+//             a commit, so a validation error never costs a run. A client that
+//             disconnects before the response does NOT release it: the handler
+//             may still start the run, and it stays charged;
 //   commit  — right before the success response, at each endpoint's existing
 //             moment of commit;
 //   refund  — a run that ends without a verdict gets back the BASE run through
 //             the existing free_run_used reset; the extra stays spent, so the
-//             allowance can never grow past runsFor().
+//             extras can never grow past runsFor() - 1.
 //
-// Counted in memory (pm2 runs one fork): a reload starts the allowance over.
-// Keyed by canonicalEmail, so gmail dots and plus-aliases are one identity.
+// The base free run and the base free security scan stay the two separate
+// pools they are today; only the extras are shared between run types. The
+// base run's own check-then-act window (two requests both reading
+// free_run_used=false) predates this and is unchanged.
+//
+// Persisted to ./free-runs-used.json like free-security-used.json, so a deploy
+// does not re-grant anyone. Keyed by canonicalEmail, so gmail dots and
+// plus-aliases are one identity. Mechanism + tests: lib/free-runs.js.
 const TESTER_EMAILS = new Set(
   String(process.env.TESTPILOT_TESTER_EMAILS || '')
     .split(',').map(e => canonicalEmail(e)).filter(Boolean)
 );
-const _intEnv = (v, d) => { const n = Number.parseInt(v, 10); return Number.isFinite(n) && n >= 1 ? n : d; };
+// 0 or 1 = no extras (the base free run is gated elsewhere); unparsable = default.
+const _intEnv = (v, d) => { const n = Number.parseInt(v, 10); return Number.isFinite(n) && n >= 0 ? n : d; };
 // TEMPORARY (2026-09-27): every free identity gets 3 runs so prospects can try
 // scenario + security + flow. Revert this commit to return to the single free
 // run. TESTPILOT_FREE_RUNS still overrides.
@@ -251,38 +261,16 @@ const FREE_RUNS = _intEnv(process.env.TESTPILOT_FREE_RUNS, 3);
 const TESTER_RUNS = _intEnv(process.env.TESTPILOT_TESTER_RUNS, 3);
 const isTesterEmail = (e) => !!e && TESTER_EMAILS.has(canonicalEmail(e));
 const runsFor = (e) => isTesterEmail(e) ? Math.max(TESTER_RUNS, FREE_RUNS) : FREE_RUNS;
-// Extra runs consumed beyond the first free one, per canonical email.
-const extraRunsUsed = new Map();
-const extraRunsLeft = (e) =>
-  Math.max(0, (runsFor(e) - 1) - (extraRunsUsed.get(canonicalEmail(e)) || 0));
-const extraRunAvailable = (e) => !!e && extraRunsLeft(e) > 0;
+const freeRuns = createFreeRunAllowance({ canonicalEmail, runsFor, file: './free-runs-used.json', fs });
+freeRuns.load();
+const extraRunsLeft = freeRuns.left;
+const extraRunAvailable = freeRuns.available;
 // Non-consuming: what free_run_used should LOOK like to the client and the
 // funnel — an identity with extra runs left still has a free run.
 function testerFreeRunUsed(email, rawUsed) {
   return !!rawUsed && !extraRunAvailable(email);
 }
-// Take one extra run now. Released automatically if the response ends
-// without commit() — an early 4xx, a thrown handler, a client that went away.
-function reserveExtraRun(res, email) {
-  const ce = canonicalEmail(email);
-  extraRunsUsed.set(ce, (extraRunsUsed.get(ce) || 0) + 1);
-  let settled = false;
-  const release = () => {
-    if (settled) return;
-    settled = true;
-    extraRunsUsed.set(ce, Math.max(0, (extraRunsUsed.get(ce) || 0) - 1));
-    console.log('[free-runs]', email, 'extra run released;', extraRunsLeft(email), 'left');
-  };
-  res.once('finish', release);
-  res.once('close', release);
-  return {
-    commit() {
-      if (settled) return;
-      settled = true;
-      console.log('[free-runs]', email, 'spent an extra run;', extraRunsLeft(email), 'left');
-    },
-  };
-}
+const reserveExtraRun = freeRuns.reserve;
 // App slots widen with the allowance so the extra runs may be on different
 // apps ("3 runs, same app or different ones"), never below the plan's own.
 const appSlotsFor = (email, planLimits, plan) =>
@@ -1674,10 +1662,11 @@ app.post('/api/funnel/start', watchOnboarding('signup', (req) => ({ email: onboa
           code: 'FREE_RUN_USED',
         });
       }
-      if (!isExistingForOwner && Number(dbUser.app_slots_used || 0) >= appSlotsFor(userEmail, planLimits, userPlan)) {
+      const slotLimit = appSlotsFor(userEmail, planLimits, userPlan);
+      if (!isExistingForOwner && Number(dbUser.app_slots_used || 0) >= slotLimit) {
         return res.status(402).json({
           ok: false,
-          error: 'Free includes 1 app. Choose a plan to learn more.',
+          error: `Free includes ${slotLimit} app${slotLimit === 1 ? '' : 's'}. Choose a plan to learn more.`,
           code: 'APP_SLOT_LIMIT',
         });
       }
@@ -9741,14 +9730,15 @@ app.post('/api/learn', watchOnboarding('crawl', (req) => ({ email: onboardingEma
   const isExistingForOwner = !!(existingApp && existingApp.owner_email === ownerEmail);
   if (!isExistingForOwner) {
     const slotsUsed = Number(dbUser.app_slots_used || 0);
-    if (slotsUsed >= appSlotsFor(ownerEmail, planLimits, userPlan)) {
+    const slotLimit = appSlotsFor(ownerEmail, planLimits, userPlan);
+    if (slotsUsed >= slotLimit) {
       return res.status(402).json({
         error: userPlan === 'free'
-          ? 'Free includes 1 app. Choose a plan to learn more.'
+          ? `Free includes ${slotLimit} app${slotLimit === 1 ? '' : 's'}. Choose a plan to learn more.`
           : `Your plan includes ${planLimits.apps} app slots. Upgrade to add more.`,
         code: 'APP_SLOT_LIMIT',
         plan: userPlan,
-        app_slots_limit: planLimits.apps,
+        app_slots_limit: slotLimit,
         app_slots_used: slotsUsed,
       });
     }

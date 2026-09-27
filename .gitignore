@@ -54,3 +54,6 @@ saved-sessions.json
 
 # ── Ad-hoc gauntlet drivers (contain test credentials) ──
 pp-*
+
+# free-tier counters (runtime state, not code)
+free-runs-used.json
