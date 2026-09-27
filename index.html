@@ -5178,10 +5178,16 @@ async function runTest() {
               // assuming the run was spent.
               const _spent = ['completed', 'completed_with_bugs', 'completed_with_unverified']
                 .includes(state.currentTest?.status);
-              currentUser.free_run_used = _spent;
+              // The server is the authority on the flag (it also knows about
+              // tester allowances — see TESTER_EMAILS in server.js), so re-read
+              // it and fall back to the local verdict only if that fails.
+              try {
+                const _me = await fetch('/api/auth/me');
+                currentUser.free_run_used = _me.ok ? (await _me.json()).free_run_used === true : _spent;
+              } catch { currentUser.free_run_used = _spent; }
               // Never cover the report with a paywall — let them read what
               // they paid nothing for first.
-              if (_spent) showFreeRunBar();
+              if (currentUser.free_run_used) showFreeRunBar();
             }
             state.view = 'test-detail';
             await loadTests();

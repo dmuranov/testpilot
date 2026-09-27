@@ -218,19 +218,46 @@ const SUPER_ADMIN_EMAIL = (process.env.SUPER_ADMIN_EMAIL || 'danijel.muranovic@g
 const isSuperAdmin = (e) => !!e && canonicalEmail(e) === canonicalEmail(SUPER_ADMIN_EMAIL);
 
 // ── TESTER RUN ALLOWANCE ──────────────────────────────────────
-// Demo/QA emails listed in TESTPILOT_TESTER_EMAILS start with a small run
-// allowance instead of the single free run, so ONE sitting can cover
-// scenario + security + flow (e.g. recording a product walkthrough).
-// Empty by default: with the env unset nothing below ever fires and free
-// behaves exactly as before. Built on the existing `onerun` plan + `credits`
-// column, so it reuses the reserve/refund path already in place and adds no
-// schema.
+// Demo/QA emails listed in TESTPILOT_TESTER_EMAILS may spend the free run
+// more than once — TESTPILOT_TESTER_RUNS times in all (default 3) — so ONE
+// sitting can cover scenario + security + flow, e.g. recording a walkthrough.
+//
+// The account stays on plan 'free' on purpose: only 'free' is funded by
+// ANTHROPIC_SUPPORT_KEY (see /api/test, /api/flow, api-intercept), the
+// dashboard keeps its free-run copy, and every existing burn/refund path is
+// untouched. The allowance is consulted only where free_run_used is enforced
+// or reported: a tester whose flag is already burned is let through, and each
+// pass-through counts as one of the extra runs. Counted in memory, so a pm2
+// reload starts the allowance over — fine for an allowlisted demo identity,
+// and it can never exceed TESTER_RUNS between restarts.
+//
+// Empty by default: with the env unset, isTesterEmail() is always false and
+// nothing here changes free behaviour.
 const TESTER_EMAILS = new Set(
   String(process.env.TESTPILOT_TESTER_EMAILS || '')
     .split(',').map(e => canonicalEmail(e)).filter(Boolean)
 );
-const TESTER_RUNS = Math.max(1, Number(process.env.TESTPILOT_TESTER_RUNS || 3));
+const _testerRunsEnv = Number.parseInt(process.env.TESTPILOT_TESTER_RUNS, 10);
+const TESTER_RUNS = Number.isFinite(_testerRunsEnv) && _testerRunsEnv >= 1 ? _testerRunsEnv : 3;
 const isTesterEmail = (e) => !!e && TESTER_EMAILS.has(canonicalEmail(e));
+// Extra runs consumed beyond the first free one, per canonical email.
+const testerExtraRunsUsed = new Map();
+const testerExtraRunsLeft = (e) =>
+  Math.max(0, (TESTER_RUNS - 1) - (testerExtraRunsUsed.get(canonicalEmail(e)) || 0));
+// Non-consuming: what free_run_used should LOOK like to the client and the
+// funnel — a tester with extra runs left still has a free run.
+function testerFreeRunUsed(email, rawUsed) {
+  return !!rawUsed && !(isTesterEmail(email) && testerExtraRunsLeft(email) > 0);
+}
+// Consuming: called at a free gate that would otherwise 402 on free_run_used.
+// True = let the run through and spend one extra run.
+function consumeTesterRun(email) {
+  if (!isTesterEmail(email) || testerExtraRunsLeft(email) <= 0) return false;
+  const ce = canonicalEmail(email);
+  testerExtraRunsUsed.set(ce, (testerExtraRunsUsed.get(ce) || 0) + 1);
+  console.log('[tester]', email, 'spent an extra run;', testerExtraRunsLeft(email), 'left');
+  return true;
+}
 
 // Canonicalize an email for FREE-RUN identity so plus-aliases and gmail dots
 // can't mint unlimited free runs (you+1@ / you+2@ / y.o.u@ → one identity).
@@ -1604,22 +1631,6 @@ app.post('/api/funnel/start', watchOnboarding('signup', (req) => ({ email: onboa
         .then(() => console.log('[signup]', userEmail, 'source=' + attribSource))
         .catch(err => console.warn('[signup] source not stored (add signup_source/signup_medium/signup_campaign to users):', err.message));
     }
-    // Tester allowance (see TESTER_EMAILS): grant the listed demo email
-    // TESTER_RUNS credits on `onerun` so the single-free-run gate below is
-    // skipped and scenario + security + flow all fit in one session. Guarded on
-    // the row still being untouched free, so it can never top up a real account
-    // or re-grant on every visit.
-    if (isTesterEmail(userEmail) && (dbUser.plan || 'free') === 'free' && !dbUser.free_run_used) {
-      try {
-        await supabase('PATCH', 'users', { plan: 'onerun', credits: TESTER_RUNS }, `?id=eq.${dbUser.id}`);
-        dbUser.plan = 'onerun';
-        dbUser.credits = TESTER_RUNS;
-        console.log('[tester] granted', TESTER_RUNS, 'runs to', userEmail);
-      } catch (err) {
-        console.warn('[tester] grant failed, continuing as free:', err.message);
-      }
-    }
-
     const userPlan = dbUser.plan || 'free';
     const planLimits = PLAN_LIMITS[userPlan] || PLAN_LIMITS.free;
 
@@ -1627,7 +1638,7 @@ app.post('/api/funnel/start', watchOnboarding('signup', (req) => ({ email: onboa
     // already filled with a DIFFERENT app, send them to paywall.
     const isExistingForOwner = !!(existingApp && existingApp.owner_email === userEmail);
     if (userPlan === 'free') {
-      if (dbUser.free_run_used) {
+      if (testerFreeRunUsed(userEmail, dbUser.free_run_used)) {
         return res.status(402).json({
           ok: false,
           error: 'Free run already used. Choose a plan to continue.',
@@ -1672,7 +1683,7 @@ app.post('/api/funnel/start', watchOnboarding('signup', (req) => ({ email: onboa
 
     return res.json({
       ok: true,
-      session: { email: userEmail, plan: userPlan, free_run_used: !!dbUser.free_run_used },
+      session: { email: userEmail, plan: userPlan, free_run_used: testerFreeRunUsed(userEmail, dbUser.free_run_used) },
       app: { url: norm.original, url_normalized: norm.normalized, is_existing: isExistingForOwner },
     });
   } catch (err) {
@@ -2179,7 +2190,7 @@ app.get('/api/auth/me', (req, res) => {
   const token = req.cookies?.tpsession;
   if (!token || !sessions.has(token)) return res.status(401).json({ error: 'Not authenticated' });
   const session = sessions.get(token);
-  res.json({ email: session.email, plan: session.plan, free_run_used: session.free_run_used || false, terms_accepted_version: session.terms_accepted_version || null });
+  res.json({ email: session.email, plan: session.plan, free_run_used: testerFreeRunUsed(session.email, session.free_run_used), terms_accepted_version: session.terms_accepted_version || null });
 });
 
 // Accept terms
@@ -9999,7 +10010,7 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
   const dbUser = ownerEmail ? await getUserByEmail(ownerEmail) : null;
   const userPlan = sessionUser?.plan || dbUser?.plan || 'free';
   if (userPlan === 'free') {
-    const alreadyUsed = !!(sessionUser?.free_run_used || dbUser?.free_run_used);
+    const alreadyUsed = !!(sessionUser?.free_run_used || dbUser?.free_run_used) && !consumeTesterRun(ownerEmail);
     // One free run per free account, enforced by free_run_used below — that
     // flag is the real control, and it is persisted, so a forged session cannot
     // spend a second one.
@@ -11264,7 +11275,7 @@ app.post('/api/test/multirole', async (req, res) => {
     // ahead of it) — confirmed live by firing two multirole requests back to
     // back and watching both return 200 before this fix.
     const dbUser = await getUserByEmail(user.email);
-    if (user.free_run_used || dbUser?.free_run_used) {
+    if ((user.free_run_used || dbUser?.free_run_used) && !consumeTesterRun(user.email)) {
       return res.status(402).json({ error: 'Free run already used. Choose a plan to continue.', code: 'FREE_RUN_USED' });
     }
   }
@@ -11446,7 +11457,7 @@ app.post('/api/test/flow', async (req, res) => {
     // ahead of it) — confirmed live by firing two multirole requests back to
     // back and watching both return 200 before this fix.
     const dbUser = await getUserByEmail(user.email);
-    if (user.free_run_used || dbUser?.free_run_used) {
+    if ((user.free_run_used || dbUser?.free_run_used) && !consumeTesterRun(user.email)) {
       return res.status(402).json({ error: 'Free run already used. Choose a plan to continue.', code: 'FREE_RUN_USED' });
     }
   }
@@ -11876,7 +11887,7 @@ app.post('/api/chat/start', async (req, res) => {
     // Check the in-memory session too — see the identical comment on the
     // multirole gate for why the DB-only check was a real, confirmed bug.
     const dbUser = await getUserByEmail(user.email);
-    if (user.free_run_used || dbUser?.free_run_used) {
+    if ((user.free_run_used || dbUser?.free_run_used) && !consumeTesterRun(user.email)) {
       return res.status(402).json({ error: 'Free run already used. Choose a plan to continue.', code: 'FREE_RUN_USED' });
     }
   } else if (user.plan === 'onerun') {
