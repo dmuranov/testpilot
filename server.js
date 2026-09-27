@@ -237,9 +237,14 @@ const isSuperAdmin = (e) => !!e && canonicalEmail(e) === canonicalEmail(SUPER_AD
 //             it: the handler may still start the run, and it stays charged;
 //   commit  — right before the success response, at each endpoint's existing
 //             moment of commit;
-//   refund  — a run that ends without a verdict gets back the BASE run through
-//             the existing free_run_used reset; the extra stays spent, so the
-//             extras can never grow past runsFor() - 1.
+//   refund  — a run that ends without a verdict gets back what it spent: an
+//             extra run through hold.refund(), the base run through the
+//             existing free_run_used reset. Same "only a verdict counts" rule
+//             as the base run and the paid credit; extras can never grow past
+//             runsFor() - 1 because refund() is once per committed hold.
+//   report  — /api/auth/me and the funnel read freeRuns.remaining(), which
+//             ignores in-flight holds, so another tab merely holding the last
+//             extra does not paint a paywall.
 //
 // The base free run and the base free security scan stay the two separate
 // pools they are today; only the extras are shared between run types. The
@@ -283,7 +288,7 @@ freeRuns.load();
 // Non-consuming: what free_run_used should LOOK like to the client and the
 // funnel — an identity with extra runs left still has a free run.
 function freeRunExhausted(email, rawUsed) {
-  return !!rawUsed && !freeRuns.available(email);
+  return !!rawUsed && freeRuns.remaining(email) <= 0;
 }
 // One rule for every free gate: base run already used → take an extra or send
 // the 402. `denied` is true when the 402 has been sent.
@@ -296,8 +301,10 @@ function takeExtraRunOrDeny(res, email, rawUsed, denial) {
 // different apps ("3 runs, same app or different ones") but an identity that
 // has spent them cannot keep opening new support-key crawls via /api/learn.
 // Never below the plan's own limit.
-// Widened only for an identity with a real session (callers pass null
-// otherwise): the cookie-less paths take the email from the body.
+// Widened only for an identity that has, or is being given, a session:
+// /api/learn's cookie-less path passes null (its email comes from the body);
+// /api/funnel/start passes its body email because it is the path that mints
+// the session in the first place.
 const appSlotsFor = (email, planLimits, plan) =>
   plan === 'free' && email ? Math.max(planLimits.apps, 1 + freeRuns.left(email)) : planLimits.apps;
 
@@ -10058,8 +10065,10 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
     const _rawUsed = !!(sessionUser?.free_run_used || dbUser?.free_run_used);
     // Extra runs only for a real session: the cookie-less path takes the
     // email from the body, and an email is not a secret.
-    if (_rawUsed && !!sessionUser && freeRuns.available(ownerEmail)) extraRunHold = freeRuns.reserve(res, ownerEmail);
-    const alreadyUsed = _rawUsed && !extraRunHold;
+    const _gate = takeExtraRunOrDeny(res, sessionUser ? ownerEmail : '', _rawUsed,
+      { error: 'Free run already used. Choose a plan to continue.', code: 'FREE_RUN_USED' });
+    if (_gate.denied) return;
+    extraRunHold = _gate.hold;
     // One free run per free account, enforced by free_run_used below — that
     // flag is the real control, and it is persisted, so a forged session cannot
     // spend a second one.
@@ -10072,12 +10081,6 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
     // server answered with 402 and a pricing table. Spend is still bounded by
     // isFreeBudgetExceeded() above, which is the gate that actually protects
     // the support key.
-    if (alreadyUsed) {
-      return res.status(402).json({
-        error: 'Free run already used. Choose a plan to continue.',
-        code: 'FREE_RUN_USED',
-      });
-    }
   }
 
   // OneRun gate: out of credits => 402 early (cheap check, before app/key
@@ -10203,7 +10206,8 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
       // a verdict about the APP. Ending blocked/error/incomplete is our tooling
       // failing, and charging a first-time visitor's single free run for that
       // — then asking them for a card — is indefensible.
-      if (freeRunBurned && !CHARGED_STATUSES.includes(_finalStatus)) {
+      if (extraRunHold && !CHARGED_STATUSES.includes(_finalStatus)) extraRunHold.refund();
+      if (freeRunBurned && !extraRunHold && !CHARGED_STATUSES.includes(_finalStatus)) {
         try {
           await supabase('PATCH', 'users', { free_run_used: false }, `?email=eq.${encodeURIComponent(ownerEmail)}`);
           for (const [, s] of sessions) { if (s.email === ownerEmail) s.free_run_used = false; }
@@ -11447,7 +11451,8 @@ app.post('/api/test/multirole', async (req, res) => {
     aggregate.completedAt = new Date().toISOString();
     const _mrCharged = ['completed', 'completed_with_bugs', 'partial_with_bugs'].includes(aggregate.status);
     if (_mrCredit.reserved && !_mrCharged) refundRunCredit(user.email);
-    if (freeRunBurned && !_mrCharged) {
+    if (extraRunHold && !_mrCharged) extraRunHold.refund();
+    if (freeRunBurned && !extraRunHold && !_mrCharged) {
       supabase('PATCH', 'users', { free_run_used: false }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
       let _mrDirty2 = false;
       for (const [, s] of sessions) { if (s.email === user.email) { s.free_run_used = false; _mrDirty2 = true; } }
@@ -11465,7 +11470,8 @@ app.post('/api/test/multirole', async (req, res) => {
     emitStep(testId, { type: 'summary', message: `Multi-role complete: ${aggregate.summary.passed_roles}/${roleResults.length} roles passed, ${aggregate.bugs.length} confirmed bug${aggregate.bugs.length === 1 ? '' : 's'}${blockedRoles.length ? `, ${blockedRoles.length} role(s) couldn't be tested` : ''}`, summary: aggregate.summary });
   }).catch(err => {
     if (_mrCredit.reserved) refundRunCredit(user.email);
-    if (freeRunBurned) {
+    if (extraRunHold) extraRunHold.refund();
+    if (freeRunBurned && !extraRunHold) {
       supabase('PATCH', 'users', { free_run_used: false }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
       let _mrDirty3 = false;
       for (const [, s] of sessions) { if (s.email === user.email) { s.free_run_used = false; _mrDirty3 = true; } }
@@ -11586,7 +11592,8 @@ app.post('/api/test/flow', async (req, res) => {
       const _r = testResults.get(testId);
       const _flowCharged = _r && ['completed', 'completed_with_bugs', 'completed_with_unverified'].includes(_r.status);
       if (_flowCredit.reserved && !_flowCharged) refundRunCredit(user.email);
-      if (freeRunBurned && !_flowCharged) {
+      if (extraRunHold && !_flowCharged) extraRunHold.refund();
+      if (freeRunBurned && !extraRunHold && !_flowCharged) {
         supabase('PATCH', 'users', { free_run_used: false }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
         let _flowDirty2 = false;
         for (const [, s] of sessions) { if (s.email === user.email) { s.free_run_used = false; _flowDirty2 = true; } }
@@ -11594,7 +11601,8 @@ app.post('/api/test/flow', async (req, res) => {
       }
     } catch (e) {
       if (_flowCredit.reserved) refundRunCredit(user.email);
-      if (freeRunBurned) {
+      if (extraRunHold) extraRunHold.refund();
+      if (freeRunBurned && !extraRunHold) {
         supabase('PATCH', 'users', { free_run_used: false }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
         let _flowDirty3 = false;
         for (const [, s] of sessions) { if (s.email === user.email) { s.free_run_used = false; _flowDirty3 = true; } }
@@ -13445,8 +13453,8 @@ app.post('/api/security/api-intercept', async (req, res) => {
     const _ce = canonicalEmail(sessionUser.email);
     if (freeSecurityUsed.has(_ce) || sessionUser.free_security_used) {
       // A second free scan spends one of the identity's extra runs (see the
-      // FREE RUN ALLOWANCE block); a crash still gives the base scan back
-      // through the existing freeSecurityUsed.delete below.
+      // FREE RUN ALLOWANCE block); a crash refunds that extra below, where the
+      // base scan is given back for a first scan.
       const _gate = takeExtraRunOrDeny(res, sessionUser.email, true,
         { error: 'You have used your free security scan — choose a plan for unlimited scans.', code: 'FREE_SECURITY_USED' });
       if (_gate.denied) return;
@@ -15061,7 +15069,8 @@ app.post('/api/security/api-intercept', async (req, res) => {
     if (_secCredit.reserved) refundRunCredit(sessionUser.email);
     // The free scan was burned optimistically before the run; a crash is our
     // failure, not the customer's — give it back like the paid credit above.
-    if (freeScan) {
+    if (extraScanHold) extraScanHold.refund();
+    if (freeScan && !extraScanHold) {
       freeSecurityUsed.delete(canonicalEmail(sessionUser.email)); saveFreeSecurityUsed();
       for (const [, s] of sessions) { if (s.email === sessionUser.email) s.free_security_used = false; }
     }
