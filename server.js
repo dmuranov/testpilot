@@ -249,14 +249,22 @@ const testerExtraRunsLeft = (e) =>
 function testerFreeRunUsed(email, rawUsed) {
   return !!rawUsed && !(isTesterEmail(email) && testerExtraRunsLeft(email) > 0);
 }
-// Consuming: called at a free gate that would otherwise 402 on free_run_used.
-// True = let the run through and spend one extra run.
-function consumeTesterRun(email) {
-  if (!isTesterEmail(email) || testerExtraRunsLeft(email) <= 0) return false;
+// Non-consuming check for the free gates: may this tester, whose free run is
+// already burned, start another one? The run is only SPENT inside the same
+// burn block that sets free_run_used (after every validation the endpoint
+// does), and given back in the same refund block — so an early 4xx, a
+// browser that never launched, or a run that ended without a verdict never
+// costs a demo run. Same moment-of-commit rule as the credit path.
+const testerExtraRunAvailable = (e) => isTesterEmail(e) && testerExtraRunsLeft(e) > 0;
+function spendTesterRun(email) {
   const ce = canonicalEmail(email);
   testerExtraRunsUsed.set(ce, (testerExtraRunsUsed.get(ce) || 0) + 1);
   console.log('[tester]', email, 'spent an extra run;', testerExtraRunsLeft(email), 'left');
-  return true;
+}
+function refundTesterRun(email) {
+  const ce = canonicalEmail(email);
+  testerExtraRunsUsed.set(ce, Math.max(0, (testerExtraRunsUsed.get(ce) || 0) - 1));
+  console.log('[tester]', email, 'run refunded;', testerExtraRunsLeft(email), 'left');
 }
 
 // Canonicalize an email for FREE-RUN identity so plus-aliases and gmail dots
@@ -10009,8 +10017,13 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
   // a forged session can't bypass; the in-memory session is only the cache.
   const dbUser = ownerEmail ? await getUserByEmail(ownerEmail) : null;
   const userPlan = sessionUser?.plan || dbUser?.plan || 'free';
+  let testerExtraRun = false;
   if (userPlan === 'free') {
-    const alreadyUsed = !!(sessionUser?.free_run_used || dbUser?.free_run_used) && !consumeTesterRun(ownerEmail);
+    const _rawUsed = !!(sessionUser?.free_run_used || dbUser?.free_run_used);
+    // Tester allowance only for a real session: the cookie-less path takes the
+    // email from the body, and a listed demo address is not a secret.
+    testerExtraRun = _rawUsed && !!sessionUser && testerExtraRunAvailable(ownerEmail);
+    const alreadyUsed = _rawUsed && !testerExtraRun;
     // One free run per free account, enforced by free_run_used below — that
     // flag is the real control, and it is persisted, so a forged session cannot
     // spend a second one.
@@ -10099,6 +10112,7 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
   // on the NEXT /api/test attempt.
   const freeRunBurned = userPlan === 'free' && !!ownerEmail;
   if (freeRunBurned) {
+    if (testerExtraRun) spendTesterRun(ownerEmail);
     supabase('PATCH', 'users', { free_run_used: true }, `?email=eq.${encodeURIComponent(ownerEmail)}`).catch(() => {});
     let dirty = false;
     for (const [, session] of sessions) {
@@ -10157,6 +10171,7 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
         try {
           await supabase('PATCH', 'users', { free_run_used: false }, `?email=eq.${encodeURIComponent(ownerEmail)}`);
           for (const [, s] of sessions) { if (s.email === ownerEmail) s.free_run_used = false; }
+          if (testerExtraRun) refundTesterRun(ownerEmail);
           saveSessions();
           emitStep(testId, { type: 'info', message: 'ℹ️ This run didn\'t get far enough to judge your app, so your free run is still available.' });
         } catch {}
@@ -11267,6 +11282,7 @@ app.post('/api/test/multirole', async (req, res) => {
     return res.status(403).json({ error: 'Multi-role testing requires a paid plan', code: 'PLAN_FEATURE_LOCKED' });
   }
   let freeRunBurned = false;
+  let testerExtraRun = false;
   if (user.plan === 'free') {
     // Check the in-memory session (user IS the live sessions-Map object for
     // the cookie path, mutated synchronously on burn — see below) OR the DB
@@ -11275,7 +11291,8 @@ app.post('/api/test/multirole', async (req, res) => {
     // ahead of it) — confirmed live by firing two multirole requests back to
     // back and watching both return 200 before this fix.
     const dbUser = await getUserByEmail(user.email);
-    if ((user.free_run_used || dbUser?.free_run_used) && !consumeTesterRun(user.email)) {
+    testerExtraRun = !!(user.free_run_used || dbUser?.free_run_used) && testerExtraRunAvailable(user.email);
+    if ((user.free_run_used || dbUser?.free_run_used) && !testerExtraRun) {
       return res.status(402).json({ error: 'Free run already used. Choose a plan to continue.', code: 'FREE_RUN_USED' });
     }
   }
@@ -11314,6 +11331,7 @@ app.post('/api/test/multirole', async (req, res) => {
   if (user.plan === 'free') {
     freeRunBurned = true;
     supabase('PATCH', 'users', { free_run_used: true }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
+    if (testerExtraRun) spendTesterRun(user.email);
     let _mrDirty = false;
     for (const [, s] of sessions) { if (s.email === user.email) { s.free_run_used = true; _mrDirty = true; } }
     if (_mrDirty) saveSessions();
@@ -11396,6 +11414,7 @@ app.post('/api/test/multirole', async (req, res) => {
     if (_mrCredit.reserved && !_mrCharged) refundRunCredit(user.email);
     if (freeRunBurned && !_mrCharged) {
       supabase('PATCH', 'users', { free_run_used: false }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
+      if (testerExtraRun) refundTesterRun(user.email);
       let _mrDirty2 = false;
       for (const [, s] of sessions) { if (s.email === user.email) { s.free_run_used = false; _mrDirty2 = true; } }
       if (_mrDirty2) saveSessions();
@@ -11414,6 +11433,7 @@ app.post('/api/test/multirole', async (req, res) => {
     if (_mrCredit.reserved) refundRunCredit(user.email);
     if (freeRunBurned) {
       supabase('PATCH', 'users', { free_run_used: false }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
+      if (testerExtraRun) refundTesterRun(user.email);
       let _mrDirty3 = false;
       for (const [, s] of sessions) { if (s.email === user.email) { s.free_run_used = false; _mrDirty3 = true; } }
       if (_mrDirty3) saveSessions();
@@ -11449,6 +11469,7 @@ app.post('/api/test/flow', async (req, res) => {
     return res.status(403).json({ error: 'End-to-End Flow Test requires a paid plan', code: 'PLAN_FEATURE_LOCKED' });
   }
   let freeRunBurned = false;
+  let testerExtraRun = false;
   if (user.plan === 'free') {
     // Check the in-memory session (user IS the live sessions-Map object for
     // the cookie path, mutated synchronously on burn — see below) OR the DB
@@ -11457,7 +11478,8 @@ app.post('/api/test/flow', async (req, res) => {
     // ahead of it) — confirmed live by firing two multirole requests back to
     // back and watching both return 200 before this fix.
     const dbUser = await getUserByEmail(user.email);
-    if ((user.free_run_used || dbUser?.free_run_used) && !consumeTesterRun(user.email)) {
+    testerExtraRun = !!(user.free_run_used || dbUser?.free_run_used) && testerExtraRunAvailable(user.email);
+    if ((user.free_run_used || dbUser?.free_run_used) && !testerExtraRun) {
       return res.status(402).json({ error: 'Free run already used. Choose a plan to continue.', code: 'FREE_RUN_USED' });
     }
   }
@@ -11509,6 +11531,7 @@ app.post('/api/test/flow', async (req, res) => {
   if (user.plan === 'free') {
     freeRunBurned = true;
     supabase('PATCH', 'users', { free_run_used: true }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
+    if (testerExtraRun) spendTesterRun(user.email);
     let _flowDirty = false;
     for (const [, s] of sessions) { if (s.email === user.email) { s.free_run_used = true; _flowDirty = true; } }
     if (_flowDirty) saveSessions();
@@ -11532,6 +11555,7 @@ app.post('/api/test/flow', async (req, res) => {
       if (_flowCredit.reserved && !_flowCharged) refundRunCredit(user.email);
       if (freeRunBurned && !_flowCharged) {
         supabase('PATCH', 'users', { free_run_used: false }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
+        if (testerExtraRun) refundTesterRun(user.email);
         let _flowDirty2 = false;
         for (const [, s] of sessions) { if (s.email === user.email) { s.free_run_used = false; _flowDirty2 = true; } }
         if (_flowDirty2) saveSessions();
@@ -11540,6 +11564,7 @@ app.post('/api/test/flow', async (req, res) => {
       if (_flowCredit.reserved) refundRunCredit(user.email);
       if (freeRunBurned) {
         supabase('PATCH', 'users', { free_run_used: false }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
+        if (testerExtraRun) refundTesterRun(user.email);
         let _flowDirty3 = false;
         for (const [, s] of sessions) { if (s.email === user.email) { s.free_run_used = false; _flowDirty3 = true; } }
         if (_flowDirty3) saveSessions();
@@ -11883,11 +11908,13 @@ app.post('/api/chat/start', async (req, res) => {
   // reserveRunCreditOrDeny's onerun credit check, but consumed flat on
   // start (no refund path): a live chat session has no "TestPilot itself
   // failed" moment to refund against the way a discrete run does.
+  let testerExtraRun = false;
   if (user.plan === 'free') {
     // Check the in-memory session too — see the identical comment on the
     // multirole gate for why the DB-only check was a real, confirmed bug.
     const dbUser = await getUserByEmail(user.email);
-    if ((user.free_run_used || dbUser?.free_run_used) && !consumeTesterRun(user.email)) {
+    testerExtraRun = !!(user.free_run_used || dbUser?.free_run_used) && testerExtraRunAvailable(user.email);
+    if ((user.free_run_used || dbUser?.free_run_used) && !testerExtraRun) {
       return res.status(402).json({ error: 'Free run already used. Choose a plan to continue.', code: 'FREE_RUN_USED' });
     }
   } else if (user.plan === 'onerun') {
@@ -11986,6 +12013,7 @@ app.post('/api/chat/start', async (req, res) => {
     // refund path: see the plan-gate comment above for why.
     if (user.plan === 'free') {
       supabase('PATCH', 'users', { free_run_used: true }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
+      if (testerExtraRun) spendTesterRun(user.email);
       let _chatDirty = false;
       for (const [, s] of sessions) { if (s.email === user.email) { s.free_run_used = true; _chatDirty = true; } }
       if (_chatDirty) saveSessions();
