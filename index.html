@@ -1998,7 +1998,9 @@ function gatedLearn() {
   const plan = currentUser?.plan || 'free';
   // Funnel rework: free + onerun cap at 1 app, starter at 3.
   const limits = { free: 1, onerun: 1, solo: 3, starter: 3, pro: 10, agency: 999, admin: 999, tester: 999 };
-  const limit = limits[plan] ?? 999;
+  // The server knows the real limit (the free run allowance can widen it —
+  // see app_slots_limit on /api/auth/me); the table is the fallback.
+  const limit = currentUser?.app_slots_limit ?? limits[plan] ?? 999;
   if (state.apps.length >= limit) {
     showFunnelPaywall('app_slot');
     return;

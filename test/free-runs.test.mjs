@@ -23,9 +23,9 @@ function fakeFs(files) {
   };
 }
 
-async function make({ runs = 3, files = {}, load = true, holdTtlMs } = {}) {
+async function make({ runs = 3, files = {}, load = true, holdTtlMs, now } = {}) {
   const fs = fakeFs(files);
-  const a = createFreeRunAllowance({ canonicalEmail, runsFor: () => runs, file: 'x.json', fs, log: quiet, holdTtlMs });
+  const a = createFreeRunAllowance({ canonicalEmail, runsFor: () => runs, file: 'x.json', fs, log: quiet, holdTtlMs, now });
   if (load) await a.load();
   return { a, files };
 }
@@ -96,6 +96,15 @@ test('commit before the response keeps the charge', async () => {
   assert.equal(a.left('a@x.com'), 1);
 });
 
+test('commit after the handler already answered is a no-op (nothing started)', async () => {
+  const { a } = await make({ runs: 3 });
+  const res = fakeRes();
+  const hold = a.reserve(res, 'a@x.com');
+  res.end();                                       // 4xx went out
+  hold.commit();
+  assert.equal(a.left('a@x.com'), 2);
+});
+
 test('refund() after commit gives the extra back, at most once, and persists', async () => {
   const { a, files } = await make({ runs: 3 });
   const hold = a.reserve(fakeRes(), 'a@x.com');
@@ -119,12 +128,23 @@ test('refund() before commit is a no-op (nothing was charged)', async () => {
 
 test('a handler that never answers releases the hold after the TTL', async () => {
   const { a } = await make({ runs: 3, holdTtlMs: 5 });
-  const hold = a.reserve(fakeRes(), 'a@x.com');
+  a.reserve(fakeRes(), 'a@x.com');
   assert.equal(a.left('a@x.com'), 1);
   await new Promise(r => setTimeout(r, 20));
   assert.equal(a.left('a@x.com'), 2);
-  hold.commit();                                   // too late: nothing to charge
-  assert.equal(a.left('a@x.com'), 2);
+});
+
+test('a commit that arrives after the TTL still charges (the run IS starting)', async () => {
+  const { a } = await make({ runs: 2, holdTtlMs: 5 });
+  const slow = a.reserve(fakeRes(), 'a@x.com');
+  await new Promise(r => setTimeout(r, 20));       // TTL released it
+  assert.equal(a.left('a@x.com'), 1);
+  a.reserve(fakeRes(), 'a@x.com').commit();        // someone else took the freed extra
+  assert.equal(a.left('a@x.com'), 0);
+  slow.commit();                                   // slow handler finally starts its run
+  assert.equal(a.remaining('a@x.com'), 0);         // charged, not silently free
+  slow.refund();                                   // and can still be refunded on no-verdict
+  assert.equal(a.remaining('a@x.com'), 0);         // (clamped: 2 spent - 1 = 1 spent of 1 extra)
 });
 
 test('a released hold does not fire its TTL later (timer cleared)', async () => {
@@ -170,18 +190,24 @@ test('load is additive and nothing is written before it completes', async () => 
   assert.equal(files['x.json'], '[["b@x.com",2]]');
 });
 
-test('a corrupt file is moved aside in full, nothing from it applied, never overwritten', async () => {
+test('a corrupt or wrong-shape file is moved aside in full, nothing applied, earlier samples kept', async () => {
   const warned = [];
   const log = { log() {}, warn: (...m) => warned.push(m.join(' ')) };
-  for (const bad of ['{not json', '[["a@x.com",2],5,["b@x.com",2]]', '{"a@x.com":2}']) {
-    const files = { 'x.json': bad };
-    const a = createFreeRunAllowance({ canonicalEmail, runsFor: () => 3, file: 'x.json', fs: fakeFs(files), log });
+  const bads = ['{not json', '[["a@x.com",2],5,["b@x.com",2]]', '{"a@x.com":2}', '[["a@x.com",-100]]', '[["a@x.com",0.5]]'];
+  let t = 0;
+  const now = () => new Date(1700000000000 + (t++) * 1000);
+  for (const bad of bads) {
+    const files = { 'x.json': bad, 'x.json.corrupt-earlier': 'keep me' };
+    const a = createFreeRunAllowance({ canonicalEmail, runsFor: () => 3, file: 'x.json', fs: fakeFs(files), log, now });
     await a.load();
-    assert.equal(files['x.json.corrupt'], bad);
+    const aside = Object.keys(files).filter(k => k.startsWith('x.json.corrupt-') && k !== 'x.json.corrupt-earlier');
+    assert.equal(aside.length, 1, bad);
+    assert.equal(files[aside[0]], bad);
+    assert.equal(files['x.json.corrupt-earlier'], 'keep me');
     assert.equal(files['x.json'], '[]');
-    assert.equal(a.left('a@x.com'), 2, bad);       // the partial entry was NOT applied
+    assert.equal(a.left('a@x.com'), 2, bad);       // nothing from the file was applied
   }
-  assert.equal(warned.length, 3);
+  assert.equal(warned.length, bads.length);
 });
 
 test('a missing file is not an error', async () => {

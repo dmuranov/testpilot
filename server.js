@@ -266,20 +266,28 @@ const isSuperAdmin = (e) => !!e && canonicalEmail(e) === canonicalEmail(SUPER_AD
 //    support-key spend is the daily budget ceiling, as it is for the base run.
 //  - free_run_used on /api/auth/me is the derived "no runs left" value, not the
 //    raw flag; the client re-reads it after a charged run.
-//  - The temporary 3-run default is a code default (commit "TEMPORARY: free
-//    tier gets 3 runs by default") rather than an env on the box, because the
-//    only deploy path from here is push-to-main; TESTPILOT_FREE_RUNS still
-//    wins when set. While it is 3, TESTER_EMAILS makes no difference.
+//  - The temporary 3-run default is a code default (FREE_RUNS_DEFAULT, its own
+//    commit) rather than an env on the box, because the only deploy path from
+//    here is push-to-main; TESTPILOT_FREE_RUNS still wins when set. While it
+//    is 3, TESTER_EMAILS makes no difference.
+//  - /api/chat/start spends one run per browser session, flat, as it always
+//    has. The dashboard's interactive two-user security flow opens two such
+//    sessions, so on free it costs two runs and needs two available — before
+//    this change it needed two free runs and so never worked on free at all.
+// Default runs per free identity when TESTPILOT_FREE_RUNS is not set. This
+// line is deliberately on its own, away from anything else that changes, so a
+// temporary promo ("3 runs for prospects") is one commit that touches only it
+// and `git revert` of that commit cannot conflict. 1 = the single free run.
+
+const FREE_RUNS_DEFAULT = 1;
+
 const TESTER_EMAILS = new Set(
   String(process.env.TESTPILOT_TESTER_EMAILS || '')
     .split(',').map(e => canonicalEmail(e)).filter(Boolean)
 );
 // 0 or 1 = no extras (the base free run is gated elsewhere); unparsable = default.
 const _intEnv = (v, d) => { const n = Number.parseInt(v, 10); return Number.isFinite(n) && n >= 0 ? n : d; };
-// TEMPORARY (2026-09-27): every free identity gets 3 runs so prospects can try
-// scenario + security + flow. Revert this commit to return to the single free
-// run. TESTPILOT_FREE_RUNS still overrides.
-const FREE_RUNS = _intEnv(process.env.TESTPILOT_FREE_RUNS, 3);
+const FREE_RUNS = _intEnv(process.env.TESTPILOT_FREE_RUNS, FREE_RUNS_DEFAULT);
 const TESTER_RUNS = _intEnv(process.env.TESTPILOT_TESTER_RUNS, 3);
 const isTesterEmail = (e) => !!e && TESTER_EMAILS.has(canonicalEmail(e));
 const runsFor = (e) => isTesterEmail(e) ? Math.max(TESTER_RUNS, FREE_RUNS) : FREE_RUNS;
@@ -287,7 +295,8 @@ const freeRuns = createFreeRunAllowance({ canonicalEmail, runsFor, file: './free
 freeRuns.load();
 // Non-consuming: what free_run_used should LOOK like to the client and the
 // funnel — an identity with extra runs left still has a free run.
-function freeRunExhausted(email, rawUsed) {
+function freeRunExhausted(email, rawUsed, plan) {
+  if (plan !== 'free') return !!rawUsed;   // the allowance is a free-tier thing
   return !!rawUsed && freeRuns.remaining(email) <= 0;
 }
 // One rule for every free gate: base run already used → take an extra or send
@@ -305,8 +314,10 @@ function takeExtraRunOrDeny(res, email, rawUsed, denial) {
 // /api/learn's cookie-less path passes null (its email comes from the body);
 // /api/funnel/start passes its body email because it is the path that mints
 // the session in the first place.
-const appSlotsFor = (email, planLimits, plan) =>
-  plan === 'free' && email ? Math.max(planLimits.apps, 1 + freeRuns.left(email)) : planLimits.apps;
+// Slots = runs the identity can still start: the base run if unspent, plus
+// the extras left — so it can never hold more apps than it can test.
+const appSlotsFor = (email, planLimits, plan, baseUsed) =>
+  plan === 'free' && email ? Math.max(planLimits.apps, (baseUsed ? 0 : 1) + freeRuns.left(email)) : planLimits.apps;
 
 // Canonicalize an email for FREE-RUN identity so plus-aliases and gmail dots
 // can't mint unlimited free runs (you+1@ / you+2@ / y.o.u@ → one identity).
@@ -1687,14 +1698,14 @@ app.post('/api/funnel/start', watchOnboarding('signup', (req) => ({ email: onboa
     // already filled with a DIFFERENT app, send them to paywall.
     const isExistingForOwner = !!(existingApp && existingApp.owner_email === userEmail);
     if (userPlan === 'free') {
-      if (freeRunExhausted(userEmail, dbUser.free_run_used)) {
+      if (freeRunExhausted(userEmail, dbUser.free_run_used, userPlan)) {
         return res.status(402).json({
           ok: false,
           error: 'Free run already used. Choose a plan to continue.',
           code: 'FREE_RUN_USED',
         });
       }
-      const slotLimit = appSlotsFor(userEmail, planLimits, userPlan);
+      const slotLimit = appSlotsFor(userEmail, planLimits, userPlan, !!dbUser.free_run_used);
       if (!isExistingForOwner && Number(dbUser.app_slots_used || 0) >= slotLimit) {
         return res.status(402).json({
           ok: false,
@@ -1733,7 +1744,7 @@ app.post('/api/funnel/start', watchOnboarding('signup', (req) => ({ email: onboa
 
     return res.json({
       ok: true,
-      session: { email: userEmail, plan: userPlan, free_run_used: freeRunExhausted(userEmail, dbUser.free_run_used) },
+      session: { email: userEmail, plan: userPlan, free_run_used: freeRunExhausted(userEmail, dbUser.free_run_used, userPlan) },
       app: { url: norm.original, url_normalized: norm.normalized, is_existing: isExistingForOwner },
     });
   } catch (err) {
@@ -2240,7 +2251,16 @@ app.get('/api/auth/me', (req, res) => {
   const token = req.cookies?.tpsession;
   if (!token || !sessions.has(token)) return res.status(401).json({ error: 'Not authenticated' });
   const session = sessions.get(token);
-  res.json({ email: session.email, plan: session.plan, free_run_used: freeRunExhausted(session.email, session.free_run_used), terms_accepted_version: session.terms_accepted_version || null });
+  const _pl = PLAN_LIMITS[session.plan] || PLAN_LIMITS.free;
+  res.json({
+    email: session.email,
+    plan: session.plan,
+    free_run_used: freeRunExhausted(session.email, session.free_run_used, session.plan),
+    // How many apps this identity may hold right now (the free allowance
+    // widens it); the dashboard's Learn gate reads this instead of a constant.
+    app_slots_limit: appSlotsFor(session.email, _pl, session.plan, !!session.free_run_used),
+    terms_accepted_version: session.terms_accepted_version || null,
+  });
 });
 
 // Accept terms
@@ -9762,7 +9782,7 @@ app.post('/api/learn', watchOnboarding('crawl', (req) => ({ email: onboardingEma
   const isExistingForOwner = !!(existingApp && existingApp.owner_email === ownerEmail);
   if (!isExistingForOwner) {
     const slotsUsed = Number(dbUser.app_slots_used || 0);
-    const slotLimit = appSlotsFor(sessionUser ? ownerEmail : null, planLimits, userPlan);
+    const slotLimit = appSlotsFor(sessionUser ? ownerEmail : null, planLimits, userPlan, !!dbUser.free_run_used);
     if (slotsUsed >= slotLimit) {
       return res.status(402).json({
         error: userPlan === 'free'
@@ -10206,7 +10226,10 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
       // a verdict about the APP. Ending blocked/error/incomplete is our tooling
       // failing, and charging a first-time visitor's single free run for that
       // — then asking them for a card — is indefensible.
-      if (extraRunHold && !CHARGED_STATUSES.includes(_finalStatus)) extraRunHold.refund();
+      if (extraRunHold && !CHARGED_STATUSES.includes(_finalStatus)) {
+        extraRunHold.refund();
+        emitStep(testId, { type: 'info', message: 'ℹ️ This run didn\'t get far enough to judge your app, so it hasn\'t been counted.' });
+      }
       if (freeRunBurned && !extraRunHold && !CHARGED_STATUSES.includes(_finalStatus)) {
         try {
           await supabase('PATCH', 'users', { free_run_used: false }, `?email=eq.${encodeURIComponent(ownerEmail)}`);
