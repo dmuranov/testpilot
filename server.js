@@ -2804,13 +2804,35 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
     let passFilled = await fillFirst(passSelectors, credentials.password);
 
     // Submit-button patterns (defined early so the steps + 2FA bridge can reuse).
+    // Specific matches FIRST; the generic button[type="submit"] is a last resort.
+    // It used to lead this list, and with .first() (DOM order) that clicked the
+    // wrong control on any page carrying an earlier submit-type button — a nav
+    // bar, a search box, a promo banner. Observed on practicesoftwaretesting.com,
+    // where a "Testing Guide" banner button precedes the real sign-in button: the
+    // credentials filled fine, the wrong button was clicked, the form stayed on
+    // screen, and the user was told their credentials were probably wrong.
     const submitSelectors = [
-      'button[type="submit"]',
+      '[data-test*="login-submit" i]', '[data-test*="signin" i]', '[data-test*="sign-in" i]',
       'button:has-text("Sign in")', 'button:has-text("Log in")', 'button:has-text("Login")',
       'button:has-text("Iniciar sesión")', 'button:has-text("Entrar")', 'button:has-text("Acceder")',
+      'button:has-text("Anmelden")', 'button:has-text("Se connecter")', 'button:has-text("Accedi")',
+      'button[type="submit"]',
       'input[type="submit"]'
     ];
     const clickSubmit = async () => {
+      // Prefer the submit control INSIDE the form that holds the password field —
+      // that one is unambiguous regardless of what else the page renders.
+      try {
+        const form = page.locator('form:has(input[type="password"])').first();
+        if (await form.count() > 0) {
+          for (const sel of ['button[type="submit"]', 'input[type="submit"]', '[data-test*="login" i]', 'button:has-text("Iniciar sesión")', 'button:has-text("Sign in")']) {
+            try {
+              const b = form.locator(sel).first();
+              if (await b.isVisible({ timeout: 1000 })) { await b.click(); return true; }
+            } catch { continue; }
+          }
+        }
+      } catch { /* fall through to the page-wide list */ }
       for (const sel of submitSelectors) {
         try { const b = page.locator(sel).first(); if (await b.isVisible({ timeout: 1500 })) { await b.click(); return true; } } catch { continue; }
       }
