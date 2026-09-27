@@ -5796,8 +5796,26 @@ App description: ${appKnowledge.description || '(none)'}`;
           delete pg.allLinks; // aggregated above — don't duplicate it in every stored page entry
         }
         appKnowledge.linkAudit = await auditLinks(linkMap, { appOrigin: learnAppOrigin, cap: 300 });
-        const broken = appKnowledge.linkAudit.filter(l => l.blocked || l.status === null || l.status >= 400).length;
-        onProgress?.({ phase: 'analysis', message: `🔗 Checked ${appKnowledge.linkAudit.length} links — ${broken} broken` });
+        // BLOCKED != BROKEN. auditLinks uses plain HTTP, while the crawl above
+        // just loaded these same pages in a real browser. WAFs/CDNs routinely
+        // reject datacenter IPs and non-browser clients, so the auditor can get
+        // 401/403 on every link of a perfectly healthy site — observed on
+        // practicesoftwaretesting.com, which answered 403 to every request from
+        // this VM (any method, any User-Agent, curl included) while Playwright
+        // sailed through, and the report read "56 of 60 links broken" including
+        // the site's own homepage. When most first-party links come back with
+        // the same auth-ish status, we were blocked: say "not verified" rather
+        // than invent breakage we never observed.
+        const fp = appKnowledge.linkAudit.filter(l => l.firstParty);
+        const fpDenied = fp.filter(l => l.status === 401 || l.status === 403);
+        const auditBlocked = fp.length >= 5 && fpDenied.length >= Math.ceil(fp.length * 0.6);
+        appKnowledge.linkAuditBlocked = auditBlocked;
+        if (auditBlocked) {
+          onProgress?.({ phase: 'analysis', message: `🔗 Link check NOT run — the site refused ${fpDenied.length}/${fp.length} first-party checks from this server (WAF/CDN bot rules); links are unverified, not broken` });
+        } else {
+          const broken = appKnowledge.linkAudit.filter(l => l.blocked || l.status === null || l.status >= 400).length;
+          onProgress?.({ phase: 'analysis', message: `🔗 Checked ${appKnowledge.linkAudit.length} links — ${broken} broken` });
+        }
       } catch (e) {
         appKnowledge.linkAudit = [];
         onProgress?.({ phase: 'analysis', message: `⚠️ Link audit failed: ${String(e && e.message || e).substring(0, 60)}` });
