@@ -7068,7 +7068,11 @@ function openSiteReport() {
   const deadRoutes = pages.filter(([, p]) => p.error === '404');
   const linkAudit = app.linkAudit || [];
   const isBroken = (l) => l.blocked || l.status === null || l.status === undefined || l.status >= 400;
-  const brokenLinks = linkAudit.filter(isBroken);
+  // The server sets linkAuditBlocked when the site's WAF/CDN refused the plain
+  // HTTP checks (it answers the real browser fine). Those statuses say nothing
+  // about the links, so they must not be rendered as breakage.
+  const linkAuditBlocked = !!app.linkAuditBlocked;
+  const brokenLinks = linkAuditBlocked ? [] : linkAudit.filter(isBroken);
   const brokenFirstParty = brokenLinks.filter(l => l.firstParty);
   const brokenExternal = brokenLinks.filter(l => !l.firstParty);
   const diag = app.diagnostics || { console: [], pageErrors: [], http: [] };
@@ -7192,7 +7196,7 @@ function openSiteReport() {
 <div class="stats">
   <div class="stat"><div class="stat-num">${pages.length}</div><div class="stat-label">Pages Found</div></div>
   <div class="stat ${deadRoutes.length ? 'red' : 'green'}"><div class="stat-num">${deadRoutes.length}</div><div class="stat-label">Dead Routes</div></div>
-  <div class="stat ${brokenLinks.length ? 'red' : 'green'}"><div class="stat-num">${brokenLinks.length}</div><div class="stat-label">Broken Links</div></div>
+  <div class="stat ${linkAuditBlocked ? '' : (brokenLinks.length ? 'red' : 'green')}"><div class="stat-num">${linkAuditBlocked ? '—' : brokenLinks.length}</div><div class="stat-label">Broken Links${linkAuditBlocked ? ' (not checked)' : ''}</div></div>
   <div class="stat ${errorEntries.length ? 'red' : 'green'}"><div class="stat-num">${errorEntries.length}</div><div class="stat-label">Console Errors</div></div>
 </div>
 
@@ -7205,11 +7209,15 @@ ${!hasReportData ? `<div class="summary-box">This app was crawled before the Sit
 <h2>Dead Routes (${deadRoutes.length})</h2>
 ${deadRoutes.length ? deadRoutes.map(([p, d]) => `<div class="dead-row"><span class="path">${escapeHtml(p)}</span> — ${escapeHtml(d.name || '')} returned a 404</div>`).join('') : `<div class="no-vulns">✓ No dead routes found.</div>`}
 
-<h2>Broken Links — First-Party (${brokenFirstParty.length})</h2>
-${brokenFirstParty.length ? `<table class="link-table"><thead><tr><th>URL</th><th>Status</th><th>Found On</th></tr></thead><tbody>${brokenFirstParty.map(linkRowHtml).join('')}</tbody></table>` : `<div class="no-vulns">✓ No broken first-party links.</div>`}
+<h2>Broken Links — First-Party (${linkAuditBlocked ? 'not verified' : brokenFirstParty.length})</h2>
+${linkAuditBlocked
+  ? `<div class="no-vulns">❔ Links were NOT checked — the site refused the checks from our server (WAF/CDN bot rules). It answers a real browser normally, so this says nothing about your links either way.</div>`
+  : brokenFirstParty.length ? `<table class="link-table"><thead><tr><th>URL</th><th>Status</th><th>Found On</th></tr></thead><tbody>${brokenFirstParty.map(linkRowHtml).join('')}</tbody></table>` : `<div class="no-vulns">✓ No broken first-party links.</div>`}
 
-<h2>Broken Links — External (${brokenExternal.length})</h2>
-${brokenExternal.length ? `<table class="link-table"><thead><tr><th>URL</th><th>Status</th><th>Found On</th></tr></thead><tbody>${brokenExternal.map(linkRowHtml).join('')}</tbody></table>` : `<div class="no-vulns">✓ No broken external links.</div>`}
+<h2>Broken Links — External (${linkAuditBlocked ? 'not verified' : brokenExternal.length})</h2>
+${linkAuditBlocked
+  ? `<div class="no-vulns">❔ Not checked — see above.</div>`
+  : brokenExternal.length ? `<table class="link-table"><thead><tr><th>URL</th><th>Status</th><th>Found On</th></tr></thead><tbody>${brokenExternal.map(linkRowHtml).join('')}</tbody></table>` : `<div class="no-vulns">✓ No broken external links.</div>`}
 
 <h2>Console Errors (${errorEntries.length})</h2>
 ${Object.keys(errorsByPage).length ? Object.entries(errorsByPage).map(([p, errs]) => `<div class="err-row"><span class="err-page">${escapeHtml(p)}</span>${errs.slice(0, 12).map(e => `<div class="err-line">${e.firstParty === false ? '[3rd-party] ' : ''}${escapeHtml(e.text)}</div>`).join('')}${errs.length > 12 ? `<div class="err-line">…and ${errs.length - 12} more</div>` : ''}</div>`).join('') : `<div class="no-vulns">✓ No console errors captured.</div>`}
