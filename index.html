@@ -4175,7 +4175,16 @@ function renderSecSetup() {
 }
 
 async function secRunScan() {
-  if (!hasApiKey()) { tpToast('Add your Claude API key first'); return; }
+  // The server funds ONE read-only security scan per free account from the
+  // support key (/api/security/api-intercept swaps in ANTHROPIC_SUPPORT_KEY
+  // before its own apiKey check), and this page advertises it as "no API key
+  // needed". Gating on a key here made that free scan unreachable for every
+  // free user — the exact audience it exists to convert. Let them through and
+  // let the server decide: it answers FREE_SECURITY_USED /
+  // FREE_DAILY_BUDGET_EXCEEDED once the free scan is spent, and the handler
+  // below already turns those into the paywall.
+  const freeScanEligible = (currentUser?.plan || 'free') === 'free';
+  if (!hasApiKey() && !freeScanEligible) { tpToast('Add your Claude API key first'); return; }
   const cfg = state.secConfig;
   if (!cfg.appId) { tpToast('Select an app'); return; }
   if ((!cfg.userA.email && !cfg.userA.sessionState) || (!cfg.userB.email && !cfg.userB.sessionState)) {
