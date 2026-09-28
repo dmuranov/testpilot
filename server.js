@@ -13572,7 +13572,11 @@ app.post('/api/security/api-intercept', async (req, res) => {
     const capturedResponsesB = new Map(); // User B's OWN session — what B legitimately sees
     const brokenResources = []; // TP-PERF-04: 4xx on page assets during nav
     const RESPONSE_BODY_CAP = 200000; // full bodies: the data-exposure scan missed fields past 2000 chars
-    const THIRD_PARTY = /googleapis\.com|analytics|sentry|fonts\./;
+    // Firebase apps talk to *.googleapis.com (firestore, identitytoolkit,
+    // securetoken). Excluding the whole domain captured ZERO API calls for
+    // them, so the scan silently tested nothing. Only fonts/analytics/sentry
+    // are third-party noise.
+    const THIRD_PARTY = /fonts\.googleapis\.com|google-analytics|googletagmanager|analytics|sentry|fonts\./;
 
     const captureRequest = (req) => {
       const url = req.url();
@@ -13723,7 +13727,8 @@ app.post('/api/security/api-intercept', async (req, res) => {
       const inlineJs = await pageA.evaluate(() => Array.from(document.querySelectorAll('script:not([src])')).map(s => s.textContent || '').join('\n')).catch(() => '');
       const secretHits = scanForSecrets([...bundleTexts, { url: 'inline', text: inlineJs }]);
       for (const s of secretHits) results.push({ type: 'secret_exposure', level: 10, test: s.name, verdict: 'VULNERABLE', severity: s.sev, note: s.note + ` (found: ${s.redacted})` });
-      if (secretHits.length === 0) results.push({ type: 'secret_exposure', level: 10, test: 'Exposed secrets in client bundle', verdict: 'SAFE', severity: 'none', note: `Scanned ${bundleTexts.length} script file(s) — no live keys or service-role secrets exposed in the client bundle.` });
+      if (secretHits.length === 0 && bundleTexts.length === 0 && !inlineJs.trim()) results.push({ type: 'secret_exposure', level: 10, test: 'Exposed secrets in client bundle', verdict: 'INCONCLUSIVE', severity: 'none', note: 'No script or document body was captured from the app — nothing was scanned for secrets. NOT tested.' });
+      else if (secretHits.length === 0) results.push({ type: 'secret_exposure', level: 10, test: 'Exposed secrets in client bundle', verdict: 'SAFE', severity: 'none', note: `Scanned ${bundleTexts.length} script file(s) — no live keys or service-role secrets exposed in the client bundle.` });
     } catch (e) {
       // A check that threw produced no row at all before — it must read as untested.
       results.push({ type: 'secret_exposure', level: 10, test: 'Exposed secrets in client bundle', verdict: 'INCONCLUSIVE', severity: 'none', note: `Client-bundle secret scan could not complete (${String(e.message || e).slice(0, 120)}) — NOT tested.` });
@@ -13741,8 +13746,10 @@ app.post('/api/security/api-intercept', async (req, res) => {
     // what lets it fire without credentials). Only rows that actually come back
     // are ever flagged — an RLS-protected table returns 200 [] and is SAFE, so
     // secured apps never false-positive.
+    let sbConfig = null; // hoisted: the anon key is needed again for User B's token capture and the logout replay
     try {
       const sb = extractSupabaseConfig(bundleTexts);
+      sbConfig = sb;
       if (!sb) {
         // Not applicable is neutral — it must not count as a passed check.
         results.push({ type: 'rls_exposure', level: 11, verdict: 'SKIPPED', severity: 'none', note: 'No Supabase project detected in the client bundle — anon-key/RLS probe not applicable.' });
@@ -13815,9 +13822,14 @@ app.post('/api/security/api-intercept', async (req, res) => {
     // ever being tested. Keep the LAST value seen — Supabase sends the anon key
     // as a Bearer before login and User B's JWT after.
     const authByHostB = new Map();
+    const anonBearer = sbConfig ? `Bearer ${sbConfig.anonKey}` : null;
     pageB.on('request', req => {
       const a = req.headers().authorization;
       if (!a) return;
+      // The Supabase anon key is not User B's credential. It is sent before
+      // login AND on token refreshes after it; storing it here replayed User
+      // A's calls anonymously and the 401/empty answer read as "isolated".
+      if (anonBearer && a === anonBearer) return;
       try { authByHostB.set(new URL(req.url()).host, a); } catch {}
     });
 
@@ -14018,6 +14030,11 @@ app.post('/api/security/api-intercept', async (req, res) => {
         }
       }
     }
+    if (crossAccountTestable && replayList.length === 0) {
+      // No API traffic at all means nothing was judged — an empty level must
+      // not read as a clean one. (When logins failed, the row above covers it.)
+      results.push({ type: 'api_replay', level: 1, verdict: 'INCONCLUSIVE', severity: 'none', note: `No API calls were captured during the crawl (${capturedRequests.length} request(s) seen, none usable) — cross-account access NOT tested.` });
+    }
     if (replayWritesSkipped > 0) {
       results.push({
         type: 'api_replay_skipped', level: 1, verdict: 'SKIPPED', severity: 'none',
@@ -14129,26 +14146,37 @@ app.post('/api/security/api-intercept', async (req, res) => {
       cleanPageContent.bodyLength > 200 &&
       !LOGIN_WORDS.test(cleanPageContent.bodyText);
 
+    // A copied session being accepted is how sessions WORK — every correctly
+    // built app "fails" this, and reporting it as critical put one always-on
+    // headline finding on every report. On its own it is an observation
+    // (INFO). It becomes a finding only when THIS scan also found a way to
+    // steal the session (cookie readable by JS / sent over HTTP, reflected
+    // XSS) or a token that stays useful far too long (no expiry, logout that
+    // does not revoke). That regrade runs after every level — see
+    // "LEVEL 3 REGRADE" below.
     let stolenVerdict, stolenSeverity, stolenNote;
+    const stolenEvidence = cleanLeak.ownerMatches[0] ? `owner ${cleanLeak.ownerMatches[0]}` : cleanLeak.idMatches[0] ? `record ${cleanLeak.idMatches[0]}` : 'identity marker';
     if (!hadRealAuthA) {
       stolenVerdict = 'INCONCLUSIVE'; stolenSeverity = 'none';
       stolenNote = 'No authenticated User A session was established (no credentials / captured session provided) — nothing to steal, so stolen-session access cannot be assessed.';
     } else if (cleanShowsUserAData) {
-      stolenVerdict = 'VULNERABLE'; stolenSeverity = 'critical';
-      stolenNote = `Injected User A's cookies/tokens into a fresh browser and the app returned User A's records without login (${cleanLeak.ownerMatches[0] ? `owner ${cleanLeak.ownerMatches[0]}` : cleanLeak.idMatches[0] ? `record ${cleanLeak.idMatches[0]}` : 'identity marker'}) — stolen session grants full access.`;
+      stolenVerdict = 'INFO'; stolenSeverity = 'none';
+      stolenNote = `A copy of User A's cookies/tokens in a fresh browser was accepted and returned User A's records (${stolenEvidence}) — as sessions normally are. Not a finding on its own; graded against the theft vectors this scan found.`;
     } else if (cleanRendersApp) {
-      stolenVerdict = 'POTENTIAL_VULNERABILITY'; stolenSeverity = 'medium';
-      stolenNote = "Injected session rendered app content without a login wall, but User A's identity was not confirmed — manual verification needed.";
+      stolenVerdict = 'INCONCLUSIVE'; stolenSeverity = 'none';
+      stolenNote = "Injected session rendered app content without a login wall, but User A's identity was not confirmed — could not tell whether the session copy was accepted; NOT tested.";
     } else {
       stolenVerdict = 'SAFE'; stolenSeverity = 'none';
-      stolenNote = 'Stolen session rejected — injected session landed on login or an empty page.';
+      stolenNote = 'Copied session rejected — the fresh browser landed on login or an empty page (the app binds sessions to more than the cookie/token).';
     }
-    const stolenSessionWorks = stolenVerdict === 'VULNERABLE';
+    const stolenSessionWorks = hadRealAuthA && cleanShowsUserAData;
 
-    results.push({
+    const tokenSwapRow = {
       type: 'token_swap',
       level: 3,
-      test: 'Stolen session access (no login)',
+      test: 'Copied session access (no login)',
+      sessionAccepted: stolenSessionWorks,
+      pagesReached: [],
       cookiesInjected: cookiesA.length,
       localStorageKeysInjected: authTokenKeys.length,
       landedOn: cleanPageContent.url,
@@ -14159,9 +14187,10 @@ app.post('/api/security/api-intercept', async (req, res) => {
       verdict: stolenVerdict,
       severity: stolenSeverity,
       note: stolenNote
-    });
+    };
+    results.push(tokenSwapRow);
 
-    // Test 3b: Navigate to protected pages with stolen session
+    // Test 3b: Navigate to protected pages with the copied session
     if (stolenSessionWorks) {
       for (const navPath of navPaths.slice(0, 4)) {
         try {
@@ -14174,16 +14203,9 @@ app.post('/api/security/api-intercept', async (req, res) => {
           }));
           
           const hasData = content.bodyLength > 200 && !content.url.includes('login');
-          results.push({
-            type: 'token_swap_nav',
-            level: 3,
-            test: `Stolen session: ${navPath}`,
-            url: content.url,
-            headings: content.headings.slice(0, 3),
-            bodyLength: content.bodyLength,
-            verdict: hasData ? 'VULNERABLE' : 'SAFE',
-            severity: hasData ? 'high' : 'none'
-          });
+          // Evidence on the parent row, not one more finding per page: four
+          // pages reached with one copied session are one fact, not four.
+          if (hasData) tokenSwapRow.pagesReached.push(navPath);
         } catch {}
       }
     }
@@ -14197,18 +14219,33 @@ app.post('/api/security/api-intercept', async (req, res) => {
     // credential to still be valid. After logout, A's OLD credential is
     // replayed through the request API against a read that returned data.
     try {
+      const cookieHeader = (cookiesA || []).filter(c => /sess|auth|token|sid|jwt|connect|login/i.test(c.name) && !/csrf|xsrf/i.test(c.name)).map(c => `${c.name}=${c.value}`).join('; ');
+      // Playwright's request.headers() does not carry the Cookie header, so a
+      // cookie-session app never matched `c.headers.cookie` and this check
+      // always came back "no credential found". A session cookie observed on
+      // User A's context is the credential for every authenticated read.
+      // The Supabase anon key is not a user credential either.
+      const anonBearerA = sbConfig ? `Bearer ${sbConfig.anonKey}` : null;
+      const isUserToken = (h) => !!h && h !== anonBearerA;
+      // The app's cookies only authenticate reads on the app's OWN host. A
+      // Supabase/Firebase read carries a bearer; sending the app cookie there
+      // gets a 401 that would read as "old credential rejected" — untested.
+      let appHost = ''; try { appHost = new URL(baseUrl).host; } catch {}
+      const sameAppHost = (u) => { try { return new URL(u).host === appHost; } catch { return false; } };
       const authRead = uniqueApis.find(c => c.isRead && !c.isAuthEndpoint && c.aStatus === 200 && c.aHasRecords
-        && (c.headers?.authorization || c.headers?.cookie));
-      const authHeader = authRead && authRead.headers && (authRead.headers.authorization || authRead.headers.Authorization);
-      const cookieHeader = (cookiesA || []).filter(c => /sess|auth|token|sid|jwt|connect|login/i.test(c.name)).map(c => `${c.name}=${c.value}`).join('; ');
+        && (isUserToken(c.headers?.authorization) || (!!cookieHeader && sameAppHost(c.url))));
+      const rawAuthHeader = authRead && authRead.headers && (authRead.headers.authorization || authRead.headers.Authorization);
+      const authHeader = isUserToken(rawAuthHeader) ? rawAuthHeader : null;
       if (!authOkA) {
         results.push({ type: 'logout_invalidation', level: 9, verdict: 'INCONCLUSIVE', severity: 'none', note: `Logout invalidation not tested — ${authNoteA}.` });
       } else if (!authRead || (!authHeader && !cookieHeader)) {
         results.push({ type: 'logout_invalidation', level: 9, verdict: 'INCONCLUSIVE', severity: 'none', note: 'Logout invalidation not tested — no authenticated data read with a captured credential was found in User A\'s traffic.' });
       } else {
+        const preLogoutUrl = pageA.url();
+        const preLogoutCookies = await ctxA.cookies().catch(() => cookiesA || []);
         let loggedOut = false;
         try {
-          const btn = await pageA.$('button:has-text("Log out"), button:has-text("Logout"), button:has-text("Sign out"), button:has-text("Salir"), a:has-text("Cerrar sesión"), a:has-text("Log out"), [aria-label*="logout" i], [aria-label*="log out" i]');
+          const btn = await pageA.$('button:has-text("Log out"), button:has-text("Logout"), button:has-text("Sign out"), button:has-text("Salir"), a:has-text("Cerrar sesión"), a:has-text("Log out"), a:has-text("Logout"), a:has-text("Sign out"), [aria-label*="logout" i], [aria-label*="log out" i], [aria-label*="sign out" i]');
           if (btn) { await btn.click({ timeout: 4000 }).catch(() => {}); await pageA.waitForTimeout(2500); loggedOut = true; }
         } catch {}
         if (!loggedOut) {
@@ -14217,9 +14254,33 @@ app.post('/api/security/api-intercept', async (req, res) => {
           }
           await pageA.waitForTimeout(1000);
         }
+        // Did a logout actually happen? Without proof, "old credential still
+        // works" only means "the session still works" — this reported
+        // VULNERABLE on apps whose logout control was never found. Evidence
+        // of a logout: the page sits at a login wall, a session cookie
+        // changed or vanished, or the auth localStorage entries were cleared.
+        const postCookies = await ctxA.cookies().catch(() => []);
+        // A session cookie that VANISHED (or was emptied) is proof; one that
+        // merely changed is not — Laravel and rolling express-session cookies
+        // re-issue a new value on every response without any logout.
+        const sessCookieGone = (preLogoutCookies || []).filter(c => /sess|auth|token|sid|jwt|connect|login/i.test(c.name) && !/csrf|xsrf|stripe|mixpanel|_ga|_gid|hotjar|amplitude|intercom|segment|_fbp/i.test(c.name))
+          .some(c => !postCookies.some(pc => pc.name === c.name && pc.value));
+        const postLocal = await pageA.evaluate(() => { const o = {}; for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); o[k] = localStorage.getItem(k); } return o; }).catch(() => null);
+        const authKeysA = Object.keys(localStorageA).filter(k => /token|auth|session|jwt/i.test(k));
+        // Removed, not merely rotated: a refreshed token is not a logout.
+        const localCleared = !!postLocal && authKeysA.length > 0 && authKeysA.every(k => !postLocal[k]);
+        // A login URL alone is not proof (an app can live under /auth/…); the
+        // page must show a password field, or have MOVED to a login URL.
+        const loginUrlRe = /\/(login|signin|sign-?in|auth)\b/i;
+        const atLoginWall = await pageA.locator('input[type="password"]').first().isVisible({ timeout: 1000 }).catch(() => false)
+          || (loginUrlRe.test(pageA.url()) && !loginUrlRe.test(preLogoutUrl));
+        const logoutConfirmed = atLoginWall || sessCookieGone || localCleared;
+        if (!logoutConfirmed) {
+          results.push({ type: 'logout_invalidation', level: 9, verdict: 'INCONCLUSIVE', severity: 'none', note: `Logout invalidation not tested — TestPilot could not log User A out (${loggedOut ? 'a logout control was clicked but the session did not change' : 'no logout control found and the common logout URLs had no effect'}), so there is no post-logout state to replay against.` });
+        } else {
         const oldCred = {};
         if (authHeader) oldCred.authorization = authHeader;
-        if (cookieHeader) oldCred.cookie = cookieHeader;
+        if (cookieHeader && sameAppHost(authRead.url)) oldCred.cookie = cookieHeader;
         const stale = await pwRequest.newContext({ ignoreHTTPSErrors: true });
         let replay;
         try { replay = await replayVia(stale, authRead, oldCred); } finally { await stale.dispose().catch(() => {}); }
@@ -14228,7 +14289,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
         if (!replay.reached) {
           results.push({ type: 'logout_invalidation', level: 9, verdict: 'INCONCLUSIVE', severity: 'none', note: `Logout invalidation not tested — the post-logout replay never reached the app (${replay.error || 'network error'}).` });
         } else if (stillData) {
-          if (cookieHeader && !authHeader) {
+          if (oldCred.cookie && !authHeader) {
             results.push({ type: 'logout_invalidation', level: 9, verdict: 'VULNERABLE', severity: 'high', note: `After logout, User A's old SESSION COOKIE still returned authenticated data from ${su} (HTTP ${replay.status}, ${replay.length}b). Logout didn't invalidate the server session — a stolen cookie stays valid.` });
           } else {
             results.push({ type: 'logout_invalidation', level: 9, verdict: 'SUSPICIOUS', severity: 'medium', note: `After logout, a captured bearer token still returned data from ${su} (HTTP ${replay.status}). Common for STATELESS JWTs (can't revoke without a server-side denylist) — a stolen token stays valid until it expires. Confirm whether logout should revoke it.` });
@@ -14238,6 +14299,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
         } else {
           results.push({ type: 'logout_invalidation', level: 9, verdict: 'INCONCLUSIVE', severity: 'none', note: `Post-logout replay of ${su} returned HTTP ${replay.status} — not an authorization decision; NOT tested.` });
         }
+        } // logoutConfirmed
       }
     } catch (e) {
       results.push({ type: 'logout_invalidation', level: 9, verdict: 'INCONCLUSIVE', severity: 'none', note: `Could not run logout-invalidation check: ${e.message}` });
@@ -14548,9 +14610,19 @@ app.post('/api/security/api-intercept', async (req, res) => {
     //      exposure to attacker-controlled site.
     //   2. ACAO: * with ACAC: true (illegal but seen in the wild)
     //   3. ACAO matches via regex that includes attacker subdomain
-    try {
+    // Probe the app origin AND every API host the app called: for Supabase /
+    // Base44 / Firebase apps the data lives on another origin, and grading only
+    // the static HTML host said "CORS properly restricted" about the wrong server.
+    const corsSeen = new Set([baseUrl]);
+    const corsTargets = [baseUrl];
+    for (const r of capturedRequests) {
+      if (corsTargets.length >= 4) break;
+      if (isStaticAsset(r.url)) continue;
+      try { const o = new URL(r.url).origin; if (!corsSeen.has(o)) { corsSeen.add(o); corsTargets.push(r.url); } } catch {}
+    }
+    for (const corsTarget of corsTargets) try {
       const evilOrigin = 'https://evil.example.com';
-      const corsResp = await fetchWithTimeout(baseUrl, {
+      const corsResp = await fetchWithTimeout(corsTarget, {
         method: 'GET',
         headers: { 'Origin': evilOrigin },
         redirect: 'manual',
@@ -14566,7 +14638,11 @@ app.post('/api/security/api-intercept', async (req, res) => {
       // "*", so no authenticated data is exposed — that's a low hygiene issue,
       // not a critical leak. (Lumping them together over-claimed CRITICAL.)
       const cv = corsVerdict({ acao, acac, evilOrigin }); // routes/sec-classify.js (tested)
-      const cVerdict = cv.verdict, cSeverity = cv.severity;
+      // A bearer-token API on another origin (Supabase REST, googleapis) answers
+      // "*" by design and the customer does not configure it — there, only a
+      // reflected Origin with credentials is a finding.
+      const thirdPartyApi = corsTarget !== baseUrl && cv.kind !== 'reflected' && cv.kind !== 'restricted';
+      const cVerdict = thirdPartyApi ? 'SKIPPED' : cv.verdict, cSeverity = thirdPartyApi ? 'none' : cv.severity;
       const cNote = cv.kind === 'reflected'
         ? `CORS echoes the request Origin WITH credentials → any site can read authenticated responses. Evidence — request "Origin: ${evilOrigin}" → "Access-Control-Allow-Origin: ${acao}", "Access-Control-Allow-Credentials: ${acac}". Fix: never reflect the request Origin while ACAC:true; use an explicit origin allow-list.`
         : cv.kind === 'wildcard-creds'
@@ -14574,21 +14650,23 @@ app.post('/api/security/api-intercept', async (req, res) => {
           : cv.kind === 'wildcard'
             ? `"Access-Control-Allow-Origin: *" (credentials: ${acac || 'absent'}) — only public/unauthenticated responses are readable cross-origin.`
             : `CORS properly restricted — foreign Origin "${evilOrigin}" was NOT reflected (Access-Control-Allow-Origin: ${acao || 'not set'}, Access-Control-Allow-Credentials: ${acac || 'not set'}).`;
+      let corsHost = corsTarget; try { corsHost = new URL(corsTarget).host; } catch {}
       results.push({
         type: 'cors',
         level: 5,
-        test: 'CORS Origin reflection',
+        test: `CORS Origin reflection (${corsHost})`,
+        checkedUrl: shortUrlOf(corsTarget),
         acao,
         acac,
         verdict: cVerdict,
         severity: cSeverity,
-        note: cNote,
+        note: thirdPartyApi ? `Third-party API host — ${cNote} Expected for a bearer-token API and not the app's own configuration; not graded.` : cNote,
       });
     } catch (e) {
       // A server-side fetch does NOT throw merely because CORS headers are
       // absent (CORS is browser-enforced) — so a throw here means the request
       // itself failed (timeout/network/abort). That's "couldn't test", not safe.
-      results.push({ type: 'cors', level: 5, verdict: 'INCONCLUSIVE', severity: 'none', note: `Could not test CORS (probe request failed): ${e.message}` });
+      results.push({ type: 'cors', level: 5, verdict: 'INCONCLUSIVE', severity: 'none', note: `Could not test CORS on ${shortUrlOf(corsTarget)} (probe request failed): ${e.message}` });
     }
 
     // ── LEVEL 5c: Information disclosure paths ───────────────────
@@ -14630,9 +14708,20 @@ app.post('/api/security/api-intercept', async (req, res) => {
       try {
         const r = await fetchWithTimeout(baseUrl + probe.path, { method: 'GET', redirect: 'manual' });
         if (r.status >= 200 && r.status < 300) {
-          const body = (await r.text()).substring(0, 1000);
+          // Sniff the first chunk only — a real heap dump is hundreds of MB and
+          // `body.length` after a 1000-char cut could never reach byLength, so
+          // the size backstop was dead code. Size comes from Content-Length.
+          const declaredLength = Number(r.headers.get('content-length') || 0);
+          let body = '';
+          try {
+            // fetchWithTimeout's abort ends at the headers; the body read gets its own clock.
+            const reader = r.body.getReader();
+            const first = await Promise.race([reader.read(), new Promise((_, rej) => setTimeout(() => rej(new Error('body read timeout')), 5000))]);
+            body = Buffer.from(first.value || []).toString('utf8').substring(0, 1000);
+            await reader.cancel().catch(() => {});
+          } catch { body = ''; }
           const matchesByPattern = probe.match.test(body);
-          const matchesByLength = probe.byLength && body.length >= probe.byLength;
+          const matchesByLength = !!probe.byLength && declaredLength >= probe.byLength;
           const isVuln = matchesByPattern || matchesByLength;
           if (isVuln) {
             results.push({
@@ -14676,17 +14765,22 @@ app.post('/api/security/api-intercept', async (req, res) => {
         const r = await fetchWithTimeout(testUrl, { method: 'GET', redirect: 'manual' });
         const loc = r.headers.get('location') || '';
         const lands = loc.includes('evil.example.com');
+        const redirected = r.status >= 300 && r.status < 400;
         results.push({
           type: 'open_redirect',
           level: 5,
           url: testUrl.substring(0, 120),
           status: r.status,
           locationHeader: loc.substring(0, 120),
-          verdict: lands ? 'VULNERABLE' : 'SAFE',
+          // A non-3xx answer (an SPA shell, an API error) means the server never
+          // redirected at all — nothing was validated, so it is not SAFE.
+          verdict: lands ? 'VULNERABLE' : redirected ? 'SAFE' : 'INCONCLUSIVE',
           severity: lands ? 'medium' : 'none',
           note: lands
             ? `Redirect param accepted attacker URL — phishing assist`
-            : 'Redirect target validated',
+            : redirected
+              ? 'Server redirected to its own target, not the attacker URL — redirect target validated'
+              : `Server answered ${r.status} without redirecting — no server-side redirect to judge (client-side redirects are not covered); NOT tested`,
         });
       } catch (e) {
         // A probe that got no response tested nothing — report it, don't drop it.
@@ -14711,7 +14805,15 @@ app.post('/api/security/api-intercept', async (req, res) => {
     const JWT_RE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*$/;
     const allTokens = [];
     for (const [k, v] of Object.entries(localStorageA)) {
-      if (typeof v === 'string' && JWT_RE.test(v) && v.length > 20) allTokens.push({ source: `localStorage[${k}]`, token: v });
+      if (typeof v !== 'string') continue;
+      if (JWT_RE.test(v) && v.length > 20) { allTokens.push({ source: `localStorage[${k}]`, token: v }); continue; }
+      // Supabase / Firebase keep the JWT inside a JSON blob (sb-*-auth-token →
+      // {access_token}); a plain-shape check never saw those tokens.
+      try {
+        const j = JSON.parse(v);
+        const inner = j && typeof j === 'object' ? (j.access_token || j.accessToken || j.idToken || j.token || j.currentSession?.access_token || j.stsTokenManager?.accessToken) : null;
+        if (typeof inner === 'string' && JWT_RE.test(inner) && inner.length > 20) allTokens.push({ source: `localStorage[${k}].access_token`, token: inner });
+      } catch {}
     }
     for (const c of cookiesA) {
       if (c.value && JWT_RE.test(c.value) && c.value.length > 20) allTokens.push({ source: `cookie[${c.name}]`, token: c.value });
@@ -14763,12 +14865,16 @@ app.post('/api/security/api-intercept', async (req, res) => {
       }
     }
     if (allTokens.length === 0) {
+      // Nothing to analyse is not a pass. Without a login there cannot be a
+      // token; with one, opaque tokens are simply outside this check's scope.
       results.push({
         type: 'jwt',
         level: 5,
-        verdict: 'SAFE',
+        verdict: authOkA ? 'SKIPPED' : 'INCONCLUSIVE',
         severity: 'none',
-        note: 'No JWT-shaped tokens found in storage/cookies (likely opaque session tokens)',
+        note: authOkA
+          ? 'No JWT-shaped tokens found in storage/cookies (likely opaque session tokens) — JWT hygiene not applicable'
+          : `JWT hygiene NOT tested — ${authNoteA}, so no session token could be observed.`,
       });
     }
 
@@ -14781,10 +14887,19 @@ app.post('/api/security/api-intercept', async (req, res) => {
     // customer's real test account. If no identity field can be swapped the
     // probe is not sent at all.
     const LOGIN_HINT = /login|sign[_-]?in|auth|session|token/i;
-    const loginCandidate = capturedRequests.find(r =>
+    // Logins handled by a shared identity provider (Firebase identitytoolkit,
+    // Google, Auth0, Clerk, Okta, Cognito) are not the app's endpoint to
+    // rate-limit, and Firebase throttles with HTTP 400 TOO_MANY_ATTEMPTS, never
+    // a 429 — probing it graded every Firebase app "credential stuffing risk".
+    const THIRD_PARTY_IDP = /identitytoolkit\.googleapis\.com|securetoken\.googleapis\.com|accounts\.google\.com|auth0\.com|clerk\.(?:com|dev|accounts)|okta\.com|cognito-idp\./i;
+    const loginPosts = capturedRequests.filter(r =>
       r.method === 'POST' && LOGIN_HINT.test(r.url) && r.postData && /pass/i.test(r.postData)
     );
-    const fabricated = loginCandidate ? fabricateLoginBody(loginCandidate.postData) : { ok: false, reason: 'no login POST captured during crawl' };
+    const idpLogin = loginPosts.find(r => THIRD_PARTY_IDP.test(r.url));
+    const loginCandidate = loginPosts.find(r => !THIRD_PARTY_IDP.test(r.url)) || null;
+    let idpHost = 'an external host'; try { if (idpLogin) idpHost = new URL(idpLogin.url).host; } catch {}
+    const fabricated = loginCandidate ? fabricateLoginBody(loginCandidate.postData)
+      : { ok: false, reason: idpLogin ? `login is handled by a third-party identity provider (${idpHost}) whose rate limit is not the app's to configure` : 'no login POST captured during crawl' };
     if (loginCandidate && fabricated.ok) {
       try {
         const attempts = 10;
@@ -14800,7 +14915,12 @@ app.post('/api/security/api-intercept', async (req, res) => {
               redirect: 'manual',
             });
             statuses.push(r.status);
-            if (r.status === 429) { saw429 = true; break; }
+            if (r.status === 429 || r.status === 423) { saw429 = true; break; }
+            // Some stacks throttle with a 4xx body instead of a 429 status.
+            if (r.status >= 400 && r.status < 500) {
+              const rb = await r.text().catch(() => '');
+              if (/too[_ ]?many|rate[_ ]?limit|over_request_rate|try again later/i.test(rb.slice(0, 2000))) { saw429 = true; break; }
+            }
           } catch {
             statuses.push(0);
           }
@@ -14813,13 +14933,18 @@ app.post('/api/security/api-intercept', async (req, res) => {
           url: loginCandidate.url.substring(0, 120),
           attempts: statuses.length,
           statuses,
-          verdict: saw429 ? 'SAFE' : reachedCount === 0 ? 'INCONCLUSIVE' : 'VULNERABLE',
-          severity: saw429 ? 'none' : reachedCount === 0 ? 'none' : 'high',
+          // VULNERABLE only when the endpoint absorbed the WHOLE burst; a
+          // partial burst (timeouts) says nothing about its limit, and the
+          // note used to claim 10 attempts whatever actually got through.
+          verdict: saw429 ? 'SAFE' : reachedCount < attempts ? 'INCONCLUSIVE' : 'VULNERABLE',
+          severity: saw429 ? 'none' : reachedCount < attempts ? 'none' : 'high',
           note: (saw429
-            ? `Rate-limited after ${statuses.length} bad-cred attempts (429 received)`
+            ? `Rate-limited after ${statuses.length} bad-cred attempts (HTTP ${statuses[statuses.length - 1]} received)`
             : reachedCount === 0
               ? `Probe requests never reached the login endpoint — NOT tested`
-              : `${attempts} bad-cred attempts allowed without 429 — credential stuffing risk`)
+              : reachedCount < attempts
+                ? `Only ${reachedCount} of ${attempts} probe requests reached the login endpoint and none was rate-limited — burst incomplete; NOT tested`
+                : `${reachedCount} bad-cred attempts allowed without 429 — credential stuffing risk`)
             + ` [probed with a fabricated address ${fabricated.probeEmail}; account lockout on the real test account was not tested by design]`,
         });
       } catch (e) {
@@ -14846,11 +14971,19 @@ app.post('/api/security/api-intercept', async (req, res) => {
       const pCtx = await pBrowser.newContext({ viewport: { width: 1280, height: 800 } });
       const pPage = await pCtx.newPage();
       pPage.on('request', r => { try { const u = r.url(); if (TRACKERS.test(u)) trackerHits.add(new URL(u).hostname); } catch {} });
-      await pPage.goto(appKnowledge.url, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
+      let privNavOk = true;
+      await pPage.goto(appKnowledge.url, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => { privNavOk = false; });
       await pPage.waitForTimeout(2500); // settle — do NOT click anything (no consent given)
       const preCookies = await pCtx.cookies().catch(() => []);
       const nonEssential = preCookies.filter(c => /_ga|_gid|_gat|_fbp|_hj|mixpanel|amplitude|mp_|intercom|hubspot|__stripe|ajs_|_clck|_clsk|tiktok/i.test(c.name));
       await pBrowser.close();
+      // A page that never loaded fired no trackers and set no cookies — that
+      // used to be reported as a clean SAFE pair. (networkidle timing out on a
+      // page that keeps polling still observed the page; only an empty
+      // observation after a failed load is untested.)
+      if (!privNavOk && trackerHits.size === 0 && preCookies.length === 0) {
+        results.push({ type: 'privacy_tracking', level: 13, verdict: 'INCONCLUSIVE', severity: 'none', note: 'Pre-consent privacy check NOT tested — the page did not load in the clean browser, so no tracker or cookie could be observed.' });
+      } else {
       results.push({
         type: 'privacy_tracking', level: 13,
         verdict: trackerHits.size ? 'VULNERABLE' : 'SAFE', severity: trackerHits.size ? 'medium' : 'none',
@@ -14865,6 +14998,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
           ? `${nonEssential.length} non-essential cookie(s) set before consent: ${nonEssential.map(c => c.name).slice(0, 8).join(', ')}. Setting analytics/marketing cookies pre-consent is a technical non-conformance with GDPR Art.5(3). (Not a legal determination.)`
           : `No non-essential cookies set before consent.`,
       });
+      } // privNavOk
     } catch (e) {
       results.push({ type: 'privacy_tracking', level: 13, verdict: 'INCONCLUSIVE', severity: 'none', note: `Could not run pre-consent privacy check: ${e.message}` });
     }
@@ -14875,7 +15009,10 @@ app.post('/api/security/api-intercept', async (req, res) => {
     // in localStorage rather than cookies — in that case we say so plainly
     // rather than inventing a finding.)
     try {
-      const sessionish = (cookiesA || []).filter(c => /sess|auth|token|sid|jwt|csrf|login|connect/i.test(c.name) && !/stripe|mixpanel|_ga|_gid|hotjar/i.test(c.name));
+      // CSRF double-submit cookies (next-auth.csrf-token, XSRF-TOKEN) are
+      // readable by JavaScript BY DESIGN — grading them for HttpOnly produced
+      // a false "session cookie missing HttpOnly" on every NextAuth app.
+      const sessionish = (cookiesA || []).filter(c => /sess|auth|token|sid|jwt|login|connect/i.test(c.name) && !/stripe|mixpanel|_ga|_gid|hotjar|csrf|xsrf|callback-url/i.test(c.name));
       if (!authOkA) {
         // No login → no session cookie can exist; "none found" is not a pass.
         results.push({ type: 'cookie', level: 12, verdict: 'INCONCLUSIVE', severity: 'none', note: `Cookie-attribute check NOT tested — ${authNoteA}, so no session cookie could be observed.` });
@@ -15022,7 +15159,8 @@ app.post('/api/security/api-intercept', async (req, res) => {
         results.push({ type: 'session_fixation', level: 9, verdict: 'INCONCLUSIVE', severity: 'none', note: `Session fixation NOT tested — ${authNoteA}; no login occurred to compare the session identifier across.` });
       } else {
         const sessRe = /sess|auth|token|sid|jwt|connect\.sid|login/i;
-        const skipRe = /stripe|mixpanel|_ga|_gid|hotjar|amplitude|intercom|segment|_fbp/i;
+        // CSRF and callback-url cookies legitimately survive login unchanged.
+        const skipRe = /stripe|mixpanel|_ga|_gid|hotjar|amplitude|intercom|segment|_fbp|csrf|xsrf|callback-url/i;
         const preSess = (preCookiesA || []).filter(c => sessRe.test(c.name) && !skipRe.test(c.name) && c.value && c.value.length > 6);
         const survived = preSess.filter(pc => (cookiesA || []).some(c => c.name === pc.name && c.value === pc.value));
         if (survived.length) {
@@ -15033,6 +15171,29 @@ app.post('/api/security/api-intercept', async (req, res) => {
       }
     } catch (e) {
       results.push({ type: 'session_fixation', level: 9, verdict: 'INCONCLUSIVE', severity: 'none', note: `Could not run session-fixation check: ${e.message}` });
+    }
+
+    // ── LEVEL 3 REGRADE: copied session × theft vectors found in this scan ──
+    // The token_swap row was pushed as INFO before the cookie / XSS / JWT /
+    // logout checks had run. Now that they have, grade it on what they found.
+    if (tokenSwapRow.sessionAccepted) {
+      const vulnRows = (t) => results.filter(r => r.type === t && r.verdict === 'VULNERABLE');
+      const cookieVectors = vulnRows('cookie').filter(r => /HttpOnly|Secure/.test(r.note || ''));
+      const xssVectors = vulnRows('xss_reflected');
+      const jwtLong = results.filter(r => r.type === 'jwt' && (r.verdict === 'VULNERABLE' || r.verdict === 'SUSPICIOUS'));
+      const logoutStale = results.filter(r => r.type === 'logout_invalidation' && (r.verdict === 'VULNERABLE' || r.verdict === 'SUSPICIOUS'));
+      const pages = tokenSwapRow.pagesReached.length ? ` It also reached ${tokenSwapRow.pagesReached.length} further page(s): ${tokenSwapRow.pagesReached.slice(0, 4).join(', ')}.` : '';
+      if (cookieVectors.length || xssVectors.length) {
+        tokenSwapRow.verdict = 'VULNERABLE'; tokenSwapRow.severity = 'high';
+        const how = [...cookieVectors.map(r => String(r.note || '').replace(/ — exposes.*$/, '')), ...xssVectors.map(() => 'reflected XSS lets injected script read the session')];
+        tokenSwapRow.note = `A copy of User A's session grants full access in another browser (${stolenEvidence}), AND this scan found a way to steal it: ${how.slice(0, 2).join('; ')}.${pages} Fix the theft vector — the session mechanism itself is working as designed.`;
+      } else if (jwtLong.length || logoutStale.length) {
+        tokenSwapRow.verdict = 'VULNERABLE'; tokenSwapRow.severity = 'medium';
+        const why = jwtLong.length ? `the token ${jwtLong[0].note}` : `logout does not revoke it (${String(logoutStale[0].note || '').slice(0, 120)})`;
+        tokenSwapRow.note = `A copy of User A's session grants full access in another browser (${stolenEvidence}), and it stays useful too long: ${why}.${pages} No theft vector was found in this scan — shorten the token lifetime and revoke on logout.`;
+      } else {
+        tokenSwapRow.note = `A copy of User A's session grants full access in another browser (${stolenEvidence}), as sessions normally do.${pages} No theft vector was found in this scan (session cookie attributes, reflected XSS, token lifetime and logout revocation passed or were not applicable) — observation only, not a finding.`;
+      }
     }
 
     for (const r of results) stampFinding(r);
@@ -15050,6 +15211,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
     const safeResults = results.filter(r => r.verdict === 'SAFE');
     const inconclusiveResults = results.filter(r => r.verdict === 'INCONCLUSIVE');
     const skippedResults = results.filter(r => r.verdict === 'SKIPPED');
+    const infoResults = results.filter(r => r.verdict === 'INFO'); // observed, not graded
 
     // Coverage: how many data endpoints actually got a cross-account verdict.
     // A scan that captured 149 calls and judged 0 must read as untested, not
@@ -15084,6 +15246,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
       safe: safeResults.length,
       inconclusive: inconclusiveResults.length,
       skipped: skippedResults.length,
+      info: infoResults.length,
       capturedApiCalls: capturedRequests.length,
       uniqueApisTested: uniqueApis.length,
       idorUrlsTested: idorUrls.length,
@@ -15113,7 +15276,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
           tests: rows.length,
           vulns: rows.filter(r => r.verdict === 'VULNERABLE').length,
           safe: rows.filter(r => r.verdict === 'SAFE').length,
-          inconclusive: rows.filter(r => r.verdict === 'INCONCLUSIVE' || r.verdict === 'SKIPPED').length,
+          inconclusive: rows.filter(r => r.verdict === 'INCONCLUSIVE' || r.verdict === 'SKIPPED' || r.verdict === 'INFO').length,
         }];
       }))
     });
