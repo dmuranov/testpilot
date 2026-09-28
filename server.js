@@ -278,6 +278,17 @@ const isSuperAdmin = (e) => !!e && canonicalEmail(e) === canonicalEmail(SUPER_AD
 //    spent" pair is repeated in each endpoint's existing refund block. Folding
 //    the base run into the same counter would remove that and the base run's
 //    old check-then-act window in one change; not done here.
+//  - The dashboard's Learn gate reads free_runs_left (remaining(), holds not
+//    counted) and state.apps.length; the server gate uses left() and
+//    app_slots_used. In a multi-tab race the client may open the learn form
+//    that /api/learn then 402s — the client already shows the paywall on
+//    APP_SLOT_LIMIT, and the server is the authority.
+//  - The security scan commits its extra at the optimistic-burn point before
+//    a multi-minute inline scan; a process death mid-scan loses that spend
+//    with no report, exactly as the base scan is lost today.
+//  - Spends persist with no date. If the promo is ever re-run after the
+//    revert, delete free-runs-used.json on the box first, or identities that
+//    used extras the first time start at zero.
 //  - /api/chat/start spends one run per browser session, flat, as it always
 //    has. The dashboard's interactive two-user security flow opens two such
 //    sessions, so on free it costs two runs and needs two available — before
@@ -9800,7 +9811,9 @@ app.post('/api/learn', watchOnboarding('crawl', (req) => ({ email: onboardingEma
   const isExistingForOwner = !!(existingApp && existingApp.owner_email === ownerEmail);
   if (!isExistingForOwner) {
     const slotsUsed = Number(dbUser.app_slots_used || 0);
-    const slotLimit = appSlotsFor(sessionUser ? ownerEmail : '', planLimits, userPlan, !!dbUser.free_run_used, freeRuns.left(sessionUser ? ownerEmail : ''), slotsUsed);
+    // Session OR DB for the base flag, like every other gate: the burn's DB
+    // write is fire-and-forget, so the session may know first.
+    const slotLimit = appSlotsFor(sessionUser ? ownerEmail : '', planLimits, userPlan, !!(sessionUser?.free_run_used || dbUser.free_run_used), freeRuns.left(sessionUser ? ownerEmail : ''), slotsUsed);
     if (slotsUsed >= slotLimit) {
       return res.status(402).json({
         error: userPlan === 'free'

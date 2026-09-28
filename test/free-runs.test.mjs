@@ -115,8 +115,22 @@ test('refund() after commit gives the extra back, at most once, and persists', a
   assert.equal(a.left('a@x.com'), 2);
   hold.refund();                                   // idempotent
   assert.equal(a.left('a@x.com'), 2);
+  hold.commit();                                   // a refunded hold cannot charge again
+  assert.equal(a.left('a@x.com'), 2);
   await tick();
   assert.equal(files['x.json'], '[]');
+});
+
+test('a clean boot reads the file and leaves it alone', async () => {
+  const files = { 'x.json': '[["a@x.com",1]]' };
+  const fs = fakeFs(files);
+  const writes = [];
+  const w = fs.writeFile; fs.writeFile = async (f, b) => { writes.push(f); return w(f, b); };
+  const a = createFreeRunAllowance({ canonicalEmail, runsFor: () => 3, file: 'x.json', fs, log: quiet });
+  await a.load();
+  assert.equal(a.left('a@x.com'), 1);
+  assert.deepEqual(writes, []);                    // nothing to write back
+  assert.deepEqual(Object.keys(files), ['x.json']); // no stray .tmp
 });
 
 test('refund() before commit is a no-op (nothing was charged)', async () => {
