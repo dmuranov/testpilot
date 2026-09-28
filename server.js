@@ -10,6 +10,7 @@ import psl from 'psl';
 import { loadRecipe, saveRecipe, shouldCaptureRun, isReplayableAction, replayStepHeld, stepIdentity, recipeKey, EMAIL_TOKEN, PASSWORD_TOKEN } from './routes/recipes.js';
 import { assertPublicUrl } from './routes/ssrf.js';
 import { alertOnboardingIssue, watchOnboarding, onOnboardingFailure, isInternal as isInternalEmail } from './lib/onboarding-alert.js';
+import { createFreeRunAllowance } from './lib/free-runs.js';
 import { auditLinks } from './routes/link-audit.js';
 import { scanExposedFiles, tokenFileMatches, metaTagMatches } from './security-exposure.js';
 import express from 'express';
@@ -216,6 +217,133 @@ const SUPER_ADMIN_EMAIL = (process.env.SUPER_ADMIN_EMAIL || 'danijel.muranovic@g
 // on the free-run identity path — otherwise danijel.muranovic@ (stored WITH a
 // dot) would never equal the dot-stripped canonical form and the bypass breaks.
 const isSuperAdmin = (e) => !!e && canonicalEmail(e) === canonicalEmail(SUPER_ADMIN_EMAIL);
+
+// ── FREE RUN ALLOWANCE ────────────────────────────────────────
+// How many runs a free identity gets in all. TESTPILOT_FREE_RUNS applies to
+// every free identity; emails in TESTPILOT_TESTER_EMAILS get at least
+// TESTPILOT_TESTER_RUNS. 1 = today's single free run and no extras for anyone.
+//
+// The account stays on plan 'free': that is what the dashboard, the free
+// security scan and the support-key funding all key off, and every existing
+// burn/refund path is untouched. An "extra" run is one started while
+// free_run_used is already true (or the free security scan already used):
+//
+//   gate    — freeRuns.reserve() takes the extra synchronously, so two parallel
+//             requests cannot both take the same last one;
+//   4xx     — the reservation is released the moment the handler sends any
+//             response without a commit (even to a client that already left),
+//             so a validation error never costs a run. A client that
+//             disconnects while the handler is still running does NOT release
+//             it: the handler may still start the run, and it stays charged;
+//   commit  — right before the success response, at each endpoint's existing
+//             moment of commit;
+//   refund  — a run that ends without a verdict gets back what it spent: an
+//             extra run through hold.refund(), the base run through the
+//             existing free_run_used reset. Same "only a verdict counts" rule
+//             as the base run and the paid credit; extras can never grow past
+//             runsFor() - 1 because refund() is once per committed hold.
+//   report  — /api/auth/me and the funnel read freeRuns.remaining(), which
+//             ignores in-flight holds, so another tab merely holding the last
+//             extra does not paint a paywall.
+//
+// The base free run and the base free security scan stay the two separate
+// pools they are today; only the extras are shared between run types. The
+// base run's own check-then-act window (two requests both reading
+// free_run_used=false) predates this and is unchanged.
+//
+// Committed spends are persisted to ./free-runs-used.json (tmp+rename) so a
+// deploy does not re-grant anyone; in-flight holds are memory only, so a
+// restart mid-request charges nothing. If that file cannot be read or parsed
+// it is left alone, extras are disabled for everyone, and loading retries
+// every minute — never a clean slate. Keyed by canonicalEmail, so gmail dots
+// and plus-aliases are one identity. Mechanism + tests: lib/free-runs.js.
+//
+// Known limits, accepted for now:
+//  - /api/test and /api/learn honour extras only with a cookie session; their
+//    cookie-less paths take the email from the body. multirole/flow/chat/
+//    security go through requireUser, which also accepts header auth, so a
+//    header-authenticated integration can spend extras there but not on
+//    /api/test. The funnel mints a cookie session for any syntactically valid
+//    email, so this rule only stops drive-by API use — the real bound on
+//    support-key spend is the daily budget ceiling, as it is for the base run.
+//  - free_run_used on /api/auth/me is the derived "no runs left" value, not the
+//    raw flag; the client re-reads it after a charged run.
+//  - The temporary 3-run default is a code default (FREE_RUNS_DEFAULT, its own
+//    commit) rather than an env on the box, because the only deploy path from
+//    here is push-to-main; TESTPILOT_FREE_RUNS still wins when set. While it
+//    is 3, TESTER_EMAILS makes no difference.
+//  - The allowance is a second pool beside the legacy free_run_used flag, so
+//    each gate reconciles both (takeExtraRunOrDeny, freeRunExhausted,
+//    appSlotsFor, the !extraRunHold guards) and the "give back what was
+//    spent" pair is repeated in each endpoint's existing refund block. Folding
+//    the base run into the same counter would remove that and the base run's
+//    old check-then-act window in one change; not done here.
+//  - The dashboard's Learn gate reads free_runs_left (remaining(), holds not
+//    counted) and state.apps.length; the server gate uses left() and
+//    app_slots_used. In a multi-tab race the client may open the learn form
+//    that /api/learn then 402s — the client already shows the paywall on
+//    APP_SLOT_LIMIT, and the server is the authority.
+//  - The security scan commits its extra at the optimistic-burn point before
+//    a multi-minute inline scan; a process death mid-scan loses that spend
+//    with no report, exactly as the base scan is lost today.
+//  - Spends persist with no date. If the promo is ever re-run after the
+//    revert, delete free-runs-used.json on the box first, or identities that
+//    used extras the first time start at zero.
+//  - /api/chat/start spends one run per browser session, flat, as it always
+//    has. The dashboard's interactive two-user security flow opens two such
+//    sessions, so on free it costs two runs and needs two available — before
+//    this change it needed two free runs and so never worked on free at all.
+// Default runs per free identity when TESTPILOT_FREE_RUNS is not set. This
+// line is deliberately on its own, away from anything else that changes, so a
+// temporary promo ("3 runs for prospects") is one commit that touches only it
+// and `git revert` of that commit cannot conflict. 1 = the single free run.
+
+const FREE_RUNS_DEFAULT = 3;   // TEMPORARY (2026-09-27): revert this commit to go back to 1
+
+const TESTER_EMAILS = new Set(
+  String(process.env.TESTPILOT_TESTER_EMAILS || '')
+    .split(',').map(e => canonicalEmail(e)).filter(Boolean)
+);
+// 0 or 1 = no extras (the base free run is gated elsewhere); unparsable = default.
+const _intEnv = (v, d) => { const n = Number.parseInt(v, 10); return Number.isFinite(n) && n >= 0 ? n : d; };
+const FREE_RUNS = _intEnv(process.env.TESTPILOT_FREE_RUNS, FREE_RUNS_DEFAULT);
+const TESTER_RUNS = _intEnv(process.env.TESTPILOT_TESTER_RUNS, 3);
+const isTesterEmail = (e) => !!e && TESTER_EMAILS.has(canonicalEmail(e));
+const runsFor = (e) => isTesterEmail(e) ? Math.max(TESTER_RUNS, FREE_RUNS) : FREE_RUNS;
+const freeRuns = createFreeRunAllowance({ canonicalEmail, runsFor, file: './free-runs-used.json', fs });
+freeRuns.load();
+// Non-consuming: what free_run_used should LOOK like to the client and the
+// funnel — an identity with extra runs left still has a free run.
+function freeRunExhausted(email, rawUsed, plan) {
+  if (plan !== 'free') return !!rawUsed;   // the allowance is a free-tier thing
+  return !!rawUsed && freeRuns.remaining(email) <= 0;
+}
+// One rule for every free gate: base run already used → take an extra or send
+// the 402. `denied` is true when the 402 has been sent.
+function takeExtraRunOrDeny(res, email, rawUsed, denial) {
+  if (!rawUsed) return { hold: null, denied: false };
+  if (!freeRuns.available(email)) { res.status(402).json(denial); return { hold: null, denied: true }; }
+  return { hold: freeRuns.reserve(res, email), denied: false };
+}
+// App slots widen with the runs still LEFT, so the extra runs may be on
+// different apps ("3 runs, same app or different ones") but an identity that
+// has spent them cannot keep opening new support-key crawls via /api/learn.
+// Never below the plan's own limit.
+// Widened only for an identity that has, or is being given, a session:
+// /api/learn's cookie-less path passes null (its email comes from the body);
+// /api/funnel/start passes its body email because it is the path that mints
+// the session in the first place.
+// A free identity with an allowance may learn a new app while it still has a
+// run to test it with, and never holds more apps than runs in total — so
+// learn → run → learn → run works up to runsFor() apps, and an identity that
+// has spent everything cannot keep opening support-key crawls. Gates pass
+// freeRuns.left() (holds count); the identity comes with a session or is
+// being given one by the funnel; cookie-less /api/learn passes '' (no widen).
+const appSlotsFor = (email, planLimits, plan, baseUsed, extras, slotsUsed) =>
+  plan === 'free' && email && runsFor(email) > 1
+    ? Math.max(planLimits.apps, Math.min(runsFor(email), slotsUsed + (baseUsed ? 0 : 1) + extras))
+    : planLimits.apps;
+
 // Canonicalize an email for FREE-RUN identity so plus-aliases and gmail dots
 // can't mint unlimited free runs (you+1@ / you+2@ / y.o.u@ → one identity).
 // Applied ONLY to anonymous funnel/free emails — never to a logged-in session
@@ -1595,17 +1723,18 @@ app.post('/api/funnel/start', watchOnboarding('signup', (req) => ({ email: onboa
     // already filled with a DIFFERENT app, send them to paywall.
     const isExistingForOwner = !!(existingApp && existingApp.owner_email === userEmail);
     if (userPlan === 'free') {
-      if (dbUser.free_run_used) {
+      if (freeRunExhausted(userEmail, dbUser.free_run_used, userPlan)) {
         return res.status(402).json({
           ok: false,
           error: 'Free run already used. Choose a plan to continue.',
           code: 'FREE_RUN_USED',
         });
       }
-      if (!isExistingForOwner && Number(dbUser.app_slots_used || 0) >= planLimits.apps) {
+      const slotLimit = appSlotsFor(userEmail, planLimits, userPlan, !!dbUser.free_run_used, freeRuns.left(userEmail), Number(dbUser.app_slots_used || 0));
+      if (!isExistingForOwner && Number(dbUser.app_slots_used || 0) >= slotLimit) {
         return res.status(402).json({
           ok: false,
-          error: 'Free includes 1 app. Choose a plan to learn more.',
+          error: `Free includes ${slotLimit} app${slotLimit === 1 ? '' : 's'}. Choose a plan to learn more.`,
           code: 'APP_SLOT_LIMIT',
         });
       }
@@ -1640,7 +1769,7 @@ app.post('/api/funnel/start', watchOnboarding('signup', (req) => ({ email: onboa
 
     return res.json({
       ok: true,
-      session: { email: userEmail, plan: userPlan, free_run_used: !!dbUser.free_run_used },
+      session: { email: userEmail, plan: userPlan, free_run_used: freeRunExhausted(userEmail, dbUser.free_run_used, userPlan) },
       app: { url: norm.original, url_normalized: norm.normalized, is_existing: isExistingForOwner },
     });
   } catch (err) {
@@ -2147,7 +2276,20 @@ app.get('/api/auth/me', (req, res) => {
   const token = req.cookies?.tpsession;
   if (!token || !sessions.has(token)) return res.status(401).json({ error: 'Not authenticated' });
   const session = sessions.get(token);
-  res.json({ email: session.email, plan: session.plan, free_run_used: session.free_run_used || false, terms_accepted_version: session.terms_accepted_version || null });
+  res.json({
+    email: session.email,
+    plan: session.plan,
+    free_run_used: freeRunExhausted(session.email, session.free_run_used, session.plan),
+    // Free run allowance, for the dashboard's Learn gate: runs left (base if
+    // unspent + extras not yet spent — remaining(), like free_run_used above,
+    // so another tab's in-flight hold does not depress it) and runs in total
+    // (= the most apps the identity may hold). null when there is no
+    // allowance, so the client falls back to its plan table.
+    free_runs_left: session.plan === 'free' && runsFor(session.email) > 1
+      ? (session.free_run_used ? 0 : 1) + freeRuns.remaining(session.email) : null,
+    free_runs_total: session.plan === 'free' && runsFor(session.email) > 1 ? runsFor(session.email) : null,
+    terms_accepted_version: session.terms_accepted_version || null,
+  });
 });
 
 // Accept terms
@@ -9669,14 +9811,17 @@ app.post('/api/learn', watchOnboarding('crawl', (req) => ({ email: onboardingEma
   const isExistingForOwner = !!(existingApp && existingApp.owner_email === ownerEmail);
   if (!isExistingForOwner) {
     const slotsUsed = Number(dbUser.app_slots_used || 0);
-    if (slotsUsed >= planLimits.apps) {
+    // Session OR DB for the base flag, like every other gate: the burn's DB
+    // write is fire-and-forget, so the session may know first.
+    const slotLimit = appSlotsFor(sessionUser ? ownerEmail : '', planLimits, userPlan, !!(sessionUser?.free_run_used || dbUser.free_run_used), freeRuns.left(sessionUser ? ownerEmail : ''), slotsUsed);
+    if (slotsUsed >= slotLimit) {
       return res.status(402).json({
         error: userPlan === 'free'
-          ? 'Free includes 1 app. Choose a plan to learn more.'
+          ? `Free includes ${slotLimit} app${slotLimit === 1 ? '' : 's'}. Choose a plan to learn more.`
           : `Your plan includes ${planLimits.apps} app slots. Upgrade to add more.`,
         code: 'APP_SLOT_LIMIT',
         plan: userPlan,
-        app_slots_limit: planLimits.apps,
+        app_slots_limit: slotLimit,
         app_slots_used: slotsUsed,
       });
     }
@@ -9966,8 +10111,15 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
   // a forged session can't bypass; the in-memory session is only the cache.
   const dbUser = ownerEmail ? await getUserByEmail(ownerEmail) : null;
   const userPlan = sessionUser?.plan || dbUser?.plan || 'free';
+  let extraRunHold = null;
   if (userPlan === 'free') {
-    const alreadyUsed = !!(sessionUser?.free_run_used || dbUser?.free_run_used);
+    const _rawUsed = !!(sessionUser?.free_run_used || dbUser?.free_run_used);
+    // Extra runs only for a real session: the cookie-less path takes the
+    // email from the body, and an email is not a secret.
+    const _gate = takeExtraRunOrDeny(res, sessionUser ? ownerEmail : '', _rawUsed,
+      { error: 'Free run already used. Choose a plan to continue.', code: 'FREE_RUN_USED' });
+    if (_gate.denied) return;
+    extraRunHold = _gate.hold;
     // One free run per free account, enforced by free_run_used below — that
     // flag is the real control, and it is persisted, so a forged session cannot
     // spend a second one.
@@ -9980,12 +10132,6 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
     // server answered with 402 and a pricing table. Spend is still bounded by
     // isFreeBudgetExceeded() above, which is the gate that actually protects
     // the support key.
-    if (alreadyUsed) {
-      return res.status(402).json({
-        error: 'Free run already used. Choose a plan to continue.',
-        code: 'FREE_RUN_USED',
-      });
-    }
   }
 
   // OneRun gate: out of credits => 402 early (cheap check, before app/key
@@ -10045,6 +10191,7 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
   // SCAN CONCURRENCY CAP: if all slots are busy, the scan is QUEUED (not
   // rejected) and starts automatically when one frees.
   const willQueue = !scanSlotFree();
+  if (extraRunHold) extraRunHold.commit();
   res.json({ testId, status: willQueue ? 'queued' : 'started', ...(willQueue ? { queuePosition: scanWaiters.length + 1 } : {}) });
   // Placeholder row so GET /api/test/:id + owner-scoping work while queued
   // (runAgentTest overwrites it with the live result once its slot opens).
@@ -10054,7 +10201,7 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
   // burn — if the test errors out the user still loses their free run, but
   // that prevents abuse via aborted-then-retried calls. Frontend gets the 402
   // on the NEXT /api/test attempt.
-  const freeRunBurned = userPlan === 'free' && !!ownerEmail;
+  const freeRunBurned = userPlan === 'free' && !!ownerEmail && !extraRunHold;   // an extra run touches only the counter
   if (freeRunBurned) {
     supabase('PATCH', 'users', { free_run_used: true }, `?email=eq.${encodeURIComponent(ownerEmail)}`).catch(() => {});
     let dirty = false;
@@ -10110,7 +10257,11 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
       // a verdict about the APP. Ending blocked/error/incomplete is our tooling
       // failing, and charging a first-time visitor's single free run for that
       // — then asking them for a card — is indefensible.
-      if (freeRunBurned && !CHARGED_STATUSES.includes(_finalStatus)) {
+      if (extraRunHold && !CHARGED_STATUSES.includes(_finalStatus)) {
+        extraRunHold.refund();
+        emitStep(testId, { type: 'info', message: 'ℹ️ This run didn\'t get far enough to judge your app, so it hasn\'t been counted.' });
+      }
+      if (freeRunBurned && !extraRunHold && !CHARGED_STATUSES.includes(_finalStatus)) {
         try {
           await supabase('PATCH', 'users', { free_run_used: false }, `?email=eq.${encodeURIComponent(ownerEmail)}`);
           for (const [, s] of sessions) { if (s.email === ownerEmail) s.free_run_used = false; }
@@ -11224,6 +11375,7 @@ app.post('/api/test/multirole', async (req, res) => {
     return res.status(403).json({ error: 'Multi-role testing requires a paid plan', code: 'PLAN_FEATURE_LOCKED' });
   }
   let freeRunBurned = false;
+  let extraRunHold = null;
   if (user.plan === 'free') {
     // Check the in-memory session (user IS the live sessions-Map object for
     // the cookie path, mutated synchronously on burn — see below) OR the DB
@@ -11232,9 +11384,10 @@ app.post('/api/test/multirole', async (req, res) => {
     // ahead of it) — confirmed live by firing two multirole requests back to
     // back and watching both return 200 before this fix.
     const dbUser = await getUserByEmail(user.email);
-    if (user.free_run_used || dbUser?.free_run_used) {
-      return res.status(402).json({ error: 'Free run already used. Choose a plan to continue.', code: 'FREE_RUN_USED' });
-    }
+    const _gate = takeExtraRunOrDeny(res, user.email, user.free_run_used || dbUser?.free_run_used,
+      { error: 'Free run already used. Choose a plan to continue.', code: 'FREE_RUN_USED' });
+    if (_gate.denied) return;
+    extraRunHold = _gate.hold;
   }
 
   const { appId, roles, apiKey, freeRun, userEmail } = req.body || {};
@@ -11268,7 +11421,7 @@ app.post('/api/test/multirole', async (req, res) => {
   // Free: burn the single free run now (mirrors /api/test's "mark used
   // immediately on START" — see its comment for why: optimistic burn, refunded
   // below if the run doesn't land on a charged status).
-  if (user.plan === 'free') {
+  if (user.plan === 'free' && !extraRunHold) {   // an extra run touches only the counter
     freeRunBurned = true;
     supabase('PATCH', 'users', { free_run_used: true }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
     let _mrDirty = false;
@@ -11277,6 +11430,7 @@ app.post('/api/test/multirole', async (req, res) => {
   }
 
   const testId = randomUUID();
+  if (extraRunHold) extraRunHold.commit();
   res.json({ testId, status: 'started', roleCount: roles.length });
 
   // Aggregate result. Each role writes its own runAgentTest result; this
@@ -11351,7 +11505,8 @@ app.post('/api/test/multirole', async (req, res) => {
     aggregate.completedAt = new Date().toISOString();
     const _mrCharged = ['completed', 'completed_with_bugs', 'partial_with_bugs'].includes(aggregate.status);
     if (_mrCredit.reserved && !_mrCharged) refundRunCredit(user.email);
-    if (freeRunBurned && !_mrCharged) {
+    if (extraRunHold && !_mrCharged) extraRunHold.refund();
+    if (freeRunBurned && !extraRunHold && !_mrCharged) {
       supabase('PATCH', 'users', { free_run_used: false }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
       let _mrDirty2 = false;
       for (const [, s] of sessions) { if (s.email === user.email) { s.free_run_used = false; _mrDirty2 = true; } }
@@ -11369,7 +11524,8 @@ app.post('/api/test/multirole', async (req, res) => {
     emitStep(testId, { type: 'summary', message: `Multi-role complete: ${aggregate.summary.passed_roles}/${roleResults.length} roles passed, ${aggregate.bugs.length} confirmed bug${aggregate.bugs.length === 1 ? '' : 's'}${blockedRoles.length ? `, ${blockedRoles.length} role(s) couldn't be tested` : ''}`, summary: aggregate.summary });
   }).catch(err => {
     if (_mrCredit.reserved) refundRunCredit(user.email);
-    if (freeRunBurned) {
+    if (extraRunHold) extraRunHold.refund();
+    if (freeRunBurned && !extraRunHold) {
       supabase('PATCH', 'users', { free_run_used: false }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
       let _mrDirty3 = false;
       for (const [, s] of sessions) { if (s.email === user.email) { s.free_run_used = false; _mrDirty3 = true; } }
@@ -11406,6 +11562,7 @@ app.post('/api/test/flow', async (req, res) => {
     return res.status(403).json({ error: 'End-to-End Flow Test requires a paid plan', code: 'PLAN_FEATURE_LOCKED' });
   }
   let freeRunBurned = false;
+  let extraRunHold = null;
   if (user.plan === 'free') {
     // Check the in-memory session (user IS the live sessions-Map object for
     // the cookie path, mutated synchronously on burn — see below) OR the DB
@@ -11414,9 +11571,10 @@ app.post('/api/test/flow', async (req, res) => {
     // ahead of it) — confirmed live by firing two multirole requests back to
     // back and watching both return 200 before this fix.
     const dbUser = await getUserByEmail(user.email);
-    if (user.free_run_used || dbUser?.free_run_used) {
-      return res.status(402).json({ error: 'Free run already used. Choose a plan to continue.', code: 'FREE_RUN_USED' });
-    }
+    const _gate = takeExtraRunOrDeny(res, user.email, user.free_run_used || dbUser?.free_run_used,
+      { error: 'Free run already used. Choose a plan to continue.', code: 'FREE_RUN_USED' });
+    if (_gate.denied) return;
+    extraRunHold = _gate.hold;
   }
 
   const { appId, scenario, email, password, apiKey, freeRun, sessionState: rawSessionState, savedSessionRole } = req.body || {};
@@ -11463,7 +11621,7 @@ app.post('/api/test/flow', async (req, res) => {
   const _flowCredit = await reserveRunCreditOrDeny(res, user.plan, user.email, user.plan === 'onerun' ? await getUserByEmail(user.email) : null);
   if (!_flowCredit.ok) return;
 
-  if (user.plan === 'free') {
+  if (user.plan === 'free' && !extraRunHold) {   // an extra run touches only the counter
     freeRunBurned = true;
     supabase('PATCH', 'users', { free_run_used: true }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
     let _flowDirty = false;
@@ -11473,6 +11631,7 @@ app.post('/api/test/flow', async (req, res) => {
 
   const testId = randomUUID();
   const willQueue = !scanSlotFree();
+  if (extraRunHold) extraRunHold.commit();
   res.json({ testId, status: willQueue ? 'queued' : 'started', ...(willQueue ? { queuePosition: scanWaiters.length + 1 } : {}) });
   testResults.set(testId, { testId, appId, scenario, type: 'flow_e2e', status: willQueue ? 'queued' : 'starting', userEmail: user.email, userId: user.userId, startedAt: new Date().toISOString(), steps: [], bugs: [] });
 
@@ -11487,7 +11646,8 @@ app.post('/api/test/flow', async (req, res) => {
       const _r = testResults.get(testId);
       const _flowCharged = _r && ['completed', 'completed_with_bugs', 'completed_with_unverified'].includes(_r.status);
       if (_flowCredit.reserved && !_flowCharged) refundRunCredit(user.email);
-      if (freeRunBurned && !_flowCharged) {
+      if (extraRunHold && !_flowCharged) extraRunHold.refund();
+      if (freeRunBurned && !extraRunHold && !_flowCharged) {
         supabase('PATCH', 'users', { free_run_used: false }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
         let _flowDirty2 = false;
         for (const [, s] of sessions) { if (s.email === user.email) { s.free_run_used = false; _flowDirty2 = true; } }
@@ -11495,7 +11655,8 @@ app.post('/api/test/flow', async (req, res) => {
       }
     } catch (e) {
       if (_flowCredit.reserved) refundRunCredit(user.email);
-      if (freeRunBurned) {
+      if (extraRunHold) extraRunHold.refund();
+      if (freeRunBurned && !extraRunHold) {
         supabase('PATCH', 'users', { free_run_used: false }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
         let _flowDirty3 = false;
         for (const [, s] of sessions) { if (s.email === user.email) { s.free_run_used = false; _flowDirty3 = true; } }
@@ -11840,13 +12001,15 @@ app.post('/api/chat/start', async (req, res) => {
   // reserveRunCreditOrDeny's onerun credit check, but consumed flat on
   // start (no refund path): a live chat session has no "TestPilot itself
   // failed" moment to refund against the way a discrete run does.
+  let extraRunHold = null;
   if (user.plan === 'free') {
     // Check the in-memory session too — see the identical comment on the
     // multirole gate for why the DB-only check was a real, confirmed bug.
     const dbUser = await getUserByEmail(user.email);
-    if (user.free_run_used || dbUser?.free_run_used) {
-      return res.status(402).json({ error: 'Free run already used. Choose a plan to continue.', code: 'FREE_RUN_USED' });
-    }
+    const _gate = takeExtraRunOrDeny(res, user.email, user.free_run_used || dbUser?.free_run_used,
+      { error: 'Free run already used. Choose a plan to continue.', code: 'FREE_RUN_USED' });
+    if (_gate.denied) return;
+    extraRunHold = _gate.hold;
   } else if (user.plan === 'onerun') {
     const dbUser = await getUserByEmail(user.email);
     const liveCredits = user.credits != null ? user.credits : dbUser?.credits;
@@ -11941,7 +12104,7 @@ app.post('/api/chat/start', async (req, res) => {
     // Consume the free/onerun credit now — the session genuinely started
     // (browser launched, page loaded, login attempted). Flat consume, no
     // refund path: see the plan-gate comment above for why.
-    if (user.plan === 'free') {
+    if (user.plan === 'free' && !extraRunHold) {   // an extra run touches only the counter
       supabase('PATCH', 'users', { free_run_used: true }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
       let _chatDirty = false;
       for (const [, s] of sessions) { if (s.email === user.email) { s.free_run_used = true; _chatDirty = true; } }
@@ -11957,6 +12120,7 @@ app.post('/api/chat/start', async (req, res) => {
       }
     }
 
+    if (extraRunHold) extraRunHold.commit();
     res.json({ sessionId, screenshot, url: page.url(), loggedIn: loginResult.success });
   } catch (e) {
     console.error('Chat start error:', e.message);
@@ -13338,10 +13502,17 @@ app.post('/api/security/api-intercept', async (req, res) => {
   // Free tier gets ONE security scan on the house — support-key funded, owner-scoped,
   // forced read-only (destructive probes stay paid). Shows off the differentiator.
   let freeScan = false;
+  let extraScanHold = null;
   if (sessionUser.plan === 'free') {
     const _ce = canonicalEmail(sessionUser.email);
     if (freeSecurityUsed.has(_ce) || sessionUser.free_security_used) {
-      return res.status(402).json({ error: 'You have used your free security scan — choose a plan for unlimited scans.', code: 'FREE_SECURITY_USED' });
+      // A second free scan spends one of the identity's extra runs (see the
+      // FREE RUN ALLOWANCE block); a crash refunds that extra below, where the
+      // base scan is given back for a first scan.
+      const _gate = takeExtraRunOrDeny(res, sessionUser.email, true,
+        { error: 'You have used your free security scan — choose a plan for unlimited scans.', code: 'FREE_SECURITY_USED' });
+      if (_gate.denied) return;
+      extraScanHold = _gate.hold;
     }
     if (isFreeBudgetExceeded()) {
       return res.status(429).json({ error: 'Free scans are paused for today — sign up to continue.', code: 'FREE_DAILY_BUDGET_EXCEEDED' });
@@ -13372,6 +13543,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
   const _secCredit = await reserveRunCreditOrDeny(res, sessionUser.plan, sessionUser.email, sessionUser.plan === 'onerun' ? await getUserByEmail(sessionUser.email) : null);
   if (!_secCredit.ok) return;
   if (freeScan) {  // optimistic burn — one free scan per identity
+    if (extraScanHold) extraScanHold.commit();
     freeSecurityUsed.add(canonicalEmail(sessionUser.email)); saveFreeSecurityUsed();
     for (const [, s] of sessions) { if (s.email === sessionUser.email) s.free_security_used = true; }
   }
@@ -14951,7 +15123,8 @@ app.post('/api/security/api-intercept', async (req, res) => {
     if (_secCredit.reserved) refundRunCredit(sessionUser.email);
     // The free scan was burned optimistically before the run; a crash is our
     // failure, not the customer's — give it back like the paid credit above.
-    if (freeScan) {
+    if (extraScanHold) extraScanHold.refund();
+    if (freeScan && !extraScanHold) {
       freeSecurityUsed.delete(canonicalEmail(sessionUser.email)); saveFreeSecurityUsed();
       for (const [, s] of sessions) { if (s.email === sessionUser.email) s.free_security_used = false; }
     }
