@@ -6175,8 +6175,10 @@ async function secDeepScan() {
       const vU = String(r.verdict || '').toUpperCase();
       // INCONCLUSIVE/SKIPPED = "we couldn't test this" — neutral, never a vuln
       // (red) and never safe (green). Otherwise we'd mislead in both directions.
-      const isInconclusive = vU === 'INCONCLUSIVE' || vU === 'UNKNOWN' || vU === 'NOT_TESTED' || vU === 'SKIPPED';
-      const icon = vU === 'SAFE' ? '🛡️' : vU === 'SUSPICIOUS' ? '🔶' : isInconclusive ? '❔' : '⚠️';
+      // INFO = observed and explained, not graded (e.g. a copied session being
+      // accepted, which is how sessions work) — neutral like SKIPPED.
+      const isInconclusive = vU === 'INCONCLUSIVE' || vU === 'UNKNOWN' || vU === 'NOT_TESTED' || vU === 'SKIPPED' || vU === 'INFO';
+      const icon = vU === 'SAFE' ? '🛡️' : vU === 'SUSPICIOUS' ? '🔶' : vU === 'INFO' ? 'ℹ️' : isInconclusive ? '❔' : '⚠️';
       const isVuln = !isInconclusive && vU !== 'SAFE';
       const sevLabel = r.severity && r.severity !== 'none' ? ` [${r.severity.toUpperCase()}]` : '';
 
@@ -6251,7 +6253,7 @@ async function secDeepScan() {
       const vUpper = String(r.verdict || '').toUpperCase();
       if (vUpper === 'VULNERABLE') bucket = 'vuln';
       else if (vUpper === 'SUSPICIOUS' || vUpper === 'POTENTIAL_VULNERABILITY') bucket = 'suspicious';
-      else if (vUpper === 'SKIPPED') bucket = 'skipped';
+      else if (vUpper === 'SKIPPED' || vUpper === 'INFO') bucket = 'skipped';
       // A failed/not-run probe is INCONCLUSIVE — must NOT collapse into 'safe',
       // or we'd give false reassurance for something we never actually tested.
       else if (vUpper === 'INCONCLUSIVE' || vUpper === 'UNKNOWN' || vUpper === 'NOT_TESTED') bucket = 'inconclusive';

@@ -155,7 +155,7 @@ export async function scanExposedFiles(appUrl) {
     probe(origin + '/tp-nonexistent-' + rand()),
     probe(origin + '/tp-nonexistent-' + rand() + '.json'),
   ]);
-  const baselineHashes = new Set(baselines.filter(b => b.status === 200).map(b => b.hash));
+  const baselineHashes = new Set(baselines.filter(b => b.status === 200 || b.status === 206).map(b => b.hash));
   const catchAll = baselineHashes.size > 0;
 
   const findings = [];
@@ -164,7 +164,10 @@ export async function scanExposedFiles(appUrl) {
   for (const check of CHECKS) {
     const res = await probe(origin + check.path);
     checkedPaths++;
-    if (res.status !== 200) continue;
+    // The probe sends a Range header, and every server that honours it
+    // (express.static, nginx, most CDNs) answers 206 — that IS the file.
+    // Skipping non-200 here made the checker miss a published .env on all of them.
+    if (res.status !== 200 && res.status !== 206) continue;
     if (baselineHashes.has(res.hash)) continue;               // the SPA fallback
     if (res.type === 'text/html' && !check.sigRaw) continue;   // a page, not the file
     const matched = check.sigRaw ? check.sigRaw(res.raw) : (!!res.body && check.sig(res.body));
