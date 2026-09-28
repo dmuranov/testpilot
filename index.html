@@ -1998,9 +1998,19 @@ function gatedLearn() {
   const plan = currentUser?.plan || 'free';
   // Funnel rework: free + onerun cap at 1 app, starter at 3.
   const limits = { free: 1, onerun: 1, solo: 3, starter: 3, pro: 10, agency: 999, admin: 999, tester: 999 };
-  // The server knows the real limit (the free run allowance can widen it —
-  // see app_slots_limit on /api/auth/me); the table is the fallback.
-  const limit = currentUser?.app_slots_limit ?? limits[plan] ?? 999;
+  // Free with an allowance (free_runs_left/free_runs_total on /api/auth/me):
+  // a new app is allowed while there is a run left to test it with and fewer
+  // apps than runs in total. The server enforces the same rule; the table is
+  // the fallback for every other case.
+  if (plan === 'free' && typeof currentUser?.free_runs_left === 'number') {
+    if (currentUser.free_runs_left <= 0 || state.apps.length >= currentUser.free_runs_total) {
+      showFunnelPaywall('app_slot');
+      return;
+    }
+    navigate('learn');
+    return;
+  }
+  const limit = limits[plan] ?? 999;
   if (state.apps.length >= limit) {
     showFunnelPaywall('app_slot');
     return;

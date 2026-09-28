@@ -253,7 +253,9 @@ const isSuperAdmin = (e) => !!e && canonicalEmail(e) === canonicalEmail(SUPER_AD
 //
 // Committed spends are persisted to ./free-runs-used.json (tmp+rename) so a
 // deploy does not re-grant anyone; in-flight holds are memory only, so a
-// restart mid-request charges nothing. Keyed by canonicalEmail, so gmail dots
+// restart mid-request charges nothing. If that file cannot be read or parsed
+// it is left alone, extras are disabled for everyone, and loading retries
+// every minute — never a clean slate. Keyed by canonicalEmail, so gmail dots
 // and plus-aliases are one identity. Mechanism + tests: lib/free-runs.js.
 //
 // Known limits, accepted for now:
@@ -320,12 +322,16 @@ function takeExtraRunOrDeny(res, email, rawUsed, denial) {
 // /api/learn's cookie-less path passes null (its email comes from the body);
 // /api/funnel/start passes its body email because it is the path that mints
 // the session in the first place.
-// Slots = runs the identity can still start: the base run if unspent, plus
-// extras — so it can never hold more apps than it can test. Gates pass
-// freeRuns.left() (holds count); reports pass freeRuns.remaining() (they
-// don't, so another tab's in-flight hold never paints a paywall).
-const appSlotsFor = (planLimits, plan, baseUsed, extras) =>
-  plan === 'free' ? Math.max(planLimits.apps, (baseUsed ? 0 : 1) + extras) : planLimits.apps;
+// A free identity with an allowance may learn a new app while it still has a
+// run to test it with, and never holds more apps than runs in total — so
+// learn → run → learn → run works up to runsFor() apps, and an identity that
+// has spent everything cannot keep opening support-key crawls. Gates pass
+// freeRuns.left() (holds count); the identity comes with a session or is
+// being given one by the funnel; cookie-less /api/learn passes '' (no widen).
+const appSlotsFor = (email, planLimits, plan, baseUsed, extras, slotsUsed) =>
+  plan === 'free' && email && runsFor(email) > 1
+    ? Math.max(planLimits.apps, Math.min(runsFor(email), slotsUsed + (baseUsed ? 0 : 1) + extras))
+    : planLimits.apps;
 
 // Canonicalize an email for FREE-RUN identity so plus-aliases and gmail dots
 // can't mint unlimited free runs (you+1@ / you+2@ / y.o.u@ → one identity).
@@ -1713,7 +1719,7 @@ app.post('/api/funnel/start', watchOnboarding('signup', (req) => ({ email: onboa
           code: 'FREE_RUN_USED',
         });
       }
-      const slotLimit = appSlotsFor(planLimits, userPlan, !!dbUser.free_run_used, freeRuns.left(userEmail));
+      const slotLimit = appSlotsFor(userEmail, planLimits, userPlan, !!dbUser.free_run_used, freeRuns.left(userEmail), Number(dbUser.app_slots_used || 0));
       if (!isExistingForOwner && Number(dbUser.app_slots_used || 0) >= slotLimit) {
         return res.status(402).json({
           ok: false,
@@ -2259,16 +2265,18 @@ app.get('/api/auth/me', (req, res) => {
   const token = req.cookies?.tpsession;
   if (!token || !sessions.has(token)) return res.status(401).json({ error: 'Not authenticated' });
   const session = sessions.get(token);
-  const _pl = PLAN_LIMITS[session.plan] || PLAN_LIMITS.free;
   res.json({
     email: session.email,
     plan: session.plan,
     free_run_used: freeRunExhausted(session.email, session.free_run_used, session.plan),
-    // How many apps this identity may hold (the free allowance widens it);
-    // the dashboard's Learn gate reads this instead of a constant. Reported
-    // from remaining(), like free_run_used above, so it is not depressed by
-    // another tab's in-flight hold.
-    app_slots_limit: appSlotsFor(_pl, session.plan, !!session.free_run_used, freeRuns.remaining(session.email)),
+    // Free run allowance, for the dashboard's Learn gate: runs left (base if
+    // unspent + extras not yet spent — remaining(), like free_run_used above,
+    // so another tab's in-flight hold does not depress it) and runs in total
+    // (= the most apps the identity may hold). null when there is no
+    // allowance, so the client falls back to its plan table.
+    free_runs_left: session.plan === 'free' && runsFor(session.email) > 1
+      ? (session.free_run_used ? 0 : 1) + freeRuns.remaining(session.email) : null,
+    free_runs_total: session.plan === 'free' && runsFor(session.email) > 1 ? runsFor(session.email) : null,
     terms_accepted_version: session.terms_accepted_version || null,
   });
 });
@@ -9792,7 +9800,7 @@ app.post('/api/learn', watchOnboarding('crawl', (req) => ({ email: onboardingEma
   const isExistingForOwner = !!(existingApp && existingApp.owner_email === ownerEmail);
   if (!isExistingForOwner) {
     const slotsUsed = Number(dbUser.app_slots_used || 0);
-    const slotLimit = appSlotsFor(planLimits, userPlan, !!dbUser.free_run_used, freeRuns.left(sessionUser ? ownerEmail : ''));
+    const slotLimit = appSlotsFor(sessionUser ? ownerEmail : '', planLimits, userPlan, !!dbUser.free_run_used, freeRuns.left(sessionUser ? ownerEmail : ''), slotsUsed);
     if (slotsUsed >= slotLimit) {
       return res.status(402).json({
         error: userPlan === 'free'
@@ -10180,7 +10188,7 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
   // burn — if the test errors out the user still loses their free run, but
   // that prevents abuse via aborted-then-retried calls. Frontend gets the 402
   // on the NEXT /api/test attempt.
-  const freeRunBurned = userPlan === 'free' && !!ownerEmail;
+  const freeRunBurned = userPlan === 'free' && !!ownerEmail && !extraRunHold;   // an extra run touches only the counter
   if (freeRunBurned) {
     supabase('PATCH', 'users', { free_run_used: true }, `?email=eq.${encodeURIComponent(ownerEmail)}`).catch(() => {});
     let dirty = false;
@@ -11400,7 +11408,7 @@ app.post('/api/test/multirole', async (req, res) => {
   // Free: burn the single free run now (mirrors /api/test's "mark used
   // immediately on START" — see its comment for why: optimistic burn, refunded
   // below if the run doesn't land on a charged status).
-  if (user.plan === 'free') {
+  if (user.plan === 'free' && !extraRunHold) {   // an extra run touches only the counter
     freeRunBurned = true;
     supabase('PATCH', 'users', { free_run_used: true }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
     let _mrDirty = false;
@@ -11600,7 +11608,7 @@ app.post('/api/test/flow', async (req, res) => {
   const _flowCredit = await reserveRunCreditOrDeny(res, user.plan, user.email, user.plan === 'onerun' ? await getUserByEmail(user.email) : null);
   if (!_flowCredit.ok) return;
 
-  if (user.plan === 'free') {
+  if (user.plan === 'free' && !extraRunHold) {   // an extra run touches only the counter
     freeRunBurned = true;
     supabase('PATCH', 'users', { free_run_used: true }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
     let _flowDirty = false;
@@ -12083,7 +12091,7 @@ app.post('/api/chat/start', async (req, res) => {
     // Consume the free/onerun credit now — the session genuinely started
     // (browser launched, page loaded, login attempted). Flat consume, no
     // refund path: see the plan-gate comment above for why.
-    if (user.plan === 'free') {
+    if (user.plan === 'free' && !extraRunHold) {   // an extra run touches only the counter
       supabase('PATCH', 'users', { free_run_used: true }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
       let _chatDirty = false;
       for (const [, s] of sessions) { if (s.email === user.email) { s.free_run_used = true; _chatDirty = true; } }

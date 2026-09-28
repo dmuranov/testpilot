@@ -57,4 +57,4 @@ saved-sessions.json
 pp-*
 
 # free-tier counters (runtime state, not code)
-free-runs-used.json
+free-runs-used.json*

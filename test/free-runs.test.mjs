@@ -23,9 +23,9 @@ function fakeFs(files) {
   };
 }
 
-async function make({ runs = 3, files = {}, load = true, holdTtlMs, now } = {}) {
+async function make({ runs = 3, files = {}, load = true, holdTtlMs } = {}) {
   const fs = fakeFs(files);
-  const a = createFreeRunAllowance({ canonicalEmail, runsFor: () => runs, file: 'x.json', fs, log: quiet, holdTtlMs, now });
+  const a = createFreeRunAllowance({ canonicalEmail, runsFor: () => runs, file: 'x.json', fs, log: quiet, holdTtlMs, retryMs: 60000 });
   if (load) await a.load();
   return { a, files };
 }
@@ -190,22 +190,17 @@ test('load is additive and nothing is written before it completes', async () => 
   assert.equal(files['x.json'], '[["b@x.com",2]]');
 });
 
-test('a corrupt or wrong-shape file is moved aside in full, nothing applied, earlier samples kept', async () => {
+test('a corrupt or wrong-shape file is left untouched; extras stay disabled; nothing applied', async () => {
   const warned = [];
   const log = { log() {}, warn: (...m) => warned.push(m.join(' ')) };
   const bads = ['{not json', '[["a@x.com",2],5,["b@x.com",2]]', '{"a@x.com":2}', '[["a@x.com",-100]]', '[["a@x.com",0.5]]'];
-  let t = 0;
-  const now = () => new Date(1700000000000 + (t++) * 1000);
   for (const bad of bads) {
-    const files = { 'x.json': bad, 'x.json.corrupt-earlier': 'keep me' };
-    const a = createFreeRunAllowance({ canonicalEmail, runsFor: () => 3, file: 'x.json', fs: fakeFs(files), log, now });
+    const files = { 'x.json': bad };
+    const a = createFreeRunAllowance({ canonicalEmail, runsFor: () => 3, file: 'x.json', fs: fakeFs(files), log, retryMs: 60000 });
     await a.load();
-    const aside = Object.keys(files).filter(k => k.startsWith('x.json.corrupt-') && k !== 'x.json.corrupt-earlier');
-    assert.equal(aside.length, 1, bad);
-    assert.equal(files[aside[0]], bad);
-    assert.equal(files['x.json.corrupt-earlier'], 'keep me');
-    assert.equal(files['x.json'], '[]');
-    assert.equal(a.left('a@x.com'), 2, bad);       // nothing from the file was applied
+    assert.equal(a.loaded, false, bad);
+    assert.equal(a.available('a@x.com'), false, bad);   // fail closed, not a clean slate
+    assert.deepEqual(files, { 'x.json': bad }, bad);      // untouched: not moved, not overwritten
   }
   assert.equal(warned.length, bads.length);
 });
@@ -216,13 +211,26 @@ test('an UNREADABLE file (not missing) is left alone and extras stay disabled', 
   const files = { 'x.json': '[["a@x.com",2]]' };
   const fs = fakeFs(files);
   fs.readFile = async () => { throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' }); };
-  const a = createFreeRunAllowance({ canonicalEmail, runsFor: () => 3, file: 'x.json', fs, log });
+  const a = createFreeRunAllowance({ canonicalEmail, runsFor: () => 3, file: 'x.json', fs, log, retryMs: 60000 });
   await a.load();
   assert.equal(a.loaded, false);
   assert.equal(a.available('a@x.com'), false);          // fail closed
-  assert.deepEqual(Object.keys(files), ['x.json']);     // nothing moved, nothing written
-  assert.equal(files['x.json'], '[["a@x.com",2]]');
+  assert.deepEqual(files, { 'x.json': '[["a@x.com",2]]' });
   assert.equal(warned.length, 1);
+});
+
+test('a failed load retries and recovers once the file is readable again', async () => {
+  const files = { 'x.json': '[["a@x.com",1]]' };
+  const fs = fakeFs(files);
+  let failures = 2;
+  const real = fs.readFile;
+  fs.readFile = async (f) => { if (failures-- > 0) throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' }); return real(f); };
+  const a = createFreeRunAllowance({ canonicalEmail, runsFor: () => 3, file: 'x.json', fs, log: quiet, retryMs: 5 });
+  await a.load();
+  assert.equal(a.loaded, false);
+  await new Promise(r => setTimeout(r, 40));
+  assert.equal(a.loaded, true);
+  assert.equal(a.left('a@x.com'), 1);                   // the file's contents were applied, once
 });
 
 test('the hold restores res.end and lets go of the response once it settles', async () => {
