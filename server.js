@@ -2978,6 +2978,18 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
       for (const sel of submitSelectors) {
         try { const b = page.locator(sel).first(); if (await b.isVisible({ timeout: 1500 })) { await b.click(); return true; } } catch { continue; }
       }
+      // Bubble.io: the sign-in control is a .clickable-element DIV, and Bubble
+      // emits no <form> and no <button> at all — so every selector above misses
+      // and the credentials get typed but never submitted, which surfaces as a
+      // bogus "login did not take / credentials are wrong". Same targeting rule
+      // as the crawl's bubbleClick: .last() = deepest in document order, so a
+      // page-wide wrapping Group carrying the class isn't clicked instead.
+      for (const text of ['Sign in', 'Sign In', 'Log in', 'Login', 'Iniciar sesión', 'Acceder', 'Entrar']) {
+        try {
+          const b = page.locator('.clickable-element:visible').filter({ hasText: text }).last();
+          if (await b.isVisible({ timeout: 1000 })) { await b.click(); return true; }
+        } catch { continue; }
+      }
       return false;
     };
 
