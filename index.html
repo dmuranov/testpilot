@@ -2814,11 +2814,11 @@ function renderLearn() {
         <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">Login for the app above — not your TestPilot account</div>
         <div class="form-group">
           <label>Login Email *</label>
-          <input class="form-input" id="learn-email" placeholder="user@example.com" />
+          <input class="form-input" id="learn-email" placeholder="user@example.com" autocomplete="off" />
         </div>
         <div class="form-group">
           <label>Login Password *</label>
-          <input class="form-input" id="learn-password" type="password" placeholder="••••••••" />
+          <input class="form-input" id="learn-password" type="password" placeholder="••••••••" autocomplete="new-password" />
         </div>
       </div>
       <div class="form-group">
@@ -2937,7 +2937,7 @@ function renderAppDetail() {
         </p>
         <div class="form-group">
           <label>Your cleanup endpoint URL</label>
-          <input class="form-input" id="cleanup-url" placeholder="https://your-app.com/api/tp-cleanup" value="${on ? tpEsc(cfg.cleanupUrl) : ''}" />
+          <input class="form-input" id="cleanup-url" autocomplete="off" placeholder="https://your-app.com/api/tp-cleanup" value="${on ? tpEsc(cfg.cleanupUrl) : ''}" />
         </div>
         <div class="form-group">
           <label>Shared secret token ${cfg && cfg.hasToken ? '<span style="color:var(--text-muted);font-weight:400">(set — leave blank to keep it)</span>' : ''}</label>
@@ -3082,11 +3082,11 @@ function renderTestRun() {
         <div style="display:flex;gap:10px">
           <div class="form-group" style="flex:1">
             <label>Email</label>
-            <input class="form-input" id="test-email" placeholder="Login email" value="${email}" />
+            <input class="form-input" id="test-email" placeholder="Login email" value="${email}" autocomplete="off" />
           </div>
           <div class="form-group" style="flex:1">
             <label>Password</label>
-            <input class="form-input" id="test-password" type="password" placeholder="Login password" value="${password}" />
+            <input class="form-input" id="test-password" type="password" placeholder="Login password" value="${password}" autocomplete="new-password" />
           </div>
         </div>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
@@ -3204,6 +3204,9 @@ function renderTestDetail() {
       </div>
     </div>
 
+    ${test.summary?.completionNote ? `
+    <div class="card" style="border-left:3px solid var(--text-muted);font-size:13px;line-height:1.6;color:var(--text)">🛡️ ${escapeHtml(test.summary.completionNote)}</div>` : ''}
+
     ${test.analysis ? `
     <div class="card" style="border-left:3px solid var(--accent)">
       <div class="card-title" style="margin-bottom:10px">📊 Test Analysis</div>
@@ -3226,12 +3229,16 @@ function renderTestDetail() {
     </div>
 
     ${test.type === 'flow_e2e' ? `
-    <div class="card" style="border-left:3px solid ${test.reachedPaymentStep ? 'var(--green,#4ade80)' : '#f59e0b'}">
+    <div class="card" style="border-left:3px solid ${(test.reachedPaymentStep && String(test.status || '').startsWith('completed')) ? 'var(--green,#4ade80)' : '#f59e0b'}">
       <div class="card-title" style="margin-bottom:6px">💳 Checkout & Booking</div>
       <div style="font-size:13px;color:var(--text);line-height:1.6">
-        ${test.reachedPaymentStep
-          ? 'Reached the final payment/booking step successfully — stopped before submitting (stop-before-pay mode).'
-          : 'Did not reach a payment/booking step in this run — see the step log below for where it stopped.'}
+        ${(test.reachedPaymentStep && String(test.status || '').startsWith('completed'))
+          ? (test.paymentOverviewStep
+              ? `Reached the order review / overview page at step ${test.paymentOverviewStep} with the totals shown — stopped before paying (stop-before-pay mode).`
+              : 'Reached the final payment/booking step successfully — stopped before submitting (stop-before-pay mode).')
+          : test.reachedPaymentStep
+            ? `Reached the order review / payment step${test.paymentOverviewStep ? ' at step ' + test.paymentOverviewStep : ''}, but the run did not finish cleanly — see the step log below for what happened after.`
+            : 'Did not reach a payment/booking step in this run — see the step log below for where it stopped.'}
       </div>
       ${s.frictionPoints?.length ? `
       <div style="margin-top:12px">
@@ -3309,7 +3316,7 @@ function renderTestDetail() {
     <div class="card">
       <div class="card-header">
         <div class="card-title">Step-by-Step Log</div>
-        ${test.steps.some(s => s.status === 'retry') ? `<button class="btn btn-ghost btn-sm" onclick="document.querySelectorAll('.step-retry').forEach(el=>el.style.display=el.style.display==='none'?'flex':'none')">🔧 Toggle agent details</button>` : ''}
+        ${test.steps.some(s => s.status === 'retry' && s.policy !== 'refused') ? `<button class="btn btn-ghost btn-sm" onclick="document.querySelectorAll('.step-retry').forEach(el=>el.style.display=el.style.display==='none'?'flex':'none')">🔧 Toggle agent details</button>` : ''}
       </div>
       <div class="test-stream">
         ${test.steps.map(s => renderDetailStep(s)).join('')}
@@ -3392,11 +3399,11 @@ function renderChat() {
           <div style="display:flex;gap:10px">
             <div class="form-group" style="flex:1">
               <label>Email</label>
-              <input class="form-input" id="chat-email" placeholder="Login email" />
+              <input class="form-input" id="chat-email" placeholder="Login email" autocomplete="off" />
             </div>
             <div class="form-group" style="flex:1">
               <label>Password</label>
-              <input class="form-input" id="chat-password" type="password" placeholder="Password" />
+              <input class="form-input" id="chat-password" type="password" placeholder="Password" autocomplete="new-password" />
             </div>
           </div>
           <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-dim);cursor:pointer;margin-bottom:4px">
@@ -3855,6 +3862,10 @@ function renderSweep() {
     : v === 'skipped' ? '<span style="color:var(--text-muted)">⏭ skipped</span>'
     : '<span style="color:var(--text-muted)">— unreachable</span>';
 
+  // Default "No login required" from what learn found: an app learned behind
+  // a login is not public. The user's explicit choice (s.noLogin) wins.
+  const sweepApp = apps.find(a => a.appId === (s.appId || apps[0]?.appId));
+  const sweepNoLogin = (s.noLogin === true || s.noLogin === false) ? s.noLogin : !(sweepApp?.loginRequired);
   return `
     <div class="page-header">
       <div>
@@ -3866,20 +3877,20 @@ function renderSweep() {
     <div class="card" style="max-width:720px">
       <div class="form-group">
         <label>App</label>
-        <select class="form-input" id="sweep-app" ${running ? 'disabled' : ''} onchange="state.sweep = Object.assign({}, state.sweep, { appId: this.value, savedRole: '' }); render()">
+        <select class="form-input" id="sweep-app" ${running ? 'disabled' : ''} onchange="state.sweep = Object.assign({}, state.sweep, { appId: this.value, savedRole: '', noLogin: undefined }); render()">
           ${apps.map(a => `<option value="${a.appId}" ${(s.appId || apps[0]?.appId) === a.appId ? 'selected' : ''}>${escapeHtml(a.summary?.appName || a.url)}</option>`).join('')}
         </select>
       </div>
       ${renderSavedLoginPicker(s.appId || apps[0]?.appId, s.savedRole || '', "state.sweep=Object.assign({},state.sweep,{savedRole:this.value});render()", 'sweep')}
       ${!s.savedRole ? `
       <label style="display:flex;align-items:center;gap:8px;margin:10px 0">
-        <input type="checkbox" id="sweep-no-login" ${s.noLogin !== false ? 'checked' : ''} onchange="state.sweep = Object.assign({}, state.sweep, { noLogin: this.checked }); render()" />
+        <input type="checkbox" id="sweep-no-login" ${sweepNoLogin ? 'checked' : ''} onchange="state.sweep = Object.assign({}, state.sweep, { noLogin: this.checked }); render()" />
         <span style="font-size:13px">No login required — app is publicly accessible</span>
       </label>
-      ${s.noLogin === false ? `
+      ${!sweepNoLogin ? `
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
-        <div class="form-group"><label>Login email</label><input class="form-input" id="sweep-email" placeholder="user@app.com" /></div>
-        <div class="form-group"><label>Password</label><input class="form-input" type="password" id="sweep-password" /></div>
+        <div class="form-group"><label>Login email</label><input class="form-input" id="sweep-email" placeholder="user@app.com" autocomplete="off" /></div>
+        <div class="form-group"><label>Password</label><input class="form-input" type="password" id="sweep-password" autocomplete="new-password" /></div>
       </div>` : ''}` : ''}
       <div style="background:rgba(200,240,64,0.05);border:1px solid rgba(200,240,64,0.15);padding:12px 14px;border-radius:2px;margin:14px 0;font-size:12px;color:#a8a8a8;line-height:1.6">
         Anything that looks destructive — Delete, Remove, Reset — is <strong style="color:#c8f040">never clicked without asking you first</strong>. Your answer is remembered for that control.
@@ -4112,11 +4123,11 @@ function renderSecSetup() {
         </div>
         <div class="form-group">
           <label>Email</label>
-          <input class="form-input" value="${escapeHtml(state.secConfig.userA.email)}" onchange="state.secConfig.userA.email=this.value" placeholder="usera@app.com" />
+          <input class="form-input" autocomplete="off" value="${escapeHtml(state.secConfig.userA.email)}" onchange="state.secConfig.userA.email=this.value" placeholder="usera@app.com" />
         </div>
         <div class="form-group">
           <label>Password</label>
-          <input class="form-input" type="password" value="${escapeHtml(state.secConfig.userA.password)}" onchange="state.secConfig.userA.password=this.value" />
+          <input class="form-input" type="password" autocomplete="new-password" value="${escapeHtml(state.secConfig.userA.password)}" onchange="state.secConfig.userA.password=this.value" />
         </div>
         <div class="form-group">
           <label style="display:flex;justify-content:space-between;align-items:center;gap:8px">
@@ -4134,11 +4145,11 @@ function renderSecSetup() {
         </div>
         <div class="form-group">
           <label>Email</label>
-          <input class="form-input" value="${escapeHtml(state.secConfig.userB.email)}" onchange="state.secConfig.userB.email=this.value" placeholder="userb@app.com" />
+          <input class="form-input" autocomplete="off" value="${escapeHtml(state.secConfig.userB.email)}" onchange="state.secConfig.userB.email=this.value" placeholder="userb@app.com" />
         </div>
         <div class="form-group">
           <label>Password</label>
-          <input class="form-input" type="password" value="${escapeHtml(state.secConfig.userB.password)}" onchange="state.secConfig.userB.password=this.value" />
+          <input class="form-input" type="password" autocomplete="new-password" value="${escapeHtml(state.secConfig.userB.password)}" onchange="state.secConfig.userB.password=this.value" />
         </div>
         <div class="form-group">
           <label style="display:flex;justify-content:space-between;align-items:center;gap:8px">
@@ -4314,6 +4325,14 @@ function renderStepLine(s) {
 function renderDetailStep(s) {
   const icons = { pass: '✅', fail: '❌', retry: '🔄', bug: '🐛', done: '🏁' };
   const icon = icons[s.status] || '•';
+  if (s.status === 'retry' && s.policy === 'refused') {
+    // Not a retry in the user's eyes: TestPilot declined this click on purpose.
+    return `
+    <div class="step-line step-refused" style="opacity:0.85">
+      <span class="step-icon">🛡️</span>
+      <span class="step-text"><strong>Refused by policy:</strong> ${escapeHtml(s.action || '')} → ${escapeHtml(s.target || s.selector || '')} — ${escapeHtml(s.outcome || '')}</span>
+    </div>`;
+  }
   if (s.status === 'retry') {
     return `
     <div class="step-line step-retry" style="display:none;opacity:0.5">
@@ -6750,7 +6769,7 @@ function copyTestDebug() {
   const passed = test.steps.filter(s => s.status === 'pass').length;
   const failed = test.steps.filter(s => s.status === 'fail').length;
   const bugs = test.bugs?.length || 0;
-  const retries = test.steps.filter(s => s.status === 'retry').length;
+  const retries = test.steps.filter(s => s.status === 'retry' && s.policy !== 'refused').length;
   // Did the AGENT actually finish the scenario (reach `done`)? A run can rack up
   // dozens of "passed" step-actions and still never complete the task — it hit
   // the token budget or wandered. "Steps passed" is per-action, NOT completion,
@@ -6810,7 +6829,7 @@ function copyTestDebug() {
   }
 
   // Agent retries as appendix
-  const retrySteps = test.steps.filter(s => s.status === 'retry');
+  const retrySteps = test.steps.filter(s => s.status === 'retry' && s.policy !== 'refused');
   if (retrySteps.length) {
     debug += `\n\n── AGENT RETRIES (${retrySteps.length}) ──────────────────────────────\n`;
     for (const step of retrySteps) {
@@ -6865,9 +6884,12 @@ function downloadTestReport() {
       <div class="info-desc">${f.description || f.check || ''}</div>
     </div>`).join('');
 
-  const stepsHtml = test.steps.filter(s => s.status !== 'retry').map(step => {
-    const icon = step.status === 'pass' ? '✅' : step.status === 'bug' ? '🐛' : '❌';
-    const rowClass = step.status === 'pass' ? 'pass' : step.status === 'bug' ? 'bug' : 'fail';
+  // Retries are hidden; a step TestPilot refused by policy is not a retry
+  // in the user's eyes — it stays in the list, marked, with its reason.
+  const stepsHtml = test.steps.filter(s => s.status !== 'retry' || s.policy === 'refused').map(step => {
+    const refused = step.policy === 'refused';
+    const icon = refused ? '🛡️' : step.status === 'pass' ? '✅' : step.status === 'bug' ? '🐛' : '❌';
+    const rowClass = refused ? 'skip' : step.status === 'pass' ? 'pass' : step.status === 'bug' ? 'bug' : 'fail';
     return `<tr class="step-row ${rowClass}">
       <td class="step-num">${step.step}</td>
       <td class="step-status">${icon}</td>
@@ -6923,6 +6945,7 @@ function downloadTestReport() {
   .step-row.pass { background: #fff; }
   .step-row.fail { background: #fff5f5; }
   .step-row.bug { background: #fffbeb; }
+  .step-row.skip { background: #f3f4f6; }
   .step-num { font-family: monospace; color: #999; width: 40px; }
   .step-status { width: 32px; text-align: center; }
   .step-action { font-family: monospace; font-size: 11px; max-width: 280px; }
@@ -6951,7 +6974,7 @@ function downloadTestReport() {
   <tr><td>URL</td><td>${app.url || '—'}</td></tr>
   <tr><td>Scenario</td><td>${test.scenario}</td></tr>
   <tr><td>Date</td><td>${scanDate}</td></tr>
-  <tr><td>Total Steps</td><td>${test.steps.filter(s => s.status !== 'retry').length}</td></tr>
+  <tr><td>Total Steps</td><td>${test.steps.filter(s => s.status !== 'retry' || s.policy === 'refused').length}</td></tr>
 </table>
 
 <div class="stats">
@@ -7064,6 +7087,7 @@ function downloadSweepReport() {
   .step-row.pass { background: #fff; }
   .step-row.fail { background: #fff5f5; }
   .step-row.bug { background: #fffbeb; }
+  .step-row.skip { background: #f3f4f6; }
   .step-num { font-family: monospace; color: #999; width: 70px; }
   .step-action { font-family: monospace; font-size: 11px; max-width: 260px; }
   .step-meta { color: #888; font-size: 10px; }
