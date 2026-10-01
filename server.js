@@ -3042,11 +3042,13 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
       'button:has-text("Continuar")', 'button:has-text("Siguiente")', 'button[type="submit"]', 'input[type="submit"]'
     ];
 
+    // Returns the selector it filled (truthy) so the field can be read back
+    // after the submit, or false when nothing matched.
     const fillFirst = async (selectors, value) => {
       for (const sel of selectors) {
         try {
           const el = page.locator(sel).first();
-          if (await el.isVisible({ timeout: 1500 })) { await el.fill(value || ''); return true; }
+          if (await el.isVisible({ timeout: 1500 })) { await el.fill(value || ''); return sel; }
         } catch { continue; }
       }
       return false;
@@ -3190,6 +3192,18 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
     const bodyText = await page.textContent('body').catch(() => '');
     const hasError = /invalid|incorrect|wrong|error|failed|falló|incorrecta/i.test(bodyText.substring(0, 3000));
 
+    // Did the app hand back a FRESH form — both fields we filled now empty, no
+    // error text? A rejected password does not look like that (seen live on a
+    // Base44 app, 2026-10-01: a wrong password keeps the email in the field
+    // and shows "Invalid email or password"). A fresh form after the submit
+    // means the app accepted it and then bounced back to login — session not
+    // kept across its redirect, or the account sent back for another reason.
+    // Our after-submit screenshot of exactly that was read as "wrong
+    // password or no password" for a real signup. It is neither.
+    const readBack = async (sel) => (sel ? await page.locator(sel).first().inputValue({ timeout: 1000 }).catch(() => null) : null);
+    const formReset = !!(submitted && !hasError && emailFilled && passFilled
+      && (await readBack(emailFilled)) === '' && (await readBack(passFilled)) === '');
+
     // Decide on what the page SHOWS, not on what the URL happens to spell. The
     // old test (`!newUrl.includes('login')`) was true for every sign-in page
     // whose URL lacks the word "login" — including root-path SPAs — so it
@@ -3234,6 +3248,9 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
       }
       if (ourMiss) {
         return { success: false, cause: 'login_vision', handoffOffered, screenshot: afterScreenshot, error: `Could not log in — ${ourMiss} (still at ${newUrl}). This is a TestPilot limitation on this page, not a wrong password. ${BYO_SESSION_HINT}` };
+      }
+      if (formReset) {
+        return { success: false, cause: 'login_credentials', handoffOffered, screenshot: afterScreenshot, error: `Login did not take — the app answered the submit with a fresh, empty sign-in form and no error message (still at ${newUrl}). That is not how a wrong password looks on this app (a rejected password keeps the form filled and shows an error). Most likely the sign-in was accepted but the session was not kept when the app redirected, or the app sent this account back to login for another reason, such as an unverified or not-yet-approved account. The password is probably fine. ${BYO_SESSION_HINT}` };
       }
       if (oauthVisible) {
         return { success: false, cause: 'login_credentials', handoffOffered, screenshot: afterScreenshot, error: (hasError
