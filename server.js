@@ -212,6 +212,13 @@ const MAPS_DIR = './platform-maps';
 // Super admin: bypasses app-ownership blocks so it can learn/test ANY app,
 // regardless of which account first claimed it.
 const SUPER_ADMIN_EMAIL = (process.env.SUPER_ADMIN_EMAIL || 'danijel.muranovic@gmail.com').toLowerCase();
+// A server started on a laptop against the production database must never
+// mail real users: on 2026-10-01 a local test run sent the onboarding
+// "stall nudge" to a real prospect twice, because the local instance had no
+// record of production having already sent it. TESTPILOT_LOCAL=1 keeps the
+// signup notification, help emails, stall nudges and the admin digest off.
+const LOCAL_RUN = process.env.TESTPILOT_LOCAL === '1';
+if (LOCAL_RUN) console.log('[local] TESTPILOT_LOCAL=1 — outbound onboarding mail (signup notify, help, stall nudge, digest) is suppressed');
 // Compare canonically (canonicalEmail strips gmail dots + plus-tags) so the
 // super admin still matches after an email has been through canonicalEmail()
 // on the free-run identity path — otherwise danijel.muranovic@ (stored WITH a
@@ -795,7 +802,7 @@ async function createOrGetUser(email) {
     // New-signup notification → SIGNUP_NOTIFY_EMAIL. Fire-and-forget: a mail
     // failure (or missing RESEND_API_KEY) must never block or crash a signup.
     // Only fires here (the create branch), so it's once per genuinely new email.
-    if (created) {
+    if (created && !LOCAL_RUN) {
       const safe = String(email).replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
       const when = new Date().toISOString();
       mailer({
@@ -2205,6 +2212,7 @@ async function userHasRecovered(stage, email) {
 onOnboardingFailure(({ stage, email, url, error, code }) => {
   const msg = helpMessageFor({ stage, code, url, error });
   if (!msg) return;
+  if (LOCAL_RUN) return;
   setTimeout(async () => {
     try {
       const key = String(email).toLowerCase();
@@ -2248,12 +2256,15 @@ async function onboardingStallSweep() {
     }
   } catch (e) { console.warn('[onboarding] stall sweep failed:', e.message); }
 }
-setTimeout(onboardingStallSweep, 2 * 60_000);
-setInterval(onboardingStallSweep, 30 * 60_000);
+if (!LOCAL_RUN) {
+  setTimeout(onboardingStallSweep, 2 * 60_000);
+  setInterval(onboardingStallSweep, 30 * 60_000);
+}
 
 // Daily funnel digest to the admin (~07:00 UTC).
 let lastDigestDay = null;
 setInterval(async () => {
+  if (LOCAL_RUN) return;
   const now = new Date();
   const day = now.toISOString().slice(0, 10);
   if (now.getUTCHours() !== 7 || lastDigestDay === day) return;
