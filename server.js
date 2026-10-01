@@ -35,7 +35,6 @@ const SUPABASE_SECRET = process.env.SUPABASE_SECRET_KEY;
 const APP_URL = process.env.APP_URL || 'https://testpilotapp.dev';
 
 // Email via Resend
-const RESEND_API_KEY = process.env.RESEND_API_KEY;
 // Where new-signup notifications are sent.
 const SIGNUP_NOTIFY_EMAIL = process.env.SIGNUP_NOTIFY_EMAIL || 'danijel.muranovic@gmail.com';
 // All user-facing mail. lib/resend.js is the one Resend chokepoint and
@@ -801,7 +800,7 @@ async function createOrGetUser(email) {
         subject: `🎉 New TestPilot signup: ${email}`,
         text: `A new client just signed up.\n\nEmail: ${email}\nPlan: free\nWhen: ${when}`,
         html: `<h2>🎉 New TestPilot signup</h2><p><strong>Email:</strong> ${safe}<br><strong>Plan:</strong> free<br><strong>When:</strong> ${when}</p>`,
-      }).then((r) => console.log(r?.suppressed ? '[signup] notify suppressed (local run) for' : '[signup] notified for', email)).catch(e => console.warn('[signup] notify failed:', e.message));
+      }).catch(e => console.warn('[signup] notify failed:', e.message)); // lib/resend.js logs sent / suppressed / skipped
     }
     return created;
   } catch (err) {
