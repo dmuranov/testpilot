@@ -37,15 +37,18 @@ test('TESTPILOT_OUTBOUND_MAIL turns mail on for a local run WITHOUT re-arming pr
 });
 
 test('pm2 on the production path counts as production even without NODE_ENV (first deploy safety net)', () => {
-  const m = runMode({ pm_id: '0' }, '/home/azureuser/testpilot');
+  const m = runMode({ pm_id: '0', name: 'testpilot' }, '/home/azureuser/testpilot');
   assert.equal(m.isProd, true);
   assert.equal(m.mailEnabled, true);
-  assert.match(m.reason, /pm2 on \/home\/azureuser\/testpilot/);
-  // pm2 elsewhere, or the path without pm2, is still local
-  assert.equal(runMode({ pm_id: '0' }, '/home/dev/testpilot').isProd, false);
+  assert.match(m.reason, /pm2 process "testpilot" on \/home\/azureuser\/testpilot/);
+  // pm2 elsewhere, the path without pm2, or another pm2 process name there, is still local
+  assert.equal(runMode({ pm_id: '0', name: 'testpilot' }, '/home/dev/testpilot').isProd, false);
   assert.equal(runMode({}, '/home/azureuser/testpilot').isProd, false);
-  // TESTPILOT_LOCAL still wins on the box
-  assert.equal(runMode({ pm_id: '0', TESTPILOT_LOCAL: '1' }, '/home/azureuser/testpilot').isProd, false);
+  assert.equal(runMode({ pm_id: '1', name: 'tp-experiment' }, '/home/azureuser/testpilot').isProd, false);
+  // TESTPILOT_LOCAL still wins on the box, but the box is still "the production box" for log hygiene
+  const forced = runMode({ pm_id: '0', name: 'testpilot', TESTPILOT_LOCAL: '1' }, '/home/azureuser/testpilot');
+  assert.equal(forced.isProd, false);
+  assert.equal(forced.onProductionBox, true);
 });
 
 test('reasons name the deciding input', () => {

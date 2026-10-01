@@ -1945,6 +1945,14 @@ app.post('/api/auth/request', async (req, res) => {
     return res.status(429).json({ error: 'Too many requests. Try again later.', retry_after_seconds: retry });
   }
 
+  // No mail would go out for this address (local run, external recipient):
+  // answer as if sent and touch NOTHING — no users row (production's own
+  // stall sweep would later nudge a person who never signed up) and no token.
+  if (!RUN_MODE.mailEnabled && !isInternalAddress(email)) {
+    console.log('[auth] login request ignored (local run, external address)');
+    return res.json({ ok: true, message: 'Check your email for the login link' });
+  }
+
   try {
     // Look up user. Do NOT auto-create on first request — first send a notification
     // to the operator (Dado) and only persist + email after the user is approved.
@@ -2011,14 +2019,6 @@ app.post('/api/auth/request', async (req, res) => {
       if (currentPlan === 'pending' || currentPlan === 'blocked') {
         return res.status(403).json({ error: 'not_approved' });
       }
-    }
-
-    // No mail would go out for this address (local run, external recipient):
-    // answer as if sent, but create no live token — it could never be used and
-    // would sit in the production table for 15 minutes for nothing.
-    if (!RUN_MODE.mailEnabled && !isInternalAddress(email)) {
-      console.log('[auth] login link not created (local run, external address)');
-      return res.json({ ok: true, message: 'Check your email for the login link' });
     }
 
     // Create magic link token

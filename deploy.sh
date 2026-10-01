@@ -6,6 +6,8 @@ set -euo pipefail
 cd /home/azureuser/testpilot
 log(){ echo "[deploy $(date -u +%H:%M:%S)] $*"; }
 # health_field <field> <fallback>: one JSON field from /api/health, never fails the script.
+# json_field <json> <field> <fallback>
+json_field(){ printf '%s' "$1" | node -e "let d=\"\";process.stdin.on(\"data\",c=>d+=c).on(\"end\",()=>{try{const v=JSON.parse(d)[\"$2\"];console.log(v===undefined?\"$3\":v)}catch{console.log(\"$3\")}})" 2>/dev/null || echo "$3"; }
 health_field(){ (curl -s --max-time 5 http://localhost:3001/api/health || true) | node -e "let d=\"\";process.stdin.on(\"data\",c=>d+=c).on(\"end\",()=>{try{const v=JSON.parse(d)[\"$1\"];console.log(v===undefined?\"$2\":v)}catch{console.log(\"$2\")}})" 2>/dev/null || echo "$2"; }
 # Unknown (server down / health 500) is not "zero scans": wait through a
 # transient blip, but a server that cannot answer for 30s has nothing to
@@ -38,14 +40,31 @@ for i in $(seq 1 30); do   # up to ~3.5 min worst case (2s sleep + 5s curl timeo
   [ -n "$MODE" ] && break
   sleep 2
 done
-log "done. status: $(health_field status unknown) connectivity: $(health_field connectivity unknown) activeScans: $(health_field activeScans '?')"
+H=$(curl -s --max-time 8 http://localhost:3001/api/health || true)
+log "done. status: $(json_field "$H" status unknown) connectivity: $(json_field "$H" connectivity unknown) activeScans: $(json_field "$H" activeScans '?')"
 log "run mode: ${MODE:-unknown}"
 # A clear non-production answer is a failed deploy (the server is up but would
 # send no mail and run no jobs). No answer within the wait is logged, not
 # failed: a slow boot or a transient health 500 must not turn a good deploy red.
 if [ -n "$MODE" ] && [ "$MODE" != "production" ]; then
-  log "ERROR: server is running in ${MODE} mode, not production. Fix: pm2 delete testpilot && pm2 start ecosystem.config.cjs && pm2 save"
-  exit 1
+  # Known cause, known fix: the process was born without its environment.
+  # Recreate it from the ecosystem file now, then re-check, rather than leaving
+  # production up but silent until a human reads the red run.
+  log "server is running in ${MODE} mode — recreating the pm2 process from ecosystem.config.cjs"
+  pm2 delete testpilot >/dev/null 2>&1 || true
+  pm2 start ecosystem.config.cjs --only testpilot >/dev/null 2>&1 || true
+  pm2 save >/dev/null 2>&1 || true
+  MODE=""
+  for i in $(seq 1 30); do
+    MODE=$(health_field runMode "")
+    [ -n "$MODE" ] && break
+    sleep 2
+  done
+  log "run mode after repair: ${MODE:-unknown}"
+  if [ "$MODE" != "production" ]; then
+    log "ERROR: still not in production mode after recreating the process — check pm2 logs and ecosystem.config.cjs"
+    exit 1
+  fi
 fi
 if [ -z "$MODE" ]; then
   log "WARNING: health gave no run mode within the wait — check pm2 logs"
