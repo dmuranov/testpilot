@@ -2604,11 +2604,10 @@ function watchForPopups(originalPage, runId, ctx, hostname) {
 
 // Offers the human a live takeover when login did not take on a page that
 // also shows an OAuth button. Returns a fresh {success:true,...} if the
-// handoff ended with the user actually logged in; the string 'declined' when
-// the user explicitly turned the offer down (caller then suppresses a second
-// offer on retry); null when the offer was ignored or superseded (caller may
-// offer again — a slow user's box is still on screen); or a
-// {success:false, handoffAttempted:true, handoffOffered:true}
+// handoff ended with the user actually logged in; null when the offer was
+// declined, ignored or superseded (caller falls through to its own failure
+// text and does not offer again on its retry — an unattended run must not pay
+// the 60s wait twice); or a {success:false, handoffAttempted:true}
 // result when the user ACCEPTED but the attempt did not end logged in (gave
 // up, took over 10 minutes, live view failed, or the form was still there
 // after "done"). That last case must never be reported as "no password" —
@@ -2632,16 +2631,16 @@ async function tryOAuthHandoff(page, ctx) {
   });
   try {
     const decision = await awaitLiveViewSignal(ctx.runId, { timeoutMs: 60 * 1000 });
-    if (decision?.action !== 'accept') return 'declined';
-  } catch (e) { return e?.message === 'declined' ? 'declined' : null; } // superseded, or nobody responded within 60s
+    if (decision?.action !== 'accept') return null;
+  } catch { return null; } // declined, superseded, or nobody responded within 60s
 
   // From here on the human accepted and had their turn. Whatever goes wrong
   // next is reported as a manual login that did not complete — the caller
   // must not fall through to "this account has no password", which would
   // contradict what the user just did with their own hands. handoffOffered
   // is set so the run-test retry does not ask them to take over again.
-  const manualLoginFailed = async (why) => ({
-    success: false, cause: 'login_credentials', handoffAttempted: true, handoffOffered: true,
+  const manualLoginFailed = async (why, cause = 'login_credentials') => ({
+    success: false, cause, handoffAttempted: true, handoffOffered: true,
     screenshot: await takeScreenshot(page, 'login-after-handoff'),
     error: `You took over to sign in manually, but ${why}. Try again, or ${BYO_SESSION_HINT_INLINE}.`,
   });
@@ -2656,7 +2655,9 @@ async function tryOAuthHandoff(page, ctx) {
     // A stale box in another tab posting /decline, or a newer offer for this
     // run, ends this wait without the user having given up — not an attempt.
     if (why === 'declined' || why === 'superseded') return null;
-    return manualLoginFailed(why === 'timeout' ? 'no "done" signal arrived within 10 minutes' : `the live view could not be started (${why || 'unknown error'})`);
+    return why === 'timeout'
+      ? manualLoginFailed('no "done" signal arrived within 10 minutes')
+      : manualLoginFailed(`the live view could not be started (${why || 'unknown error'})`, 'login_vision'); // our infrastructure, not their password
   } finally {
     unwatchPopups();
     await stopLiveView(ctx.runId);
@@ -3120,34 +3121,29 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
       // live-view takeover offer never fired. The user had four social-login
       // buttons on screen and almost certainly no password at all.
       //
-      // Two guards keep that story honest: a submit that never happened is
-      // OUR miss (say so, cause login_vision), and the OAuth reading only
-      // applies while the email/username field is still on screen too — a
-      // post-login settings page with a change-password box and a "connect
-      // Google" button is not a login form.
-      // What is OUR miss on this page, if anything. A submit that never
-      // happened, or an identity field our selectors did not recognise (only
-      // the password got typed), is a TestPilot limitation (cause login_vision)
-      // and must never be reported as a wrong password.
+      // Two guards keep that story honest. (1) A submit that never happened, or
+      // an identity field our selectors did not recognise (only the password
+      // got typed), is OUR miss — a TestPilot limitation (cause login_vision),
+      // never reported as a wrong password. (2) The OAuth reading needs a login
+      // page: any visible identity field (same selectors fillFirst used, one
+      // round trip), a shown error, or a miss of ours qualifies; a post-login
+      // settings page with a change-password box and a "connect Google" button
+      // does not.
       const ourMiss = !submitted
         ? 'no sign-in button matched, so nothing was sent'
         : (!emailFilled ? 'the email/username field was not recognised, so only the password was typed' : null);
-      // The OAuth reading needs a login page, not a post-login settings page
-      // with a change-password box and a "connect Google" button. Any visible
-      // identity field (same selectors fillFirst used), a shown error, or a
-      // miss of ours qualifies. One round trip for all selectors.
       const identityFieldVisible = await page.evaluate((sels) => sels.some((sel) => {
         try { return Array.from(document.querySelectorAll(sel)).some((el) => el.getClientRects().length > 0); } catch { return false; }
       }), emailSelectors).catch(() => false);
       const oauthVisible = (identityFieldVisible || hasError || !!ourMiss) && await hasOAuthSignIn(page);
       // The live takeover is the one remedy a watching human can apply on the
       // spot, so it is offered for every OAuth-page outcome — including our own
-      // misses. Only an explicit decline suppresses the offer on the retry.
+      // misses. Offered once per run: the retry does not ask again.
       let handoffOffered = false;
       if (oauthVisible && ctx.runId && typeof ctx.emit === 'function' && !ctx.skipHandoff) {
+        handoffOffered = true;
         const handoffResult = await tryOAuthHandoff(page, { ...ctx, loginHasError: hasError, loginOurMiss: ourMiss });
-        if (handoffResult && typeof handoffResult === 'object') return handoffResult;
-        handoffOffered = handoffResult === 'declined';
+        if (handoffResult) return handoffResult;
       }
       if (ourMiss) {
         return { success: false, cause: 'login_vision', handoffOffered, screenshot: afterScreenshot, error: `Could not log in — ${ourMiss} (still at ${newUrl}). This is a TestPilot limitation on this page, not a wrong password. ${BYO_SESSION_HINT}` };
@@ -3164,7 +3160,7 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
       // Both fields were filled and a submit control was clicked to get here, so
       // this is a credentials/config outcome — not TestPilot failing to read the
       // form (the bare /form/ in the fallback regex would have said otherwise).
-      return { success: false, cause: 'login_credentials', screenshot: afterScreenshot, error: `Login did not take — the credentials were typed and sent, but the app stayed on its sign-in form without showing an error (still at ${newUrl}). Most likely the password is wrong for this account. If it signs in with a magic link or SSO popup, ${BYO_SESSION_HINT_INLINE}.` };
+      return { success: false, cause: 'login_credentials', screenshot: afterScreenshot, error: `Login did not take — the credentials were typed and sent, but the app stayed on its sign-in form without showing an error (still at ${newUrl}). Either the password is wrong for this account, or the field TestPilot used for the email/username was not the right one. If it signs in with a magic link or SSO popup, ${BYO_SESSION_HINT_INLINE}.` };
     }
 
     return { success: true, screenshot: afterScreenshot, message: `Logged in. Now at: ${newUrl}` };
@@ -7115,7 +7111,7 @@ async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey)
       result.blockedReason = classifyFailure({
         cause: loginCause,
         step: 0,
-        description: `Not a bug in your app — TestPilot could not verify the login credentials given for this run. Login failed after 2 attempts: ${loginResult.error} If those credentials are correct, this app's login may need a human (magic link, SSO) — use "+ Capture new role" above to log in yourself once and reuse that session.`,
+        description: `Not a bug in your app — TestPilot could not verify the login credentials given for this run. ${loginResult.handoffAttempted ? 'Login failed after one automated attempt and one manual attempt' : 'Login failed after 2 attempts'}: ${loginResult.error} If those credentials are correct, this app's login may need a human (magic link, SSO) — use "+ Capture new role" above to log in yourself once and reuse that session.`,
       });
       result.steps.push({ step: 0, action: 'login', status: 'fail', outcome: loginResult.error, category: result.blockedReason.category });
       // findings (not just steps) is what renderTestDetail's "Couldn't verify"
@@ -7130,7 +7126,7 @@ async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey)
       // verified — most often because they're wrong for the app being
       // tested, occasionally because the app uses a login TestPilot can't
       // drive (magic link, SSO-only). Correct credentials would have worked.
-      emitStep(testId, { type: 'error', message: `Login failed after 2 attempts: ${loginResult.error}. Not a defect in your app — TestPilot could not verify the email/password given for this run. If they're correct, this login may need a human (magic link, SSO) — use "+ Capture new role" to log in yourself once and reuse that session.` });
+      emitStep(testId, { type: 'error', message: `${loginResult.handoffAttempted ? 'Login failed after one automated attempt and one manual attempt' : 'Login failed after 2 attempts'}: ${loginResult.error}. Not a defect in your app — TestPilot could not verify the email/password given for this run. If they're correct, this login may need a human (magic link, SSO) — use "+ Capture new role" to log in yourself once and reuse that session.` });
       return result;
     }
     emitStep(testId, { type: 'pass', message: 'Login successful', screenshot: loginResult.screenshot });
