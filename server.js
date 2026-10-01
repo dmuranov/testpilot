@@ -9619,6 +9619,24 @@ Then the JSON action object on the next line.`;
         .map(s => ({ step: s.step, durationMs: s.durationMs, intent: s.intent, target: s.target })),
       paymentMilestoneStep: result.steps.find(s => s.milestone === 'payment_commit')?.step ?? null,
     };
+    // Steps TestPilot itself refused by policy — a logout, a destructive click
+    // the scenario never asked for — are neither failures nor silently "fully
+    // done". The report names each one and why, then the run completes.
+    const policyRefusals = [];
+    for (const st of result.steps) {
+      const m = /^BLOCKED — refusing to click "([^"]*)": (it logs you OUT|it DESTROYS data)/.exec(st.outcome || '');
+      if (!m) continue;
+      st.policy = 'refused';
+      if (!policyRefusals.some((r) => r.target === m[1])) {
+        policyRefusals.push({
+          step: st.step, target: m[1],
+          reason: m[2] === 'it logs you OUT'
+            ? 'it would have logged TestPilot out before the scenario was finished'
+            : 'it would have destroyed real data the scenario never asked to delete',
+        });
+      }
+    }
+    result.summary.policyRefusals = policyRefusals;
     // An UNCERTAIN verify means a check the agent tried but COULDN'T confirm
     // (content below the fold, a multi-condition check that can't be seen on
     // one screen, a still-loading view). That must NOT read as a clean
@@ -9634,6 +9652,11 @@ Then the JSON action object on the next line.`;
       : doneCalled ? 'completed'
       : bugs > 0 ? 'blocked' : 'incomplete';
     result.completedAt = new Date().toISOString();
+    if (policyRefusals.length && doneCalled) {
+      const list = policyRefusals.map((r) => `did not click "${r.target}" (${r.reason})`).join('; ');
+      result.summary.completionNote = `Completed, with ${policyRefusals.length} step${policyRefusals.length === 1 ? '' : 's'} TestPilot refused by policy: ${list}. The rest of the scenario was verified without ${policyRefusals.length === 1 ? 'it' : 'them'}.`;
+      emitStep(testId, { type: 'info', message: '🛡️ ' + result.summary.completionNote });
+    }
 
     // STEP-REPLAY: on a clean completion (reached `done`, 0 confirmed bugs),
     // save THIS run's successful replayable actions as the recipe for next time.
@@ -10573,6 +10596,12 @@ function emitSweep(sweepId, event) {
 }
 
 // Same shape as awaitTwoFactorCode: park a promise the HTTP route resolves.
+// Unlabelled (icon-only) controls get a SHORT wait: the question is low
+// stakes (the control is skipped on no answer) and a client who left the tab
+// used to wait ten minutes per icon. Destructive and commit questions keep
+// the full wait — skipping those by default is the safe outcome anyway, but
+// the human deserves the time to answer.
+const UNNAMED_CONFIRM_MS = 45 * 1000;
 function awaitSweepConfirmation(sweepId, { timeoutMs = 10 * 60 * 1000 } = {}) {
   return new Promise((resolve) => {
     const prev = pendingConfirms.get(sweepId);
@@ -11068,10 +11097,17 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
         }
         if (gate) {
           const decisionKey = (item.named ? item.label : 'selector:' + item.selector).toLowerCase();
-          const remembered = (sweepDecisions[appKnowledge.appId] || {})[decisionKey];
+          // "Don't ask again" on an unlabelled control covers ALL unlabelled
+          // controls of this app (__unnamed__), not just that one selector.
+          const remembered = (sweepDecisions[appKnowledge.appId] || {})[decisionKey]
+            || (gate === 'unnamed' ? (sweepDecisions[appKnowledge.appId] || {})['__unnamed__'] : undefined);
           let allow, source = 'asked';
           if (remembered && typeof remembered.allow === 'boolean') {
             allow = remembered.allow; source = 'remembered';
+          } else if (gate === 'unnamed' && report.unnamedAutoSkip) {
+            // One unanswered unlabelled question per check; the rest are skipped
+            // without asking, so an unattended check keeps moving.
+            allow = false; source = 'no answer earlier, skipped without asking';
           } else {
             emitSweep(sweepId, {
               type: 'awaiting_confirm',
@@ -11085,14 +11121,19 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
                 ? `There is a control on ${path} with no label — an icon-only button (${item.selector}). I cannot tell what it does from the outside, and it could be a delete. Click it?`
                 : `Should I click "${item.label}" on ${path}? This looks like it commits something for real — it could send an email, publish, order or approve on your live app, and TestPilot cannot take that back.`,
             });
-            const answer = await awaitSweepConfirmation(sweepId);
+            const answer = await awaitSweepConfirmation(sweepId, { timeoutMs: gate === 'unnamed' ? UNNAMED_CONFIRM_MS : undefined });
             allow = !!answer.allow;
             if (answer.remember) {
               sweepDecisions[appKnowledge.appId] = sweepDecisions[appKnowledge.appId] || {};
-              sweepDecisions[appKnowledge.appId][decisionKey] = { allow, at: new Date().toISOString(), by: ownerEmail || 'unknown' };
+              const decision = { allow, at: new Date().toISOString(), by: ownerEmail || 'unknown' };
+              sweepDecisions[appKnowledge.appId][decisionKey] = decision;
+              if (gate === 'unnamed') sweepDecisions[appKnowledge.appId]['__unnamed__'] = decision;
               await saveSweepDecisions();
             }
-            if (answer.timedOut) source = 'no answer';
+            if (answer.timedOut) {
+              source = 'no answer';
+              if (gate === 'unnamed') report.unnamedAutoSkip = true;
+            }
           }
           if (!allow) {
             report.items.push({ page: path, kind: item.kind, label: item.label, verdict: 'skipped', detail: `${gate === 'commit' ? 'Commits something for real' : gate === 'unnamed' ? 'Unlabelled control — cannot tell what it does' : 'Destructive'} — not clicked (${source})` });
@@ -13816,14 +13857,24 @@ app.post('/api/security/api-intercept', async (req, res) => {
     // securetoken). Excluding the whole domain captured ZERO API calls for
     // them, so the scan silently tested nothing. Only fonts/analytics/sentry
     // are third-party noise.
-    const THIRD_PARTY = /fonts\.googleapis\.com|google-analytics|googletagmanager|analytics|sentry|fonts\./;
+    // Ads, consent, analytics, telemetry, social pixels: replaying those as
+    // "the app's API" produced a report full of SUSPICIOUS verdicts against
+    // googlesyndication.com (seen live 2026-10-01), which a client reads as
+    // bugs in their app. Backend providers no-code apps really use (Supabase,
+    // Firebase, Base44, Bubble, Airtable, Stripe…) are deliberately NOT here.
+    const THIRD_PARTY = /fonts\.googleapis\.com|fonts\.gstatic|google-analytics|googletagmanager|analytics|sentry|fonts\.|doubleclick|googlesyndication|googleads|googleadservices|adtrafficquality|fundingchoicesmessages|google\.com\/(pagead|ccm|recaptcha)|gstatic\.com|admaster|adnxs|criteo|adsrvr|rubiconproject|pubmatic|openx|taboola|outbrain|facebook\.(com|net)|fbcdn|hotjar|mixpanel|segment\.(io|com)|amplitude|intercom|clarity\.ms|bat\.bing|px\.ads\.linkedin|ads-twitter|analytics\.tiktok|newrelic|nr-data|datadoghq|cloudflareinsights|posthog|fullstory|heapanalytics|logrocket|braze\.(com|eu)|onesignal|cookiebot|onetrust|trustarc|iubenda|usercentrics|sodar/i;
+    const thirdPartySkipped = new Map(); // host -> count, reported once in the results
 
     const captureRequest = (req) => {
       const url = req.url();
       const type = req.resourceType();
-      if ((type === 'xhr' || type === 'fetch') && !THIRD_PARTY.test(url)) {
-        capturedRequests.push({ url, method: req.method(), headers: req.headers(), postData: req.postData() || null });
+      if (type !== 'xhr' && type !== 'fetch') return;
+      if (THIRD_PARTY.test(url)) {
+        let host = ''; try { host = new URL(url).hostname; } catch {}
+        if (host) thirdPartySkipped.set(host, (thirdPartySkipped.get(host) || 0) + 1);
+        return;
       }
+      capturedRequests.push({ url, method: req.method(), headers: req.headers(), postData: req.postData() || null });
     };
     const captureResponseInto = (map) => async (resp) => {
       const req = resp.request();
@@ -14240,6 +14291,12 @@ app.post('/api/security/api-intercept', async (req, res) => {
     // HEAD plus POST reads such as listEntity / getMyOrg / GraphQL queries).
     // Ambiguous POSTs count as writes and wait for destructive mode.
     let replayWritesSkipped = 0;
+    if (thirdPartySkipped.size) {
+        const hosts = [...thirdPartySkipped.entries()].sort((a, b) => b[1] - a[1]);
+        const total = hosts.reduce((n, [, c]) => n + c, 0);
+        results.push({ type: 'third_party_skipped', level: 1, verdict: 'INFO', severity: 'none',
+          note: `${total} call${total === 1 ? '' : 's'} to ${hosts.length} third-party service${hosts.length === 1 ? '' : 's'} (ads, consent, analytics) were not replayed — they are not your app's API: ${hosts.slice(0, 6).map(([h, c]) => `${h} (${c})`).join(', ')}${hosts.length > 6 ? ', …' : ''}.` });
+      }
     const level1Verdicts = new Set();
     if (!crossAccountTestable) {
       results.push({ type: 'api_replay', level: 1, verdict: 'INCONCLUSIVE', severity: 'none', note: `Cross-account API replay NOT run — ${crossAccountSkipNote}. ${replayList.length} endpoint(s) untested; none of them is SAFE.` });
