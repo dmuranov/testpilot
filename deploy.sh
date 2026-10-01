@@ -19,7 +19,7 @@ pm2 reload testpilot >/dev/null 2>&1 || pm2 restart testpilot >/dev/null 2>&1
 # process started with a bare "pm2 start server.js" would silently go quiet.
 MODE=""
 for i in $(seq 1 30); do
-  MODE=$(curl -s --max-time 5 http://localhost:3001/api/health | grep -o '"runMode":"[a-z]*"' | cut -d'"' -f4)
+  MODE=$(curl -s --max-time 5 http://localhost:3001/api/health | node -e "let d=\"\";process.stdin.on(\"data\",c=>d+=c).on(\"end\",()=>{try{console.log(JSON.parse(d).runMode||\"\")}catch{console.log(\"\")}})" 2>/dev/null || echo "")
   [ -n "$MODE" ] && break
   sleep 2
 done

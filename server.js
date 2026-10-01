@@ -11,6 +11,7 @@ import { loadRecipe, saveRecipe, shouldCaptureRun, isReplayableAction, replaySte
 import { assertPublicUrl } from './routes/ssrf.js';
 import { alertOnboardingIssue, watchOnboarding, onOnboardingFailure, isInternal as isInternalEmail } from './lib/onboarding-alert.js';
 import { RUN_MODE } from './lib/local-run.js';
+import { sendResend } from './lib/resend.js';
 import { createFreeRunAllowance } from './lib/free-runs.js';
 import { auditLinks } from './routes/link-audit.js';
 import { scanExposedFiles, tokenFileMatches, metaTagMatches } from './security-exposure.js';
@@ -37,32 +38,13 @@ const APP_URL = process.env.APP_URL || 'https://testpilotapp.dev';
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 // Where new-signup notifications are sent.
 const SIGNUP_NOTIFY_EMAIL = process.env.SIGNUP_NOTIFY_EMAIL || 'danijel.muranovic@gmail.com';
+// All user-facing mail. lib/resend.js is the one Resend chokepoint and
+// applies the run-mode rule (a non-production server never mails real people).
 async function mailer(opts) {
-  if (!MAIL_ENABLED) {
-    const body = String(opts.text || String(opts.html || '').replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim().slice(0, 400);
-    console.log('[mail] suppressed (local run):', opts.subject, '→', Array.isArray(opts.to) ? opts.to.join(', ') : opts.to, body ? '| ' + body : '');
-    return { id: null, suppressed: true };
-  }
-  const res = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${RESEND_API_KEY}`
-    },
-    body: JSON.stringify({
-      from: opts.from || 'TestPilot <hello@testpilotapp.dev>',
-      to: Array.isArray(opts.to) ? opts.to : [opts.to],
-      subject: opts.subject,
-      html: opts.html,
-      text: opts.text,
-      ...(opts.replyTo ? { reply_to: opts.replyTo } : {})
-    })
+  return sendResend({
+    from: opts.from || 'TestPilot <hello@testpilotapp.dev>',
+    to: opts.to, subject: opts.subject, html: opts.html, text: opts.text, replyTo: opts.replyTo,
   });
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Resend error: ${err}`);
-  }
-  return res.json();
 }
 mailer.sendMail = (opts) => mailer(opts);
 
@@ -220,14 +202,13 @@ const MAPS_DIR = './platform-maps';
 const SUPER_ADMIN_EMAIL = (process.env.SUPER_ADMIN_EMAIL || 'danijel.muranovic@gmail.com').toLowerCase();
 // Run mode (lib/local-run.js, one rule shared with the mail libs and
 // routes/signal.js): a server that is not the production pm2 process never
-// mails real people (mailer() is the one chokepoint) and never runs
+// mails real people (lib/resend.js is the one Resend chokepoint) and never runs
 // production's background jobs (retention sweep, stall nudges, digest, health
 // alerts, scheduled runs, signal sweeps). Two separate switches on purpose:
 // TESTPILOT_OUTBOUND_MAIL=1 turns mail on for a local run without re-arming
 // the jobs. /api/health reports the mode and deploy.sh asserts "production".
 const LOCAL_RUN = RUN_MODE.local;
 const PROD_JOBS = RUN_MODE.prodJobs;
-const MAIL_ENABLED = RUN_MODE.mailEnabled;
 console.log(`[run-mode] ${LOCAL_RUN ? 'LOCAL' : 'PRODUCTION'} (${RUN_MODE.reason}) — production jobs ${PROD_JOBS ? 'ON' : 'OFF'}, outbound mail ${RUN_MODE.mailReason}`);
 // Compare canonically (canonicalEmail strips gmail dots + plus-tags) so the
 // super admin still matches after an email has been through canonicalEmail()
