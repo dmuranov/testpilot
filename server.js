@@ -2613,11 +2613,7 @@ function watchForPopups(originalPage, runId, ctx, hostname) {
 // after "done"). That last case must never be reported as "no password" —
 // the user just tried with their own hands. Never loops, matches the 2FA
 // bridge's failure discipline.
-const handoffOfferedRuns = new Set(); // runIds already offered a takeover; one offer per run, whatever the caller remembers
 async function tryOAuthHandoff(page, ctx) {
-  if (handoffOfferedRuns.has(ctx.runId)) return null;
-  handoffOfferedRuns.add(ctx.runId);
-  setTimeout(() => handoffOfferedRuns.delete(ctx.runId), 30 * 60 * 1000).unref?.();
   // Two runs against DIFFERENT apps can each need a handoff at the same
   // time (a running test hits a login wall while a separate saved-session
   // capture is also mid-flight) — both boxes land in the SAME shared
@@ -2651,20 +2647,25 @@ async function tryOAuthHandoff(page, ctx) {
 
   const unwatchPopups = watchForPopups(page, ctx.runId, ctx, hostname);
   try {
-    await startLiveView(page, ctx.runId, ctx);
-    ctx.emit({ type: 'live_view_ready', runId: ctx.runId, hostname });
-    await awaitLiveViewSignal(ctx.runId, { timeoutMs: 10 * 60 * 1000 }); // "I'm done" signal
-  } catch (e) {
-    const why = e?.message || '';
-    // A stale box in another tab posting /decline, or a newer offer for this
-    // run, ends this wait without the user having given up — not an attempt.
-    if (why === 'declined' || why === 'superseded') return null;
-    // No "done" within 10 minutes is not a verdict either: a user who signed
-    // in and walked away is logged in. Fall through to the settle + recheck.
-    if (why !== 'timeout') {
+    try {
+      await startLiveView(page, ctx.runId, ctx);
+    } catch (e) {
       // Our infrastructure failed before the user ever had control: offered,
       // not attempted, so the caller's automatic retry still runs.
-      return manualLoginFailed(`the live view could not be started (${why || 'unknown error'})`, { cause: 'login_vision', attempted: false });
+      return manualLoginFailed(`the live view could not be started (${e?.message || 'unknown error'})`, { cause: 'login_vision', attempted: false });
+    }
+    ctx.emit({ type: 'live_view_ready', runId: ctx.runId, hostname });
+    try {
+      await awaitLiveViewSignal(ctx.runId, { timeoutMs: 10 * 60 * 1000 }); // "I'm done" signal
+    } catch (e) {
+      const why = e?.message || '';
+      // A newer offer for this run replaced this wait — not this attempt's story.
+      if (why === 'superseded') return null;
+      // A /decline while the human was in control (a stale box in another tab)
+      // ends the attempt without a verdict on the password.
+      if (why === 'declined') return manualLoginFailed('the takeover was cancelled before the login completed', { attempted: false });
+      // No "done" within 10 minutes is not a verdict either: a user who signed
+      // in and walked away is logged in. Fall through to the settle + recheck.
     }
   } finally {
     unwatchPopups();
@@ -3149,7 +3150,7 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
       // decides anything — with a shown error and a filled identity the gate
       // is already satisfied.
       const identityFieldVisible = (hasError && emailFilled) ? true
-        : await page.locator(emailSelectors.join(', ')).locator('visible=true').count().then((n) => n > 0).catch(() => false);
+        : await page.locator(emailSelectors.map((sel) => (sel.startsWith('input') ? sel : 'input' + sel)).join(', ')).locator('visible=true').count().then((n) => n > 0).catch(() => false);
       const ourMiss = !submitted
         ? 'no sign-in button matched, so nothing was sent'
         : (!emailFilled && identityFieldVisible ? 'the email/username field was not recognised, so only the password was typed' : null);
@@ -7128,7 +7129,7 @@ async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey)
       // After a manual attempt the advice must not read as if nobody tried.
       const loginAttempts = loginResult.handoffAttempted ? 'Login failed after one automated attempt and one manual attempt' : 'Login failed after 2 attempts';
       const loginAdvice = loginResult.handoffAttempted
-        ? `Since the manual login did not complete either, ${BYO_SESSION_HINT_INLINE} — "+ Capture new role" above does exactly that.`
+        ? 'The "+ Capture new role" button above is the no-terminal way to bring your own session.'
         : 'If those credentials are correct, this app\'s login may need a human (magic link, SSO) — use "+ Capture new role" above to log in yourself once and reuse that session.';
       result.blockedReason = classifyFailure({
         cause: loginCause,
