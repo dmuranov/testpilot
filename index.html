@@ -3227,14 +3227,16 @@ function renderTestDetail() {
     </div>
 
     ${test.type === 'flow_e2e' ? `
-    <div class="card" style="border-left:3px solid ${test.reachedPaymentStep ? 'var(--green,#4ade80)' : '#f59e0b'}">
+    <div class="card" style="border-left:3px solid ${(test.reachedPaymentStep && String(test.status || '').startsWith('completed')) ? 'var(--green,#4ade80)' : '#f59e0b'}">
       <div class="card-title" style="margin-bottom:6px">💳 Checkout & Booking</div>
       <div style="font-size:13px;color:var(--text);line-height:1.6">
-        ${test.reachedPaymentStep
+        ${(test.reachedPaymentStep && String(test.status || '').startsWith('completed'))
           ? (test.paymentOverviewStep
               ? `Reached the order review / overview page at step ${test.paymentOverviewStep} with the totals shown — stopped before paying (stop-before-pay mode).`
               : 'Reached the final payment/booking step successfully — stopped before submitting (stop-before-pay mode).')
-          : 'Did not reach a payment/booking step in this run — see the step log below for where it stopped.'}
+          : test.reachedPaymentStep
+            ? `Reached the order review / payment step${test.paymentOverviewStep ? ' at step ' + test.paymentOverviewStep : ''}, but the run did not finish cleanly — see the step log below for what happened after.`
+            : 'Did not reach a payment/booking step in this run — see the step log below for where it stopped.'}
       </div>
       ${s.frictionPoints?.length ? `
       <div style="margin-top:12px">
@@ -3873,7 +3875,7 @@ function renderSweep() {
     <div class="card" style="max-width:720px">
       <div class="form-group">
         <label>App</label>
-        <select class="form-input" id="sweep-app" ${running ? 'disabled' : ''} onchange="state.sweep = Object.assign({}, state.sweep, { appId: this.value, savedRole: '' }); render()">
+        <select class="form-input" id="sweep-app" ${running ? 'disabled' : ''} onchange="state.sweep = Object.assign({}, state.sweep, { appId: this.value, savedRole: '', noLogin: undefined }); render()">
           ${apps.map(a => `<option value="${a.appId}" ${(s.appId || apps[0]?.appId) === a.appId ? 'selected' : ''}>${escapeHtml(a.summary?.appName || a.url)}</option>`).join('')}
         </select>
       </div>
@@ -4321,6 +4323,14 @@ function renderStepLine(s) {
 function renderDetailStep(s) {
   const icons = { pass: '✅', fail: '❌', retry: '🔄', bug: '🐛', done: '🏁' };
   const icon = icons[s.status] || '•';
+  if (s.status === 'retry' && s.policy === 'refused') {
+    // Not a retry in the user's eyes: TestPilot declined this click on purpose.
+    return `
+    <div class="step-line step-refused" style="opacity:0.85">
+      <span class="step-icon">🛡️</span>
+      <span class="step-text"><strong>Refused by policy:</strong> ${escapeHtml(s.action || '')} → ${escapeHtml(s.target || s.selector || '')} — ${escapeHtml(s.outcome || '')}</span>
+    </div>`;
+  }
   if (s.status === 'retry') {
     return `
     <div class="step-line step-retry" style="display:none;opacity:0.5">
@@ -6933,6 +6943,7 @@ function downloadTestReport() {
   .step-row.pass { background: #fff; }
   .step-row.fail { background: #fff5f5; }
   .step-row.bug { background: #fffbeb; }
+  .step-row.skip { background: #f3f4f6; }
   .step-num { font-family: monospace; color: #999; width: 40px; }
   .step-status { width: 32px; text-align: center; }
   .step-action { font-family: monospace; font-size: 11px; max-width: 280px; }
@@ -6961,7 +6972,7 @@ function downloadTestReport() {
   <tr><td>URL</td><td>${app.url || '—'}</td></tr>
   <tr><td>Scenario</td><td>${test.scenario}</td></tr>
   <tr><td>Date</td><td>${scanDate}</td></tr>
-  <tr><td>Total Steps</td><td>${test.steps.filter(s => s.status !== 'retry').length}</td></tr>
+  <tr><td>Total Steps</td><td>${test.steps.filter(s => s.status !== 'retry' || s.policy === 'refused').length}</td></tr>
 </table>
 
 <div class="stats">
@@ -7074,6 +7085,7 @@ function downloadSweepReport() {
   .step-row.pass { background: #fff; }
   .step-row.fail { background: #fff5f5; }
   .step-row.bug { background: #fffbeb; }
+  .step-row.skip { background: #f3f4f6; }
   .step-num { font-family: monospace; color: #999; width: 70px; }
   .step-action { font-family: monospace; font-size: 11px; max-width: 260px; }
   .step-meta { color: #888; font-size: 10px; }

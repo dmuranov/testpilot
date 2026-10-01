@@ -2837,6 +2837,13 @@ async function supplyPlaceholderToFileInput(page, fileInputLocator) {
 // One remedy, one wording, for every "this login needs a human" outcome.
 const BYO_SESSION_HINT_INLINE = 'use "bring your own session" (Advanced, in the TestPilot dashboard) so TestPilot runs with a session you have already signed into';
 const BYO_SESSION_HINT = BYO_SESSION_HINT_INLINE.charAt(0).toUpperCase() + BYO_SESSION_HINT_INLINE.slice(1) + '.';
+// One reading of "did this app need a login?" from a visionLogin result —
+// for learn telemetry and the dashboard's Check Everything default alike.
+// No recorded flow at all (a legacy map) reads as "login required": the safe
+// default is to ask for credentials, not to crawl anonymously.
+function loginRequiredFromFlow(lf) {
+  return !(lf && /no login required|public app/i.test(String(lf.message || '')));
+}
 const LOGIN_FORM_SELECTOR = 'input[type="email"], input[type="password"], #email, #password, input[name="email"]';
 // The identity (email / username) field, in the order fillFirst tries them.
 // Shared by the fill step and by the post-submit verdict below, so the two
@@ -6358,7 +6365,7 @@ Return ONLY valid JSON.`
       const lf = appKnowledge.loginFlow;
       await recordLearnOutcome(urlNormalized, {
         learn_status: 'success',
-        login_required: !(lf && /no login required/i.test(lf.message || '')),
+        login_required: loginRequiredFromFlow(lf),
         login_success: lf ? !!lf.success : null,
         login_message: lf ? String(lf.message || lf.error || '').slice(0, 300) : null,
         pages_crawled: _pageCount,
@@ -6793,8 +6800,11 @@ const PAYMENT_COMMIT_RE = /\b(pay now|complete purchase|place order|complete ord
 // An order review / overview page — totals shown, the final commit button one
 // click away — IS the payment step in stop-before-pay terms: the agent stops
 // there on purpose. Recognised by URL slug or by page text.
-const ORDER_OVERVIEW_URL_RE = /(overview|summary|review|confirm|step-?two|step-?2)/i;
-const ORDER_OVERVIEW_TEXT_RE = /(payment information|order (summary|overview|review)|checkout:?\s*overview|review your order|order total|item total|total:?\s*[$€£]?\s*\d)/i;
+const ORDER_OVERVIEW_URL_RE = /\/(checkout|order|booking|reservation)[^?#]*(overview|summary|review|confirm|step-?two|step-?2)/i;
+const ORDER_OVERVIEW_TEXT_RE = /(payment information|order (summary|overview|review)|checkout:?\s*overview|review your order|order total|item total|subtotal|grand total|total:?\s*[$€£]\s*\d)/i;
+// The final commit control as it reads on an overview page: PAYMENT_COMMIT_RE
+// plus the plain "Finish" / "Continue to payment" wordings demo stores use.
+const OVERVIEW_COMMIT_SRC = PAYMENT_COMMIT_RE.source + '|\\b(finish|checkout now|proceed to payment|continue to payment)\\b';
 const CHECKOUT_URL_HINT_RE = /[/_-](pagamento|payment|pay|paiement|zahlung|kasse|pago|checkout)([/?_-]|$)/i;
 // "continue"/"next" (+ the same Spanish/Italian equivalents visionLogin's own
 // advanceSelectors already treats as non-final "advance to the next step"
@@ -9198,9 +9208,17 @@ RESPOND ONLY JSON: {"confirmed":true,"actual":"the visible failure, plainly","de
       if (credentials?.paymentMode === 'stop-before-pay' && !result.reachedPaymentStep && status === 'pass') {
         try {
           const u = new URL(page.url());
+          // Three signals together: a checkout-ish path, order totals on the
+          // page, and the final commit control visible. Any one alone is too
+          // broad (a reviews page says "Total: 12 reviews"; the address step
+          // shows an order-summary sidebar with no commit button yet).
           if (ORDER_OVERVIEW_URL_RE.test(u.pathname) || CHECKOUT_URL_HINT_RE.test(u.pathname)) {
             const txt = (await page.textContent('body').catch(() => '') || '').slice(0, 4000);
-            if (ORDER_OVERVIEW_TEXT_RE.test(txt)) { result.reachedPaymentStep = true; result.paymentOverviewStep = result.steps.length; }
+            const commitVisible = ORDER_OVERVIEW_TEXT_RE.test(txt) && await page.$$eval('button, a, input[type="submit"]', (els, src) => {
+              const re = new RegExp(src, 'i');
+              return els.some((el) => (el.offsetWidth || el.offsetHeight) && re.test(String(el.innerText || el.value || '').trim()));
+            }, OVERVIEW_COMMIT_SRC).catch(() => false);
+            if (commitVisible) { result.reachedPaymentStep = true; result.paymentOverviewStep = result.steps.length; }
           }
         } catch {}
       }
@@ -9821,11 +9839,18 @@ Output structure (exact sections, max 220 words total):
       // honest in either direction — align the tail with the final counts.
       {
         const doneStep = result.steps.find(s => s.action === 'done');
-        const tail = /\(\d+ passed, \d+ retries, \d+ confirmed bugs?\)\s*$/;
-        if (doneStep && tail.test(doneStep.outcome || '')) {
-          doneStep.outcome = doneStep.outcome.replace(tail, `(${passed} passed, ${retries} retries, ${bugs} confirmed bug${bugs === 1 ? '' : 's'})`);
+        if (doneStep) {
+          // Same rule as the mid-run line: no tail on a clean run, otherwise
+          // "summary — (passed, retries, bugs)" with "passed" counting the steps
+          // before done, exactly as it did mid-run. Works in both directions:
+          // bugs cleared by the analysis, or a bug the analysis added.
+          const tail = /\s*(—\s*)?\(\d+ passed, \d+ retries, \d+ confirmed bugs?\)\s*$/;
+          const passedBeforeDone = passed - (doneStep.status === 'pass' ? 1 : 0);
+          const base = String(doneStep.outcome || '').replace(tail, '').trim();
+          doneStep.outcome = (retries === 0 && bugs === 0)
+            ? (base || 'Test completed successfully')
+            : `${base}${base ? ' — ' : ''}(${passedBeforeDone} passed, ${retries} retries, ${bugs} confirmed bug${bugs === 1 ? '' : 's'})`;
         }
-        if (result.summary) result.summary.bugs = bugs;
       }
       if (reconciled) {
         result.summary.bugs = bugs;
@@ -10029,7 +10054,7 @@ app.get('/api/apps', (req, res) => {
       summary: map.summary,
       // learned behind a login (credentials or a saved session) — the dashboard
       // defaults "No login required" from this instead of always ticking it
-      loginRequired: !!(map.loginFlow && !/no login required|public app/i.test(String(map.loginFlow.message || ''))),
+      loginRequired: loginRequiredFromFlow(map.loginFlow),
     });
   }
   res.json(apps);
