@@ -2621,7 +2621,7 @@ async function tryOAuthHandoff(page, ctx) {
     type: 'awaiting_oauth_handoff',
     runId: ctx.runId,
     hostname,
-    message: `Login failed on ${hostname || 'this app'} and this page also offers a "Sign in with Google" (or similar) button — this account may only work that way. Want to take over and log in yourself? TestPilot picks back up right after.`,
+    message: `${ctx.loginHasError ? `Login failed on ${hostname || 'this app'}` : `The sign-in form on ${hostname || 'this app'} is still on screen after submitting`} and this page also offers a "Sign in with Google" (or similar) button — this account may only work that way. Want to take over and log in yourself? TestPilot picks back up right after.`,
   });
   try {
     const decision = await awaitLiveViewSignal(ctx.runId, { timeoutMs: 60 * 1000 });
@@ -2640,8 +2640,16 @@ async function tryOAuthHandoff(page, ctx) {
     await stopLiveView(ctx.runId);
   }
 
+  // The human accepted and had their turn. If the form is still there, say THAT —
+  // the caller must not fall through to "this account has no password", which
+  // would contradict what the user just did with their own hands.
+  const manualLoginFailed = async () => ({
+    success: false, cause: 'login_credentials', handoffAttempted: true,
+    screenshot: await takeScreenshot(page, 'login-after-handoff'),
+    error: `You took over and signed in manually, but ${hostname || 'the app'} still shows its sign-in form afterwards — the manual login did not complete. Try again, or ${BYO_SESSION_HINT.charAt(0).toLowerCase() + BYO_SESSION_HINT.slice(1)}`,
+  });
   const stillHasForm = await page.locator(LOGIN_FORM_SELECTOR).first().isVisible({ timeout: 2500 }).catch(() => false);
-  if (stillHasForm) return null; // still not logged in after the handoff — fall through to the normal error
+  if (stillHasForm) return manualLoginFailed();
 
   // The login form disappearing does NOT mean the app has finished exchanging
   // the OAuth code for its own session cookie yet — confirmed live: a session
@@ -2654,7 +2662,7 @@ async function tryOAuthHandoff(page, ctx) {
   await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
   await page.waitForTimeout(1500);
   const stillHasFormAfterSettle = await page.locator(LOGIN_FORM_SELECTOR).first().isVisible({ timeout: 2500 }).catch(() => false);
-  if (stillHasFormAfterSettle) return null;
+  if (stillHasFormAfterSettle) return manualLoginFailed();
 
   const freshScreenshot = await takeScreenshot(page, 'login-after-handoff');
   return { success: true, screenshot: freshScreenshot, message: `Logged in via manual handoff. Now at: ${page.url()}` };
@@ -2756,6 +2764,8 @@ async function supplyPlaceholderToFileInput(page, fileInputLocator) {
 
 // ── LOGIN DISCOVERY (G1) ────────────────────────────────────────────────────
 // Selector for a directly-fillable login form (email/password inputs).
+// One remedy, one wording, for every "this login needs a human" outcome.
+const BYO_SESSION_HINT = 'Use "bring your own session" (Advanced, in the TestPilot dashboard) so TestPilot runs with a session you have already signed into.';
 const LOGIN_FORM_SELECTOR = 'input[type="email"], input[type="password"], #email, #password, input[name="email"]';
 
 // A visible input[type="email"]/#email alone is NOT reliable evidence of a
@@ -3055,9 +3065,10 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
     }
 
     // STANDARD password submit (skipped if we already authed via a code step).
+    let submitted = true; // false when no sign-in control matched — then nothing was ever sent
     if (!authed) {
       await page.waitForTimeout(500);
-      await clickSubmit();
+      submitted = await clickSubmit();
       await page.waitForTimeout(3000);
       await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
       // After a password submit the site may STILL demand a 2FA code.
@@ -3093,18 +3104,31 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
       // the vague "credentials wrong or field not recognised" line, and the
       // live-view takeover offer never fired. The user had four social-login
       // buttons on screen and almost certainly no password at all.
-      const oauthVisible = await hasOAuthSignIn(page);
+      //
+      // Two guards keep that story honest: a submit that never happened is
+      // OUR miss (say so, cause login_vision), and the OAuth reading only
+      // applies while the email/username field is still on screen too — a
+      // post-login settings page with a change-password box and a "connect
+      // Google" button is not a login form.
+      if (!submitted) {
+        return { success: false, cause: 'login_vision', screenshot: afterScreenshot, error: `Could not find the sign-in button on this page — the email and password were filled in, but no submit control matched, so nothing was sent (still at ${newUrl}). ${BYO_SESSION_HINT}` };
+      }
+      const identityFieldVisible = await page.locator('input[type="email"], #email, input[name="email"], #username, #user-name, input[name*="user" i]').first().isVisible({ timeout: 1000 }).catch(() => false);
+      const oauthVisible = identityFieldVisible && await hasOAuthSignIn(page);
       if (oauthVisible) {
-        if (ctx.runId && typeof ctx.emit === 'function') {
-          const handoffResult = await tryOAuthHandoff(page, ctx);
+        let handoffOffered = false;
+        if (ctx.runId && typeof ctx.emit === 'function' && !ctx.skipHandoff) {
+          handoffOffered = true;
+          const handoffResult = await tryOAuthHandoff(page, { ...ctx, loginHasError: hasError });
           if (handoffResult) return handoffResult;
         }
-        return { success: false, screenshot: afterScreenshot, error: hasError
-          ? 'Login failed — the app showed an error and the sign-in form is still on screen. This account most likely has NO PASSWORD at all: this page also offers "Sign in with Google" (or similar), and apps show the exact same "invalid credentials" message whether the password is wrong OR the account was only ever created through that button, which never sets a password on the backend. If so, no password will ever work here — this app needs to be tested with a pre-authenticated session instead of email/password (see TestPilot support for the no-terminal way to do this).'
-          : `Login did not take — the sign-in form is still on screen after submitting (still at ${newUrl}), and this page also offers "Continue with Google" (or similar). If you normally sign in to this app with one of those buttons, the account has NO PASSWORD and no password will ever work here. Use "bring your own session" (Advanced, in the dashboard) so TestPilot can run with a session you have already signed into.` };
+        return { success: false, cause: 'login_credentials', handoffOffered, screenshot: afterScreenshot, error: (hasError
+          ? 'Login failed — the app showed an error and the sign-in form is still on screen.'
+          : `Login did not take — the sign-in form is still on screen after submitting (still at ${newUrl}).`)
+          + ' This account most likely has NO PASSWORD at all: this page also offers "Sign in with Google" (or similar), and apps show the same result whether the password is wrong OR the account was only ever created through that button, which never sets a password on the backend. If so, no password will ever work here. ' + BYO_SESSION_HINT };
       }
       if (hasError) {
-        return { success: false, screenshot: afterScreenshot, error: 'Login failed — the app showed an error and the sign-in form is still on screen. Check the credentials for this app.' };
+        return { success: false, cause: 'login_credentials', screenshot: afterScreenshot, error: 'Login failed — the app showed an error and the sign-in form is still on screen. Check the credentials for this app.' };
       }
       return { success: false, screenshot: afterScreenshot, error: `Login did not take — the sign-in form is still on screen after submitting (still at ${newUrl}). Either the credentials are wrong, or the username/email field on this app was not recognised. If it signs in with a magic link or SSO popup, capture a session in your browser and use "bring your own session".` };
     }
@@ -4630,8 +4654,8 @@ async function crawlApp(appId, url, credentials, description, apiKey, onProgress
       // credentials were rejected (environment). Throw a CLASSIFIED error so
       // /api/learn can tell the user "TestPilot couldn't log in", never
       // implying their app failed to learn because it's defective.
-      const loginCause = /could not find|couldn'?t find|no .*(email|password|login).*field|form|vision|read|locate/i.test(loginResult.error || '')
-        ? 'login_vision' : 'login_credentials';
+      const loginCause = loginResult.cause || (/could not find|couldn'?t find|no .*(email|password|login).*field|form|vision|read|locate/i.test(loginResult.error || '')
+        ? 'login_vision' : 'login_credentials');
       const cls = classifyFailure({ cause: loginCause, description: `Login failed: ${loginResult.error}` });
       const err = new Error(`Could not log in to start the crawl — this is a TestPilot/login issue, not an app defect: ${loginResult.error}`);
       err.category = cls.category;
@@ -7039,7 +7063,7 @@ async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey)
           await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
           await page.waitForTimeout(2500);
         } catch {}
-        loginResult = await visionLogin(page, credentials, apiKey, { runId: testId, emit: (e) => emitStep(testId, e) });
+        loginResult = await visionLogin(page, credentials, apiKey, { runId: testId, emit: (e) => emitStep(testId, e), skipHandoff: loginResult.handoffOffered === true });
       }
     }
     if (!loginResult.success) {
@@ -7048,8 +7072,8 @@ async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey)
       // (environment/config) — neither proves the app is broken. Classify it
       // so staging regressions, multi-role aggregation and the UI treat this
       // as "blocked, couldn't test" rather than counting it as a bug.
-      const loginCause = /could not find|couldn'?t find|no .*(email|password|login).*field|form|vision|read|locate/i.test(loginResult.error || '')
-        ? 'login_vision' : 'login_credentials';
+      const loginCause = loginResult.cause || (/could not find|couldn'?t find|no .*(email|password|login).*field|form|vision|read|locate/i.test(loginResult.error || '')
+        ? 'login_vision' : 'login_credentials');
       result.status = 'blocked';
       result.blockedReason = classifyFailure({
         cause: loginCause,
