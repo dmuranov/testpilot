@@ -6790,6 +6790,11 @@ const PAYMENT_COMMIT_RE = /\b(pay now|complete purchase|place order|complete ord
 // /checkout is the single most common English checkout URL slug (default on
 // Shopify, WooCommerce, Sylius, OpenCart, and this app) — its absence here
 // was the actual gap, not the text list.
+// An order review / overview page — totals shown, the final commit button one
+// click away — IS the payment step in stop-before-pay terms: the agent stops
+// there on purpose. Recognised by URL slug or by page text.
+const ORDER_OVERVIEW_URL_RE = /(overview|summary|review|confirm|step-?two|step-?2)/i;
+const ORDER_OVERVIEW_TEXT_RE = /(payment information|order (summary|overview|review)|checkout:?\s*overview|review your order|order total|item total|total:?\s*[$€£]?\s*\d)/i;
 const CHECKOUT_URL_HINT_RE = /[/_-](pagamento|payment|pay|paiement|zahlung|kasse|pago|checkout)([/?_-]|$)/i;
 // "continue"/"next" (+ the same Spanish/Italian equivalents visionLogin's own
 // advanceSelectors already treats as non-final "advance to the next step"
@@ -9187,6 +9192,18 @@ RESPOND ONLY JSON: {"confirmed":true,"actual":"the visible failure, plainly","de
         ...(action.action === 'click' && status === 'pass' && PAYMENT_COMMIT_RE.test(String(stepTarget))
           ? { milestone: 'payment_commit' } : {}),
       });
+      // Standing on the order review / overview page is reaching the payment
+      // step (stop-before-pay): the Checkout panel used to say "did not reach
+      // a payment/booking step" for a run that stood in front of "Finish".
+      if (credentials?.paymentMode === 'stop-before-pay' && !result.reachedPaymentStep && status === 'pass') {
+        try {
+          const u = new URL(page.url());
+          if (ORDER_OVERVIEW_URL_RE.test(u.pathname) || CHECKOUT_URL_HINT_RE.test(u.pathname)) {
+            const txt = (await page.textContent('body').catch(() => '') || '').slice(0, 4000);
+            if (ORDER_OVERVIEW_TEXT_RE.test(txt)) { result.reachedPaymentStep = true; result.paymentOverviewStep = result.steps.length; }
+          }
+        } catch {}
+      }
 
       // ── Cleanup ledger (test-data teardown) ──────────────────────────────
       // Track records THIS run CREATES so they can be cleaned up afterward.
@@ -9798,6 +9815,18 @@ Output structure (exact sections, max 220 words total):
         bugs = 1;
         reconciled = true;
       }
+      // The done step's own "(N passed, M retries, K confirmed bugs)" tail was
+      // written mid-run, before classification and this reconciliation. A
+      // report whose header says 0 bugs while the last step says 2 is not
+      // honest in either direction — align the tail with the final counts.
+      {
+        const doneStep = result.steps.find(s => s.action === 'done');
+        const tail = /\(\d+ passed, \d+ retries, \d+ confirmed bugs?\)\s*$/;
+        if (doneStep && tail.test(doneStep.outcome || '')) {
+          doneStep.outcome = doneStep.outcome.replace(tail, `(${passed} passed, ${retries} retries, ${bugs} confirmed bug${bugs === 1 ? '' : 's'})`);
+        }
+        if (result.summary) result.summary.bugs = bugs;
+      }
       if (reconciled) {
         result.summary.bugs = bugs;
         result.status = blockedDone ? 'blocked'
@@ -9997,7 +10026,10 @@ app.get('/api/apps', (req, res) => {
       description: map.description,
       crawledAt: map.crawledAt,
       pages: Object.keys(map.pages || {}).length,
-      summary: map.summary
+      summary: map.summary,
+      // learned behind a login (credentials or a saved session) — the dashboard
+      // defaults "No login required" from this instead of always ticking it
+      loginRequired: !!(map.loginFlow && !/no login required|public app/i.test(String(map.loginFlow.message || ''))),
     });
   }
   res.json(apps);
