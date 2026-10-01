@@ -2836,29 +2836,33 @@ const LOGIN_IDENTITY_INPUT_SELECTOR = LOGIN_IDENTITY_SELECTORS.map((sel) => (sel
 // new/current/confirm/old), which is a page you only reach logged IN.
 // Deciding "still logged out" from such a page was a false failure.
 async function isLoginFormStillVisible(page) {
-  const anyVisible = await page.locator(LOGIN_FORM_SELECTOR).locator('visible=true').count().then((n) => n > 0).catch(() => false);
-  if (!anyVisible) return false;
+  // One round trip, one default: if the page is mid-navigation and the
+  // evaluate fails, the answer is "no form" — the same default the old
+  // isVisible().catch(() => false) check had.
   // Conservative on purpose: we only call it a change-password box when
   // (a) no identity field (email/username, the same list fillFirst uses) is
   // visible — a login or register panel always has one — and (b) every
-  // visible password input is marked as a NEW password by a name/id/
+  // visible password input is marked as a changed password by a name/id/
   // placeholder token new/confirm/repeat/old (split on _ - space and
-  // camelCase). autocomplete="new-password" counts only alongside a second
-  // password input: alone it is a common anti-autofill trick on LOGIN forms.
-  // autocomplete="current-password" is the standard LOGIN markup and never
-  // counts. Anything else is still a login form, as before.
-  const changePasswordShape = await page.evaluate((identitySelector) => {
+  // camelCase); 'current' and autocomplete="new-password" count only
+  // alongside a second password input, since alone they are standard LOGIN
+  // markup (current-password) or a common anti-autofill trick (new-password).
+  // Anything else is still a login form, as before.
+  return await page.evaluate(({ formSelector, identitySelector }) => {
     const visible = (el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+    const any = Array.from(document.querySelectorAll(formSelector)).some(visible);
+    if (!any) return false;
     const pw = Array.from(document.querySelectorAll('input[type="password"]')).filter(visible);
-    if (pw.length === 0) return false;
+    if (pw.length === 0) return true;
     let identity = false;
     try { identity = Array.from(document.querySelectorAll(identitySelector)).some(visible); } catch { identity = false; }
-    if (identity) return false;
+    if (identity) return true;
     const tokens = (el) => [el.name, el.id, el.placeholder].join(' ').replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase().split(/[^a-z]+/).filter(Boolean);
-    const isNew = (el) => tokens(el).some((t) => t === 'new' || t === 'confirm' || t === 'repeat' || t === 'old') || (el.autocomplete === 'new-password' && pw.length >= 2);
-    return pw.every(isNew);
-  }, LOGIN_IDENTITY_INPUT_SELECTOR).catch(() => false);
-  return !changePasswordShape;
+    const several = pw.length >= 2;
+    const isChanged = (el) => tokens(el).some((t) => t === 'new' || t === 'confirm' || t === 'repeat' || t === 'old' || (several && t === 'current'))
+      || (several && el.autocomplete === 'new-password');
+    return !pw.every(isChanged);
+  }, { formSelector: LOGIN_FORM_SELECTOR, identitySelector: LOGIN_IDENTITY_INPUT_SELECTOR }).catch(() => false);
 }
 
 // A visible input[type="email"]/#email alone is NOT reliable evidence of a
@@ -3113,7 +3117,7 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
       ctx.emit({ phase: 'awaiting_2fa', type: 'awaiting_2fa', runId: ctx.runId, message: `A verification code was sent${credentials.email ? ' to ' + credentials.email : ''}. Enter it to continue.` });
       let code;
       try { code = await awaitTwoFactorCode(ctx.runId, { timeoutMs: 5 * 60 * 1000 }); }
-      catch (e) { return { success: false, cause: e.message === 'timeout' ? 'login_timeout' : 'login_vision', screenshot: await takeScreenshot(page, 'login-2fa-wait'), error: e.message === 'timeout' ? 'A 2FA code was required but none was entered within 5 minutes.' : 'The 2FA step was interrupted before a code was entered.' }; }
+      catch (e) { return { success: false, cause: 'login_timeout', screenshot: await takeScreenshot(page, 'login-2fa-wait'), error: e.message === 'timeout' ? 'A 2FA code was required but none was entered within 5 minutes.' : 'The 2FA step was interrupted before a code was entered.' }; }
       await fillOtpField(page, otp, code);
       await page.waitForTimeout(400);
       await clickSubmit();
@@ -3251,7 +3255,7 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
     // An exception out of our own login driver: an unreachable app or a lost
     // page is not a form-reading problem, so say which it was.
     const msg = e?.message || '';
-    const cause = /net::ERR|ERR_NAME|ERR_CONNECTION|Navigation|Timeout \d+ms exceeded|navigating to/i.test(msg) ? 'nav_timeout'
+    const cause = /net::ERR|ERR_NAME|ERR_CONNECTION|page\.goto|Navigation (failed|timeout|interrupted)|navigating to/i.test(msg) ? 'nav_timeout'
       : /Target (page|context|browser).*closed|Execution context was destroyed|detached|has been closed/i.test(msg) ? 'playwright_error'
       : 'login_vision';
     return { success: false, cause, screenshot, error: msg };
@@ -6453,6 +6457,12 @@ app.post('/api/2fa/:runId', (req, res) => {
 // that names another offer — accept/decline answer the first wait, done
 // answers the second.
 app.post('/api/live-view/:runId/accept', (req, res) => {
+  // The live view is already running for this run (same offer open in two
+  // tabs, a double click): answering 200 would leave that tab on
+  // "Connecting…" forever, since the Done wait ignores a second accept.
+  if (activeLiveViews.has(req.params.runId)) {
+    return res.status(409).json({ error: 'A live view is already running for this run in another tab or window.' });
+  }
   if (!settleLiveView(req.params.runId, req.body?.offerId || null, (p) => p.resolve({ action: 'accept' }))) {
     return res.status(404).json({ error: 'No run is waiting for a takeover decision (it may have completed, been superseded, or timed out).' });
   }

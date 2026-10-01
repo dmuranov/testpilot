@@ -4906,12 +4906,15 @@ function postLiveViewSignal(runId, action, box) {
 function showOAuthHandoffPrompt(runId, message, hostname, offerId) {
   if (!runId) return;
   window._tpSeenOffers = window._tpSeenOffers || new Set();
+  // An offer this document has already shown — replayed by a reconnecting
+  // stream after the user acted on it — never gets a box again.
+  if (offerId && window._tpSeenOffers.has(offerId)) return;
   const existing = document.getElementById('oauth-handoff-' + runId);
   if (existing) {
-    // Same offer already on screen, or an OLD offer replayed by a reconnecting
-    // stream: nothing to do. Only an offer never seen before (a retry's new
-    // offer) replaces the box, whose buttons the server would refuse.
-    if (!offerId || existing.dataset.offerId === offerId || window._tpSeenOffers.has(offerId)) return;
+    // Same offer already on screen: nothing to do. Only an offer never seen
+    // before (a retry's new offer) replaces the box, whose buttons the server
+    // would refuse.
+    if (!offerId || existing.dataset.offerId === offerId) return;
     if (window._tpLiveViews) delete window._tpLiveViews[runId];
     existing.remove();
   }
@@ -5031,7 +5034,7 @@ function openLiveView(runId, hostname, offerId) {
     box.innerHTML = '<div style="color:var(--accent,#6c5ce7)">Continuing…</div>';
     delete window._tpLiveViews[runId];
     await postLiveViewSignal(runId, 'done', box).catch(() => {});
-    closeLiveOverlay(runId);
+    closeLiveBox(runId, box);
   });
 }
 
