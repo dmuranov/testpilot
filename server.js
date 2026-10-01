@@ -10,6 +10,8 @@ import psl from 'psl';
 import { loadRecipe, saveRecipe, shouldCaptureRun, isReplayableAction, replayStepHeld, stepIdentity, recipeKey, EMAIL_TOKEN, PASSWORD_TOKEN } from './routes/recipes.js';
 import { assertPublicUrl } from './routes/ssrf.js';
 import { alertOnboardingIssue, watchOnboarding, onOnboardingFailure, isInternal as isInternalEmail } from './lib/onboarding-alert.js';
+import { RUN_MODE, isInternalAddress } from './lib/local-run.js';
+import { sendResend, canSend } from './lib/resend.js';
 import { createFreeRunAllowance } from './lib/free-runs.js';
 import { auditLinks } from './routes/link-audit.js';
 import { scanExposedFiles, tokenFileMatches, metaTagMatches } from './security-exposure.js';
@@ -33,30 +35,15 @@ const SUPABASE_SECRET = process.env.SUPABASE_SECRET_KEY;
 const APP_URL = process.env.APP_URL || 'https://testpilotapp.dev';
 
 // Email via Resend
-const RESEND_API_KEY = process.env.RESEND_API_KEY;
 // Where new-signup notifications are sent.
 const SIGNUP_NOTIFY_EMAIL = process.env.SIGNUP_NOTIFY_EMAIL || 'danijel.muranovic@gmail.com';
+// All user-facing mail. lib/resend.js is the one Resend chokepoint and
+// applies the run-mode rule (a non-production server never mails real people).
 async function mailer(opts) {
-  const res = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${RESEND_API_KEY}`
-    },
-    body: JSON.stringify({
-      from: opts.from || 'TestPilot <hello@testpilotapp.dev>',
-      to: Array.isArray(opts.to) ? opts.to : [opts.to],
-      subject: opts.subject,
-      html: opts.html,
-      text: opts.text,
-      ...(opts.replyTo ? { reply_to: opts.replyTo } : {})
-    })
+  return sendResend({
+    from: opts.from || 'TestPilot <hello@testpilotapp.dev>',
+    to: opts.to, subject: opts.subject, html: opts.html, text: opts.text, replyTo: opts.replyTo,
   });
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Resend error: ${err}`);
-  }
-  return res.json();
 }
 mailer.sendMail = (opts) => mailer(opts);
 
@@ -212,6 +199,16 @@ const MAPS_DIR = './platform-maps';
 // Super admin: bypasses app-ownership blocks so it can learn/test ANY app,
 // regardless of which account first claimed it.
 const SUPER_ADMIN_EMAIL = (process.env.SUPER_ADMIN_EMAIL || 'danijel.muranovic@gmail.com').toLowerCase();
+// Run mode (lib/local-run.js, one rule shared with the mail libs and
+// routes/signal.js): a server that is not the production pm2 process never
+// mails real people (lib/resend.js is the one Resend chokepoint) and never runs
+// production's background jobs (retention sweep, stall nudges, digest, health
+// alerts, scheduled runs, signal sweeps). Two separate switches on purpose:
+// TESTPILOT_OUTBOUND_MAIL=1 turns mail on for a local run without re-arming
+// the jobs. /api/health reports the mode and deploy.sh asserts "production".
+const LOCAL_RUN = RUN_MODE.local;
+const PROD_JOBS = RUN_MODE.prodJobs;
+console.log(`[run-mode] ${LOCAL_RUN ? 'LOCAL' : 'PRODUCTION'} (${RUN_MODE.reason}) — production jobs ${PROD_JOBS ? 'ON' : 'OFF'}, outbound mail ${RUN_MODE.mailReason}`);
 // Compare canonically (canonicalEmail strips gmail dots + plus-tags) so the
 // super admin still matches after an email has been through canonicalEmail()
 // on the free-run identity path — otherwise danijel.muranovic@ (stored WITH a
@@ -784,6 +781,13 @@ async function createOrGetUser(email) {
   const existing = await getUserByEmail(email);
   if (existing) return existing;
   if (!SUPABASE_URL) return null;
+  // A local run must never create a production users row for a real person:
+  // production's own stall sweep would mail them later. Every entry point
+  // (funnel, learn, login) creates users here, so the rule lives here. Test
+  // identities (@example.*, TESTPILOT_TESTER_EMAILS, the admin) are fine.
+  if (RUN_MODE.local && !isInternalAddress(email)) {
+    throw new Error(`local run: refusing to create a users row for ${email} — use an @example.com address or one listed in TESTPILOT_TESTER_EMAILS`);
+  }
   try {
     const rows = await supabase('POST', 'users', {
       email,
@@ -803,7 +807,7 @@ async function createOrGetUser(email) {
         subject: `🎉 New TestPilot signup: ${email}`,
         text: `A new client just signed up.\n\nEmail: ${email}\nPlan: free\nWhen: ${when}`,
         html: `<h2>🎉 New TestPilot signup</h2><p><strong>Email:</strong> ${safe}<br><strong>Plan:</strong> free<br><strong>When:</strong> ${when}</p>`,
-      }).then(() => console.log('[signup] notified for', email)).catch(e => console.warn('[signup] notify failed:', e.message));
+      }).catch(e => console.warn('[signup] notify failed:', e.message)); // lib/resend.js logs sent / suppressed / skipped
     }
     return created;
   } catch (err) {
@@ -1948,6 +1952,16 @@ app.post('/api/auth/request', async (req, res) => {
     return res.status(429).json({ error: 'Too many requests. Try again later.', retry_after_seconds: retry });
   }
 
+  // No mail would go out for this address (local run, or mail on without a
+  // key) and it is not one of us: answer as if sent and touch NOTHING — no
+  // users row (production's own stall sweep would later nudge a person who
+  // never signed up) and no token. Internal/test addresses still get their
+  // token so the logged link works.
+  if (!canSend(email) && !isInternalAddress(email)) {
+    console.log('[auth] login request ignored (local run, external address)');
+    return res.json({ ok: true, message: 'Check your email for the login link' });
+  }
+
   try {
     // Look up user. Do NOT auto-create on first request — first send a notification
     // to the operator (Dado) and only persist + email after the user is approved.
@@ -2203,6 +2217,7 @@ async function userHasRecovered(stage, email) {
 }
 
 onOnboardingFailure(({ stage, email, url, error, code }) => {
+  if (!PROD_JOBS) return; // creates a live login token in the database before mailing — production only
   const msg = helpMessageFor({ stage, code, url, error });
   if (!msg) return;
   setTimeout(async () => {
@@ -2248,12 +2263,14 @@ async function onboardingStallSweep() {
     }
   } catch (e) { console.warn('[onboarding] stall sweep failed:', e.message); }
 }
-setTimeout(onboardingStallSweep, 2 * 60_000);
-setInterval(onboardingStallSweep, 30 * 60_000);
+if (PROD_JOBS) {
+  setTimeout(onboardingStallSweep, 2 * 60_000);
+  setInterval(onboardingStallSweep, 30 * 60_000);
+}
 
-// Daily funnel digest to the admin (~07:00 UTC).
+// Daily funnel digest to the admin (~07:00 UTC). Production only.
 let lastDigestDay = null;
-setInterval(async () => {
+if (PROD_JOBS) setInterval(async () => {
   const now = new Date();
   const day = now.toISOString().slice(0, 10);
   if (now.getUTCHours() !== 7 || lastDigestDay === day) return;
@@ -9922,6 +9939,7 @@ async function getSystemHealth() {
 
   const status = (connectivity !== 'ok' || rssMB > 450) ? 'warning' : 'ok';
   return {
+    runMode: LOCAL_RUN ? 'local' : 'production',
     status,
     connectivity,
     version: '2.0',
@@ -12716,8 +12734,10 @@ async function runRetentionSweep() {
     }
   } catch (e) { console.warn('[RETENTION] test_runs purge error:', e.message); }
 }
-runRetentionSweep();
-setInterval(runRetentionSweep, 6 * 60 * 60_000);
+if (PROD_JOBS) { // deletes production rows — never from a laptop
+  runRetentionSweep();
+  setInterval(runRetentionSweep, 6 * 60 * 60_000);
+}
 
 // ── SELF-MONITORING + ALERTS ────────────────────────────────────────────────
 // In-process watch that emails ALERT_EMAIL on low disk, a backed-up scan queue,
@@ -12758,7 +12778,7 @@ async function healthWatch() {
     await sendAlert('errors', `scan error burst (${errs}/${recent.length} failed in 30min)`, `${errs} of the last ${recent.length} scans errored (30-min window). Likely causes: Anthropic API key out of credits, login/visionLogin failing, or the target app unreachable.`);
   }
 }
-setInterval(healthWatch, 5 * 60_000);
+if (PROD_JOBS) setInterval(healthWatch, 5 * 60_000); // alerts about THIS box's disk — production only
 
 // ── RIGHT TO ERASURE ────────────────────────────────────────────────────────
 // Honors the privacy policy's "delete your account and all associated data".
@@ -15888,7 +15908,7 @@ async function scheduleTick() {
   catch (e) { console.warn('[schedules] tick run failed:', e.message); }
   finally { scheduleRunInFlight = false; }
 }
-setInterval(scheduleTick, 5 * 60000);
+if (PROD_JOBS) setInterval(scheduleTick, 5 * 60000); // runs customers' scheduled tests — production only
 
 // ── Schedule CRUD ────────────────────────────────────────────
 app.post('/api/schedules', async (req, res) => {
