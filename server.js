@@ -11,7 +11,7 @@ import { loadRecipe, saveRecipe, shouldCaptureRun, isReplayableAction, replaySte
 import { assertPublicUrl } from './routes/ssrf.js';
 import { alertOnboardingIssue, watchOnboarding, onOnboardingFailure, isInternal as isInternalEmail } from './lib/onboarding-alert.js';
 import { RUN_MODE, isInternalAddress } from './lib/local-run.js';
-import { sendResend } from './lib/resend.js';
+import { sendResend, canSend } from './lib/resend.js';
 import { createFreeRunAllowance } from './lib/free-runs.js';
 import { auditLinks } from './routes/link-audit.js';
 import { scanExposedFiles, tokenFileMatches, metaTagMatches } from './security-exposure.js';
@@ -1945,10 +1945,12 @@ app.post('/api/auth/request', async (req, res) => {
     return res.status(429).json({ error: 'Too many requests. Try again later.', retry_after_seconds: retry });
   }
 
-  // No mail would go out for this address (local run, external recipient):
-  // answer as if sent and touch NOTHING — no users row (production's own
-  // stall sweep would later nudge a person who never signed up) and no token.
-  if (!RUN_MODE.mailEnabled && !isInternalAddress(email)) {
+  // No mail would go out for this address (local run, or mail on without a
+  // key) and it is not one of us: answer as if sent and touch NOTHING — no
+  // users row (production's own stall sweep would later nudge a person who
+  // never signed up) and no token. Internal/test addresses still get their
+  // token so the logged link works.
+  if (!canSend(email) && !isInternalAddress(email)) {
     console.log('[auth] login request ignored (local run, external address)');
     return res.json({ ok: true, message: 'Check your email for the login link' });
   }

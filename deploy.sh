@@ -8,7 +8,7 @@ log(){ echo "[deploy $(date -u +%H:%M:%S)] $*"; }
 # health_field <field> <fallback>: one JSON field from /api/health, never fails the script.
 # json_field <json> <field> <fallback>
 json_field(){ printf '%s' "$1" | node -e "let d=\"\";process.stdin.on(\"data\",c=>d+=c).on(\"end\",()=>{try{const v=JSON.parse(d)[\"$2\"];console.log(v===undefined?\"$3\":v)}catch{console.log(\"$3\")}})" 2>/dev/null || echo "$3"; }
-health_field(){ (curl -s --max-time 5 http://localhost:3001/api/health || true) | node -e "let d=\"\";process.stdin.on(\"data\",c=>d+=c).on(\"end\",()=>{try{const v=JSON.parse(d)[\"$1\"];console.log(v===undefined?\"$2\":v)}catch{console.log(\"$2\")}})" 2>/dev/null || echo "$2"; }
+health_field(){ json_field "$(curl -s --max-time 5 http://localhost:3001/api/health || true)" "$1" "$2"; }
 # Unknown (server down / health 500) is not "zero scans": wait through a
 # transient blip, but a server that cannot answer for 30s has nothing to
 # drain — a crash-looping box must not hold a hotfix for five minutes.
@@ -29,7 +29,17 @@ git reset --hard origin/main
 # Start or reload FROM THE ECOSYSTEM FILE so NODE_ENV=production (and the
 # xvfb DISPLAY) are always applied, however the process was first started.
 # A bare "pm2 reload testpilot" keeps whatever env the process was born with.
-pm2 startOrReload ecosystem.config.cjs --only testpilot --update-env >/dev/null 2>&1 || pm2 restart testpilot --update-env >/dev/null 2>&1
+PM2_OK=1
+pm2 startOrReload ecosystem.config.cjs --only testpilot --update-env >/dev/null 2>&1 \
+  || pm2 restart testpilot --update-env >/dev/null 2>&1 \
+  || PM2_OK=0
+if [ "$PM2_OK" = "0" ]; then
+  # Neither reload nor restart took: the OLD process may still be serving and
+  # would pass every check below. Recreate from the ecosystem file instead.
+  log "pm2 reload and restart both failed — recreating the process from ecosystem.config.cjs"
+  pm2 delete testpilot >/dev/null 2>&1 || true
+  pm2 start ecosystem.config.cjs --only testpilot >/dev/null 2>&1 || { log "ERROR: pm2 start from ecosystem.config.cjs failed"; pm2 logs testpilot --lines 20 --nostream 2>/dev/null || true; exit 1; }
+fi
 pm2 save >/dev/null 2>&1 || true   # persist the (possibly repaired) env so a VM reboot resurrects it
 # The server must come up in PRODUCTION mode (NODE_ENV=production from
 # ecosystem.config.cjs). In local mode it sends no mail and runs no jobs, so a
@@ -67,6 +77,13 @@ if [ -n "$MODE" ] && [ "$MODE" != "production" ]; then
   fi
 fi
 if [ -z "$MODE" ]; then
-  log "WARNING: health gave no run mode within the wait — check pm2 logs"
+  # No health answer at all. A slow boot is a warning; a process that pm2 does
+  # not report as online is a failed deploy, not a green one.
+  PM2_STATUS=$(pm2 jlist 2>/dev/null | node -e "let d=\"\";process.stdin.on(\"data\",c=>d+=c).on(\"end\",()=>{try{const p=JSON.parse(d).find(x=>x.name===\"testpilot\");console.log(p?p.pm2_env.status+\" restarts=\"+p.pm2_env.restart_time:\"missing\")}catch{console.log(\"unknown\")}})" 2>/dev/null || echo unknown)
+  log "WARNING: health gave no run mode within the wait — pm2 says: ${PM2_STATUS}"
+  case "$PM2_STATUS" in
+    online*) ;;
+    *) log "ERROR: testpilot is not online under pm2"; pm2 logs testpilot --lines 20 --nostream 2>/dev/null || true; exit 1;;
+  esac
 fi
 exit 0

@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { runMode } from '../lib/local-run.js';
+process.env.TESTPILOT_TESTER_EMAILS = 'tester.one@company.com, Second@Company.com';
+const { runMode, isInternalAddress, canonicalForCompare } = await import('../lib/local-run.js');
 
 test('production pm2 process: jobs and mail on', () => {
   const m = runMode({ NODE_ENV: 'production' });
@@ -49,6 +50,16 @@ test('pm2 on the production path counts as production even without NODE_ENV (fir
   const forced = runMode({ pm_id: '0', name: 'testpilot', TESTPILOT_LOCAL: '1' }, '/home/azureuser/testpilot');
   assert.equal(forced.isProd, false);
   assert.equal(forced.onProductionBox, true);
+});
+
+test('internal addresses: admin in any gmail spelling, @example.*, TESTPILOT_TESTER_EMAILS; nobody else', () => {
+  for (const a of ['danijel.muranovic@gmail.com', 'DanijelMuranovic@gmail.com', 'danijel.muranovic+demo@gmail.com', 'x@example.com', 'tester.one@company.com', 'second@company.com', 'Second+qa@company.com', '']) {
+    assert.equal(isInternalAddress(a), true, a);
+  }
+  for (const a of ['bob@acme.com', 'admin@facilitlabs.com', 'danijel.muranovic@proton.me']) {
+    assert.equal(isInternalAddress(a), false, a);
+  }
+  assert.equal(canonicalForCompare('A.B+c@GoogleMail.com'), 'ab@gmail.com');
 });
 
 test('reasons name the deciding input', () => {
