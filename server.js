@@ -2497,11 +2497,17 @@ function awaitLiveViewSignal(runId, { timeoutMs, offerId = null } = {}) {
   });
 }
 
-// true when the signal's offerId matches the wait's (or either side has none).
-function liveViewSignalMatches(runId, offerId) {
+// Settles the pending wait for runId with `settle(entry)` — resolve or reject —
+// when the signal's offerId matches the wait's (or either side has none).
+// Returns false when nothing is waiting or the signal belongs to another offer.
+function settleLiveView(runId, offerId, settle) {
   const p = pendingLiveView.get(runId);
   if (!p) return false;
-  return !offerId || !p.offerId || p.offerId === offerId;
+  if (offerId && p.offerId && p.offerId !== offerId) return false;
+  clearTimeout(p.timer);
+  pendingLiveView.delete(runId);
+  settle(p);
+  return true;
 }
 
 // Starts a CDP screencast on `page` and streams frames to the frontend via
@@ -2578,7 +2584,7 @@ async function dispatchLiveInput(runId, evt) {
 // (frontend sees no difference — same live_frame/live_view_ready events),
 // then switches back once the popup closes (OAuth done or cancelled).
 // Returns an unsubscribe function.
-function watchForPopups(originalPage, runId, ctx, hostname) {
+function watchForPopups(originalPage, runId, ctx, hostname, offerId = null) {
   const context = originalPage.context();
   const onNewPage = async (popup) => {
     try {
@@ -2600,12 +2606,12 @@ function watchForPopups(originalPage, runId, ctx, hostname) {
       // actually displaying the OAuth popup (accounts.google.com etc.) — the
       // box identifies which TEST this handoff belongs to, not which page
       // happens to be on screen at this instant.
-      ctx.emit({ type: 'live_view_ready', runId, hostname });
+      ctx.emit({ type: 'live_view_ready', runId, offerId, hostname });
       popup.once('close', async () => {
         if (originalPage.isClosed()) return;
         await stopLiveView(runId);
         await startLiveView(originalPage, runId, ctx).catch(err => console.log(`[live-view] ${runId} startLiveView(original, after popup close) FAILED: ${err.message}`));
-        ctx.emit({ type: 'live_view_ready', runId, hostname });
+        ctx.emit({ type: 'live_view_ready', runId, offerId, hostname });
       });
     } catch (err) { console.log(`[live-view] ${runId} onNewPage handler error: ${err.message}`); }
   };
@@ -2658,7 +2664,7 @@ async function tryOAuthHandoff(page, ctx) {
     error: `${attempted ? 'You took over to sign in manually, but' : 'You accepted the takeover, but'} ${why}. Try again, or ${BYO_SESSION_HINT_INLINE}.`,
   });
 
-  const unwatchPopups = watchForPopups(page, ctx.runId, ctx, hostname);
+  const unwatchPopups = watchForPopups(page, ctx.runId, ctx, hostname, offerId);
   try {
     try {
       await startLiveView(page, ctx.runId, ctx);
@@ -2821,12 +2827,22 @@ const LOGIN_FORM_SELECTOR = 'input[type="email"], input[type="password"], #email
 async function isLoginFormStillVisible(page) {
   const anyVisible = await page.locator(LOGIN_FORM_SELECTOR).first().isVisible({ timeout: 2500 }).catch(() => false);
   if (!anyVisible) return false;
+  // Conservative on purpose: we only call it a change-password box when
+  // (a) no identity field (email/username) is visible — a login or register
+  // panel always has one — and (b) every visible password input is marked as
+  // a NEW password: autocomplete="new-password", or a name/id/placeholder
+  // token new/confirm/repeat/old (split on _ - space and camelCase).
+  // autocomplete="current-password" is the standard LOGIN markup and never
+  // counts. Anything else is still a login form, as before.
   const changePasswordShape = await page.evaluate(() => {
-    const visible = (el) => el.getClientRects().length > 0;
+    const visible = (el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
     const pw = Array.from(document.querySelectorAll('input[type="password"]')).filter(visible);
     if (pw.length === 0) return false;
-    if (pw.length >= 2) return true;
-    return /\b(new|current|confirm|old)\b/i.test([pw[0].name, pw[0].id, pw[0].autocomplete, pw[0].placeholder].join(' '));
+    const identity = Array.from(document.querySelectorAll('input[type="email"], input#email, input[name="email"], input#username, input[name*="user" i], input[autocomplete="username"], input[autocomplete="email"]')).some(visible);
+    if (identity) return false;
+    const tokens = (el) => [el.name, el.id, el.placeholder].join(' ').replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase().split(/[^a-z]+/).filter(Boolean);
+    const isNew = (el) => el.autocomplete === 'new-password' || tokens(el).some((t) => t === 'new' || t === 'confirm' || t === 'repeat' || t === 'old');
+    return pw.every(isNew);
   }).catch(() => false);
   return !changePasswordShape;
 }
@@ -3088,7 +3104,7 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
       ctx.emit({ phase: 'awaiting_2fa', type: 'awaiting_2fa', runId: ctx.runId, message: `A verification code was sent${credentials.email ? ' to ' + credentials.email : ''}. Enter it to continue.` });
       let code;
       try { code = await awaitTwoFactorCode(ctx.runId, { timeoutMs: 5 * 60 * 1000 }); }
-      catch (e) { return { success: false, cause: 'login_timeout', screenshot: await takeScreenshot(page, 'login-2fa-wait'), error: e.message === 'timeout' ? 'A 2FA code was required but none was entered within 5 minutes.' : 'The 2FA step was interrupted before a code was entered.' }; }
+      catch (e) { return { success: false, cause: e.message === 'timeout' ? 'login_timeout' : 'login_vision', screenshot: await takeScreenshot(page, 'login-2fa-wait'), error: e.message === 'timeout' ? 'A 2FA code was required but none was entered within 5 minutes.' : 'The 2FA step was interrupted before a code was entered.' }; }
       await fillOtpField(page, otp, code);
       await page.waitForTimeout(400);
       await clickSubmit();
@@ -6421,12 +6437,7 @@ app.post('/api/2fa/:runId', (req, res) => {
 // entry that tryOAuthHandoff (server.js, near the 2FA bridge) is awaiting —
 // accept/decline answer the first wait, done answers the second.
 function resolveLiveView(runId, value, offerId = null) {
-  const p = pendingLiveView.get(runId);
-  if (!p || !liveViewSignalMatches(runId, offerId)) return false;
-  clearTimeout(p.timer);
-  pendingLiveView.delete(runId);
-  p.resolve(value);
-  return true;
+  return settleLiveView(runId, offerId, (p) => p.resolve(value));
 }
 
 app.post('/api/live-view/:runId/accept', (req, res) => {
@@ -6437,11 +6448,9 @@ app.post('/api/live-view/:runId/accept', (req, res) => {
 });
 
 app.post('/api/live-view/:runId/decline', (req, res) => {
-  const p = pendingLiveView.get(req.params.runId);
-  if (!p || !liveViewSignalMatches(req.params.runId, req.body?.offerId || null)) return res.status(404).json({ error: 'No run is waiting for a takeover decision.' });
-  clearTimeout(p.timer);
-  pendingLiveView.delete(req.params.runId);
-  p.reject(new Error('declined'));
+  if (!settleLiveView(req.params.runId, req.body?.offerId || null, (p) => p.reject(new Error('declined')))) {
+    return res.status(404).json({ error: 'No run is waiting for a takeover decision.' });
+  }
   res.json({ ok: true });
 });
 
