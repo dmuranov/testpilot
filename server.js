@@ -2604,9 +2604,11 @@ function watchForPopups(originalPage, runId, ctx, hostname) {
 
 // Offers the human a live takeover when login did not take on a page that
 // also shows an OAuth button. Returns a fresh {success:true,...} if the
-// handoff ended with the user actually logged in; null when the offer was
-// declined, superseded or ignored (caller falls through to its own failure
-// text); or a {success:false, handoffAttempted:true, handoffOffered:true}
+// handoff ended with the user actually logged in; the string 'declined' when
+// the user explicitly turned the offer down (caller then suppresses a second
+// offer on retry); null when the offer was ignored or superseded (caller may
+// offer again — a slow user's box is still on screen); or a
+// {success:false, handoffAttempted:true, handoffOffered:true}
 // result when the user ACCEPTED but the attempt did not end logged in (gave
 // up, took over 10 minutes, live view failed, or the form was still there
 // after "done"). That last case must never be reported as "no password" —
@@ -2626,12 +2628,12 @@ async function tryOAuthHandoff(page, ctx) {
     type: 'awaiting_oauth_handoff',
     runId: ctx.runId,
     hostname,
-    message: `${ctx.loginHasError ? `Login failed on ${hostname || 'this app'}` : `The sign-in form on ${hostname || 'this app'} is still on screen after submitting`} and this page also offers a "Sign in with Google" (or similar) button — this account may only work that way. Want to take over and log in yourself? TestPilot picks back up right after.`,
+    message: `${ctx.loginOurMiss ? `TestPilot could not finish the sign-in on ${hostname || 'this app'} (${ctx.loginOurMiss})` : ctx.loginHasError ? `Login failed on ${hostname || 'this app'}` : `The sign-in form on ${hostname || 'this app'} is still on screen after submitting`} and this page also offers a "Sign in with Google" (or similar) button — this account may only work that way. Want to take over and log in yourself? TestPilot picks back up right after.`,
   });
   try {
     const decision = await awaitLiveViewSignal(ctx.runId, { timeoutMs: 60 * 1000 });
-    if (decision?.action !== 'accept') return null;
-  } catch { return null; } // declined, superseded, or nobody responded within 60s
+    if (decision?.action !== 'accept') return 'declined';
+  } catch (e) { return e?.message === 'declined' ? 'declined' : null; } // superseded, or nobody responded within 60s
 
   // From here on the human accepted and had their turn. Whatever goes wrong
   // next is reported as a manual login that did not complete — the caller
@@ -2641,7 +2643,7 @@ async function tryOAuthHandoff(page, ctx) {
   const manualLoginFailed = async (why) => ({
     success: false, cause: 'login_credentials', handoffAttempted: true, handoffOffered: true,
     screenshot: await takeScreenshot(page, 'login-after-handoff'),
-    error: `You took over to sign in manually, but ${why}. Try again, or ${BYO_SESSION_HINT.charAt(0).toLowerCase() + BYO_SESSION_HINT.slice(1)}`,
+    error: `You took over to sign in manually, but ${why}. Try again, or ${BYO_SESSION_HINT_INLINE}.`,
   });
 
   const unwatchPopups = watchForPopups(page, ctx.runId, ctx, hostname);
@@ -2650,7 +2652,11 @@ async function tryOAuthHandoff(page, ctx) {
     ctx.emit({ type: 'live_view_ready', runId: ctx.runId, hostname });
     await awaitLiveViewSignal(ctx.runId, { timeoutMs: 10 * 60 * 1000 }); // "I'm done" signal
   } catch (e) {
-    return manualLoginFailed(/timed out|timeout/i.test(e?.message || '') ? 'no "done" signal arrived within 10 minutes' : `the live view could not be started (${e?.message || 'unknown error'})`);
+    const why = e?.message || '';
+    // A stale box in another tab posting /decline, or a newer offer for this
+    // run, ends this wait without the user having given up — not an attempt.
+    if (why === 'declined' || why === 'superseded') return null;
+    return manualLoginFailed(why === 'timeout' ? 'no "done" signal arrived within 10 minutes' : `the live view could not be started (${why || 'unknown error'})`);
   } finally {
     unwatchPopups();
     await stopLiveView(ctx.runId);
@@ -2773,7 +2779,8 @@ async function supplyPlaceholderToFileInput(page, fileInputLocator) {
 // ── LOGIN DISCOVERY (G1) ────────────────────────────────────────────────────
 // Selector for a directly-fillable login form (email/password inputs).
 // One remedy, one wording, for every "this login needs a human" outcome.
-const BYO_SESSION_HINT = 'Use "bring your own session" (Advanced, in the TestPilot dashboard) so TestPilot runs with a session you have already signed into.';
+const BYO_SESSION_HINT_INLINE = 'use "bring your own session" (Advanced, in the TestPilot dashboard) so TestPilot runs with a session you have already signed into';
+const BYO_SESSION_HINT = BYO_SESSION_HINT_INLINE.charAt(0).toUpperCase() + BYO_SESSION_HINT_INLINE.slice(1) + '.';
 const LOGIN_FORM_SELECTOR = 'input[type="email"], input[type="password"], #email, #password, input[name="email"]';
 
 // A visible input[type="email"]/#email alone is NOT reliable evidence of a
@@ -3118,21 +3125,34 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
       // applies while the email/username field is still on screen too — a
       // post-login settings page with a change-password box and a "connect
       // Google" button is not a login form.
-      if (!submitted) {
-        return { success: false, cause: 'login_vision', screenshot: afterScreenshot, error: `Could not find the sign-in button on this page — the email and password were filled in, but no submit control matched, so nothing was sent (still at ${newUrl}). ${BYO_SESSION_HINT}` };
+      // What is OUR miss on this page, if anything. A submit that never
+      // happened, or an identity field our selectors did not recognise (only
+      // the password got typed), is a TestPilot limitation (cause login_vision)
+      // and must never be reported as a wrong password.
+      const ourMiss = !submitted
+        ? 'no sign-in button matched, so nothing was sent'
+        : (!emailFilled ? 'the email/username field was not recognised, so only the password was typed' : null);
+      // The OAuth reading needs a login page, not a post-login settings page
+      // with a change-password box and a "connect Google" button. Any visible
+      // identity field (same selectors fillFirst used), a shown error, or a
+      // miss of ours qualifies. One round trip for all selectors.
+      const identityFieldVisible = await page.evaluate((sels) => sels.some((sel) => {
+        try { return Array.from(document.querySelectorAll(sel)).some((el) => el.getClientRects().length > 0); } catch { return false; }
+      }), emailSelectors).catch(() => false);
+      const oauthVisible = (identityFieldVisible || hasError || !!ourMiss) && await hasOAuthSignIn(page);
+      // The live takeover is the one remedy a watching human can apply on the
+      // spot, so it is offered for every OAuth-page outcome — including our own
+      // misses. Only an explicit decline suppresses the offer on the retry.
+      let handoffOffered = false;
+      if (oauthVisible && ctx.runId && typeof ctx.emit === 'function' && !ctx.skipHandoff) {
+        const handoffResult = await tryOAuthHandoff(page, { ...ctx, loginHasError: hasError, loginOurMiss: ourMiss });
+        if (handoffResult && typeof handoffResult === 'object') return handoffResult;
+        handoffOffered = handoffResult === 'declined';
       }
-      let identityFieldVisible = false;
-      for (const sel of emailSelectors) {
-        if (await page.locator(sel).first().isVisible({ timeout: 300 }).catch(() => false)) { identityFieldVisible = true; break; }
+      if (ourMiss) {
+        return { success: false, cause: 'login_vision', handoffOffered, screenshot: afterScreenshot, error: `Could not log in — ${ourMiss} (still at ${newUrl}). This is a TestPilot limitation on this page, not a wrong password. ${BYO_SESSION_HINT}` };
       }
-      const oauthVisible = identityFieldVisible && await hasOAuthSignIn(page);
       if (oauthVisible) {
-        let handoffOffered = false;
-        if (ctx.runId && typeof ctx.emit === 'function' && !ctx.skipHandoff) {
-          handoffOffered = true;
-          const handoffResult = await tryOAuthHandoff(page, { ...ctx, loginHasError: hasError });
-          if (handoffResult) return handoffResult;
-        }
         return { success: false, cause: 'login_credentials', handoffOffered, screenshot: afterScreenshot, error: (hasError
           ? 'Login failed — the app showed an error and the sign-in form is still on screen.'
           : `Login did not take — the sign-in form is still on screen after submitting (still at ${newUrl}).`)
@@ -3144,7 +3164,7 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
       // Both fields were filled and a submit control was clicked to get here, so
       // this is a credentials/config outcome — not TestPilot failing to read the
       // form (the bare /form/ in the fallback regex would have said otherwise).
-      return { success: false, cause: 'login_credentials', screenshot: afterScreenshot, error: `Login did not take — the sign-in form is still on screen after submitting (still at ${newUrl}). Either the credentials are wrong, or the username/email field on this app was not recognised. If it signs in with a magic link or SSO popup, ${BYO_SESSION_HINT.charAt(0).toLowerCase() + BYO_SESSION_HINT.slice(1)}` };
+      return { success: false, cause: 'login_credentials', screenshot: afterScreenshot, error: `Login did not take — the credentials were typed and sent, but the app stayed on its sign-in form without showing an error (still at ${newUrl}). Most likely the password is wrong for this account. If it signs in with a magic link or SSO popup, ${BYO_SESSION_HINT_INLINE}.` };
     }
 
     return { success: true, screenshot: afterScreenshot, message: `Logged in. Now at: ${newUrl}` };
@@ -7071,7 +7091,10 @@ async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey)
         : { success: true, method: 'sessionState' };
     } else {
       loginResult = await visionLogin(page, credentials, apiKey, { runId: testId, emit: (e) => emitStep(testId, e) });
-      if (!loginResult.success) {
+      // No reload-and-retry after a handoff the user accepted and tried: a
+      // second automatic attempt would overwrite "your manual login did not
+      // complete" with a no-password verdict that contradicts what they did.
+      if (!loginResult.success && !loginResult.handoffAttempted) {
         emitStep(testId, { type: 'retry', message: `Login attempt 1 failed (${loginResult.error}). Reloading and retrying once before giving up.` });
         try {
           await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
