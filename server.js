@@ -2835,34 +2835,53 @@ const LOGIN_IDENTITY_INPUT_SELECTOR = LOGIN_IDENTITY_SELECTORS.map((sel) => (sel
 // inputs are a change-password / profile box (two of them, or one named
 // new/current/confirm/old), which is a page you only reach logged IN.
 // Deciding "still logged out" from such a page was a false failure.
-async function isLoginFormStillVisible(page) {
+// `requirePassword`: the saved-session probes ask a narrower question —
+// "is a PASSWORD login on screen?" — because a profile page legitimately
+// shows the account's email in an input.
+async function isLoginFormStillVisible(page, { requirePassword = false } = {}) {
   // One round trip, one default: if the page is mid-navigation and the
   // evaluate fails, the answer is "no form" — the same default the old
   // isVisible().catch(() => false) check had.
   // Conservative on purpose: we only call it a change-password box when
-  // (a) no identity field (email/username, the same list fillFirst uses) is
-  // visible — a login or register panel always has one — and (b) every
-  // visible password input is marked as a changed password by a name/id/
-  // placeholder token new/confirm/repeat/old (split on _ - space and
-  // camelCase); 'current' and autocomplete="new-password" count only
+  // EVERY visible password input is marked as a changed password by a
+  // name/id/placeholder token new/confirm/repeat/old (split on _ - space
+  // and camelCase); 'current' and autocomplete="new-password" count only
   // alongside a second password input, since alone they are standard LOGIN
   // markup (current-password) or a common anti-autofill trick (new-password).
-  // Anything else is still a login form, as before.
-  return await page.evaluate(({ formSelector, identitySelector }) => {
+  // A login or register panel always has a plain "password" field, so it
+  // never qualifies — even next to a profile email input, which a settings
+  // page legitimately shows. Anything else is still a login form, as before.
+  // With no password input at all, a lone email input counts only when it
+  // is not a newsletter / contact / search box: a post-login dashboard with
+  // a "Subscribe" field in the footer used to read as "still logged out".
+  return await page.evaluate(({ formSelector, requirePassword }) => {
     const visible = (el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
     const any = Array.from(document.querySelectorAll(formSelector)).some(visible);
     if (!any) return false;
     const pw = Array.from(document.querySelectorAll('input[type="password"]')).filter(visible);
-    if (pw.length === 0) return true;
-    let identity = false;
-    try { identity = Array.from(document.querySelectorAll(identitySelector)).some(visible); } catch { identity = false; }
-    if (identity) return true;
-    const tokens = (el) => [el.name, el.id, el.placeholder].join(' ').replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase().split(/[^a-z]+/).filter(Boolean);
+    const tokens = (el) => [el.name, el.id, el.placeholder, el.getAttribute('aria-label')].join(' ').replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase().split(/[^a-z]+/).filter(Boolean);
+    if (pw.length === 0) {
+      if (requirePassword) return false;
+      const emails = Array.from(document.querySelectorAll(formSelector)).filter((el) => visible(el) && el.tagName === 'INPUT');
+      const isLoginLike = (el) => {
+        const t = tokens(el);
+        if (t.some((x) => x === 'newsletter' || x === 'subscribe' || x === 'search')) return false;
+        const scope = el.closest('form') || el.parentElement?.parentElement || el.parentElement || document;
+        const hasPhone = !!scope.querySelector('input[type="tel"], input[name*="phone" i], input[id*="phone" i]');
+        const hasMessage = !!scope.querySelector('textarea');
+        const freeText = scope.querySelectorAll('input[type="text"], input:not([type])').length;
+        if (hasPhone || hasMessage || freeText >= 2) return false;
+        const scopeText = (scope.textContent || '').slice(0, 400).toLowerCase();
+        if (/subscribe|newsletter/.test(scopeText) && !/sign in|log in|login|continue/.test(scopeText)) return false;
+        return true;
+      };
+      return emails.some(isLoginLike);
+    }
     const several = pw.length >= 2;
     const isChanged = (el) => tokens(el).some((t) => t === 'new' || t === 'confirm' || t === 'repeat' || t === 'old' || (several && t === 'current'))
       || (several && el.autocomplete === 'new-password');
     return !pw.every(isChanged);
-  }, { formSelector: LOGIN_FORM_SELECTOR, identitySelector: LOGIN_IDENTITY_INPUT_SELECTOR }).catch(() => false);
+  }, { formSelector: LOGIN_FORM_SELECTOR, requirePassword }).catch(() => false);
 }
 
 // A visible input[type="email"]/#email alone is NOT reliable evidence of a
@@ -4800,8 +4819,11 @@ async function crawlApp(appId, url, credentials, description, apiKey, onProgress
       // redirects to /login (fast, reliable); the input check catches login
       // overlays on a non-/login URL.
       await page.waitForLoadState('networkidle', { timeout: 4000 }).catch(() => {});
+      // The input check must be a password LOGIN, not any password input: a
+      // valid session that lands on a settings page with a change-password
+      // box used to be reported as "expired".
       const stillAtLogin = /\/(login|signin|sign-?in|auth|account\/login)\b/i.test(page.url())
-        || await page.locator('input[type="password"]').first().isVisible({ timeout: 1500 }).catch(() => false);
+        || await isLoginFormStillVisible(page, { requirePassword: true });
       loginResult = stillAtLogin
         ? { success: false, error: 'Provided session is expired or invalid — paste a fresh sessionState.' }
         : { success: true, method: 'sessionState' };
@@ -7211,8 +7233,11 @@ async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey)
       // redirects to /login (fast, reliable); the input check catches login
       // overlays on a non-/login URL.
       await page.waitForLoadState('networkidle', { timeout: 4000 }).catch(() => {});
+      // The input check must be a password LOGIN, not any password input: a
+      // valid session that lands on a settings page with a change-password
+      // box used to be reported as "expired".
       const stillAtLogin = /\/(login|signin|sign-?in|auth|account\/login)\b/i.test(page.url())
-        || await page.locator('input[type="password"]').first().isVisible({ timeout: 1500 }).catch(() => false);
+        || await isLoginFormStillVisible(page, { requirePassword: true });
       loginResult = stillAtLogin
         ? { success: false, error: 'Provided session is expired or invalid — paste a fresh sessionState.' }
         : { success: true, method: 'sessionState' };
