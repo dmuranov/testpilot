@@ -37,6 +37,10 @@ const RESEND_API_KEY = process.env.RESEND_API_KEY;
 // Where new-signup notifications are sent.
 const SIGNUP_NOTIFY_EMAIL = process.env.SIGNUP_NOTIFY_EMAIL || 'danijel.muranovic@gmail.com';
 async function mailer(opts) {
+  if (LOCAL_RUN) {
+    console.log('[mail] suppressed (local run):', opts.subject, '→', Array.isArray(opts.to) ? opts.to.join(', ') : opts.to);
+    return { id: null, suppressed: true };
+  }
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST',
     headers: {
@@ -213,12 +217,22 @@ const MAPS_DIR = './platform-maps';
 // regardless of which account first claimed it.
 const SUPER_ADMIN_EMAIL = (process.env.SUPER_ADMIN_EMAIL || 'danijel.muranovic@gmail.com').toLowerCase();
 // A server started on a laptop against the production database must never
-// mail real users: on 2026-10-01 a local test run sent the onboarding
-// "stall nudge" to a real prospect twice, because the local instance had no
-// record of production having already sent it. TESTPILOT_LOCAL=1 keeps the
-// signup notification, help emails, stall nudges and the admin digest off.
-const LOCAL_RUN = process.env.TESTPILOT_LOCAL === '1';
-if (LOCAL_RUN) console.log('[local] TESTPILOT_LOCAL=1 — outbound onboarding mail (signup notify, help, stall nudge, digest) is suppressed');
+// mail real people or run production's background jobs: on 2026-10-01 a
+// local test run sent the onboarding "stall nudge" to a real prospect twice,
+// because the local instance had no record of production having already
+// sent it. Safe by DEFAULT: only the production pm2 process sets
+// NODE_ENV=production (ecosystem.config.cjs); anything else is a local run.
+// TESTPILOT_LOCAL=1/true/yes forces local mode on a production-like box;
+// TESTPILOT_OUTBOUND_MAIL=1 forces mail back on. In local mode every
+// outbound mail (one chokepoint, mailer()) and the boot/periodic jobs that
+// touch production data (retention sweep, stall nudges, digest, health
+// alerts, scheduled runs) are off. lib/onboarding-alert.js and
+// lib/admin-alert.js apply the same rule to their own Resend calls.
+const envTruthy = (v) => /^(1|true|yes)$/i.test(String(v || ''));
+const LOCAL_RUN = (process.env.NODE_ENV !== 'production' || envTruthy(process.env.TESTPILOT_LOCAL)) && !envTruthy(process.env.TESTPILOT_OUTBOUND_MAIL);
+console.log(LOCAL_RUN
+  ? '[local] LOCAL RUN (NODE_ENV is not "production"): outbound mail and production background jobs are OFF. Set TESTPILOT_OUTBOUND_MAIL=1 to force mail on.'
+  : '[mail] production mode: outbound mail and background jobs are ON');
 // Compare canonically (canonicalEmail strips gmail dots + plus-tags) so the
 // super admin still matches after an email has been through canonicalEmail()
 // on the free-run identity path — otherwise danijel.muranovic@ (stored WITH a
@@ -802,7 +816,7 @@ async function createOrGetUser(email) {
     // New-signup notification → SIGNUP_NOTIFY_EMAIL. Fire-and-forget: a mail
     // failure (or missing RESEND_API_KEY) must never block or crash a signup.
     // Only fires here (the create branch), so it's once per genuinely new email.
-    if (created && !LOCAL_RUN) {
+    if (created) {
       const safe = String(email).replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
       const when = new Date().toISOString();
       mailer({
@@ -2212,7 +2226,6 @@ async function userHasRecovered(stage, email) {
 onOnboardingFailure(({ stage, email, url, error, code }) => {
   const msg = helpMessageFor({ stage, code, url, error });
   if (!msg) return;
-  if (LOCAL_RUN) return;
   setTimeout(async () => {
     try {
       const key = String(email).toLowerCase();
@@ -2261,10 +2274,9 @@ if (!LOCAL_RUN) {
   setInterval(onboardingStallSweep, 30 * 60_000);
 }
 
-// Daily funnel digest to the admin (~07:00 UTC).
+// Daily funnel digest to the admin (~07:00 UTC). Production only (LOCAL_RUN).
 let lastDigestDay = null;
-setInterval(async () => {
-  if (LOCAL_RUN) return;
+if (!LOCAL_RUN) setInterval(async () => {
   const now = new Date();
   const day = now.toISOString().slice(0, 10);
   if (now.getUTCHours() !== 7 || lastDigestDay === day) return;
@@ -12727,8 +12739,10 @@ async function runRetentionSweep() {
     }
   } catch (e) { console.warn('[RETENTION] test_runs purge error:', e.message); }
 }
-runRetentionSweep();
-setInterval(runRetentionSweep, 6 * 60 * 60_000);
+if (!LOCAL_RUN) { // deletes production rows — never from a laptop
+  runRetentionSweep();
+  setInterval(runRetentionSweep, 6 * 60 * 60_000);
+}
 
 // ── SELF-MONITORING + ALERTS ────────────────────────────────────────────────
 // In-process watch that emails ALERT_EMAIL on low disk, a backed-up scan queue,
@@ -12769,7 +12783,7 @@ async function healthWatch() {
     await sendAlert('errors', `scan error burst (${errs}/${recent.length} failed in 30min)`, `${errs} of the last ${recent.length} scans errored (30-min window). Likely causes: Anthropic API key out of credits, login/visionLogin failing, or the target app unreachable.`);
   }
 }
-setInterval(healthWatch, 5 * 60_000);
+if (!LOCAL_RUN) setInterval(healthWatch, 5 * 60_000); // alerts about THIS box's disk — production only
 
 // ── RIGHT TO ERASURE ────────────────────────────────────────────────────────
 // Honors the privacy policy's "delete your account and all associated data".
@@ -15899,7 +15913,7 @@ async function scheduleTick() {
   catch (e) { console.warn('[schedules] tick run failed:', e.message); }
   finally { scheduleRunInFlight = false; }
 }
-setInterval(scheduleTick, 5 * 60000);
+if (!LOCAL_RUN) setInterval(scheduleTick, 5 * 60000); // runs customers' scheduled tests — production only
 
 // ── Schedule CRUD ────────────────────────────────────────────
 app.post('/api/schedules', async (req, res) => {
