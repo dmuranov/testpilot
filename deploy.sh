@@ -8,7 +8,7 @@ log(){ echo "[deploy $(date -u +%H:%M:%S)] $*"; }
 # health_field <field> <fallback>: one JSON field from /api/health, never fails the script.
 health_field(){ (curl -s --max-time 5 http://localhost:3001/api/health || true) | node -e "let d=\"\";process.stdin.on(\"data\",c=>d+=c).on(\"end\",()=>{try{const v=JSON.parse(d)[\"$1\"];console.log(v===undefined?\"$2\":v)}catch{console.log(\"$2\")}})" 2>/dev/null || echo "$2"; }
 for i in $(seq 1 60); do
-  AS=$(health_field activeScans 0)
+  AS=$(health_field activeScans "?")  # no answer = unknown: keep waiting, never restart over running scans
   [ "$AS" = "0" ] && break
   log "waiting for $AS active scan(s) to drain… ($i/60)"; sleep 5
 done
@@ -28,7 +28,7 @@ for i in $(seq 1 45); do
   [ -n "$MODE" ] && break
   sleep 2
 done
-log "done. health: $(curl -s --max-time 8 http://localhost:3001/api/health | head -c 70)"
+log "done. status: $(health_field status unknown) connectivity: $(health_field connectivity unknown) activeScans: $(health_field activeScans '?')"
 log "run mode: ${MODE:-unknown}"
 # A clear non-production answer is a failed deploy (the server is up but would
 # send no mail and run no jobs). No answer within 90s is logged, not failed:
@@ -37,4 +37,7 @@ if [ -n "$MODE" ] && [ "$MODE" != "production" ]; then
   log "ERROR: server is running in ${MODE} mode, not production. Fix: pm2 delete testpilot && pm2 start ecosystem.config.cjs && pm2 save"
   exit 1
 fi
-[ -z "$MODE" ] && log "WARNING: health gave no run mode within 90s — check pm2 logs"
+if [ -z "$MODE" ]; then
+  log "WARNING: health gave no run mode within 90s — check pm2 logs"
+fi
+exit 0
