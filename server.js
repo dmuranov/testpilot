@@ -10,7 +10,7 @@ import psl from 'psl';
 import { loadRecipe, saveRecipe, shouldCaptureRun, isReplayableAction, replayStepHeld, stepIdentity, recipeKey, EMAIL_TOKEN, PASSWORD_TOKEN } from './routes/recipes.js';
 import { assertPublicUrl } from './routes/ssrf.js';
 import { alertOnboardingIssue, watchOnboarding, onOnboardingFailure, isInternal as isInternalEmail } from './lib/onboarding-alert.js';
-import { RUN_MODE } from './lib/local-run.js';
+import { RUN_MODE, isInternalAddress } from './lib/local-run.js';
 import { sendResend } from './lib/resend.js';
 import { createFreeRunAllowance } from './lib/free-runs.js';
 import { auditLinks } from './routes/link-audit.js';
@@ -2011,6 +2011,14 @@ app.post('/api/auth/request', async (req, res) => {
       if (currentPlan === 'pending' || currentPlan === 'blocked') {
         return res.status(403).json({ error: 'not_approved' });
       }
+    }
+
+    // No mail would go out for this address (local run, external recipient):
+    // answer as if sent, but create no live token — it could never be used and
+    // would sit in the production table for 15 minutes for nothing.
+    if (!RUN_MODE.mailEnabled && !isInternalAddress(email)) {
+      console.log('[auth] login link not created (local run, external address)');
+      return res.json({ ok: true, message: 'Check your email for the login link' });
     }
 
     // Create magic link token

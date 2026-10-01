@@ -36,8 +36,20 @@ test('TESTPILOT_OUTBOUND_MAIL turns mail on for a local run WITHOUT re-arming pr
   assert.equal(m.prodJobs, false);
 });
 
+test('pm2 on the production path counts as production even without NODE_ENV (first deploy safety net)', () => {
+  const m = runMode({ pm_id: '0' }, '/home/azureuser/testpilot');
+  assert.equal(m.isProd, true);
+  assert.equal(m.mailEnabled, true);
+  assert.match(m.reason, /pm2 on \/home\/azureuser\/testpilot/);
+  // pm2 elsewhere, or the path without pm2, is still local
+  assert.equal(runMode({ pm_id: '0' }, '/home/dev/testpilot').isProd, false);
+  assert.equal(runMode({}, '/home/azureuser/testpilot').isProd, false);
+  // TESTPILOT_LOCAL still wins on the box
+  assert.equal(runMode({ pm_id: '0', TESTPILOT_LOCAL: '1' }, '/home/azureuser/testpilot').isProd, false);
+});
+
 test('reasons name the deciding input', () => {
   assert.equal(runMode({ NODE_ENV: 'production' }).reason, 'NODE_ENV=production');
   assert.equal(runMode({ NODE_ENV: 'production', TESTPILOT_LOCAL: '1' }).reason, 'TESTPILOT_LOCAL is set');
-  assert.equal(runMode({}).reason, 'NODE_ENV=(unset)');
+  assert.match(runMode({}, '/tmp').reason, /^NODE_ENV=\(unset\)/);
 });
