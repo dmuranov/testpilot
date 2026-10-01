@@ -2646,7 +2646,7 @@ async function tryOAuthHandoff(page, ctx) {
     runId: ctx.runId,
     offerId,
     hostname,
-    message: `${ctx.loginOurMiss ? `TestPilot could not finish the sign-in on ${hostname || 'this app'} (${ctx.loginOurMiss})` : ctx.loginHasError ? `Login failed on ${hostname || 'this app'}` : `The sign-in form on ${hostname || 'this app'} is still on screen after submitting`} and this page also offers a "Sign in with Google" (or similar) button — this account may only work that way. Want to take over and log in yourself? TestPilot picks back up right after.`,
+    message: `${ctx.loginFormReset ? `${hostname || 'This app'} accepted the sign-in but sent TestPilot back to its sign-in page` : ctx.loginOurMiss ? `TestPilot could not finish the sign-in on ${hostname || 'this app'} (${ctx.loginOurMiss})` : ctx.loginHasError ? `Login failed on ${hostname || 'this app'}` : `The sign-in form on ${hostname || 'this app'} is still on screen after submitting`}${ctx.loginFormReset ? '. Take over and sign in yourself once — TestPilot carries your session along for the rest of the run. This page also offers' : ' and this page also offers'} a "Sign in with Google" (or similar) button — this account may only work that way. Want to take over and log in yourself? TestPilot picks back up right after.`,
   });
   try {
     const decision = await awaitLiveViewSignal(ctx.runId, { timeoutMs: 60 * 1000, offerId });
@@ -3204,6 +3204,31 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
     const formReset = !!(submitted && !hasError && emailFilled && passFilled
       && (await readBack(emailFilled)) === '' && (await readBack(passFilled)) === '');
 
+    // A fresh form can be a transient bounce — the app showing its sign-in
+    // page while it still validates the new session — so do not judge it
+    // yet. Give it a few seconds, then load the app's entry page once: a
+    // kept session lands on the app, a lost one lands on the form again.
+    if (formReset) {
+      let bouncedThenIn = false;
+      for (let i = 0; i < 4 && !bouncedThenIn; i++) {
+        await page.waitForTimeout(2000);
+        bouncedThenIn = !(await isLoginFormStillVisible(page));
+      }
+      if (!bouncedThenIn) {
+        const entry = (() => { try { return new URL(currentUrl).origin + '/'; } catch { return null; } })();
+        if (entry) {
+          ctx.emit?.({ phase: 'login', message: 'The app bounced back to its sign-in page after accepting the login — checking whether the session was kept...' });
+          await page.goto(entry, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+          await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+          await page.waitForTimeout(1500);
+          bouncedThenIn = !(await isLoginFormStillVisible(page)) && !(await hasSignInAffordance(page));
+        }
+      }
+      if (bouncedThenIn) {
+        return { success: true, screenshot: await takeScreenshot(page, 'login-after'), message: `Logged in — the app bounced through its sign-in page once after the submit, then let the session through. Now at: ${page.url()}` };
+      }
+    }
+
     // Decide on what the page SHOWS, not on what the URL happens to spell. The
     // old test (`!newUrl.includes('login')`) was true for every sign-in page
     // whose URL lacks the word "login" — including root-path SPAs — so it
@@ -3243,14 +3268,14 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
       let handoffOffered = false;
       if (oauthVisible && ctx.runId && typeof ctx.emit === 'function' && !ctx.skipHandoff) {
         handoffOffered = true;
-        const handoffResult = await tryOAuthHandoff(page, { ...ctx, loginHasError: hasError, loginOurMiss: ourMiss });
+        const handoffResult = await tryOAuthHandoff(page, { ...ctx, loginHasError: hasError, loginOurMiss: ourMiss, loginFormReset: formReset });
         if (handoffResult) return handoffResult;
       }
       if (ourMiss) {
         return { success: false, cause: 'login_vision', handoffOffered, screenshot: afterScreenshot, error: `Could not log in — ${ourMiss} (still at ${newUrl}). This is a TestPilot limitation on this page, not a wrong password. ${BYO_SESSION_HINT}` };
       }
       if (formReset) {
-        return { success: false, cause: 'login_credentials', handoffOffered, screenshot: afterScreenshot, error: `Login did not take — the app answered the submit with a fresh, empty sign-in form and no error message (still at ${newUrl}). That is not how a wrong password looks on this app (a rejected password keeps the form filled and shows an error). Most likely the sign-in was accepted but the session was not kept when the app redirected, or the app sent this account back to login for another reason, such as an unverified or not-yet-approved account. The password is probably fine. ${BYO_SESSION_HINT}` };
+        return { success: false, cause: 'login_credentials', handoffOffered, screenshot: afterScreenshot, error: `Login did not take — the app accepted the submit, then sent TestPilot back to a fresh sign-in page, twice (still at ${newUrl}). That is not how a wrong password looks on this app (a rejected password keeps the form filled and shows an error): the session was not kept when the app redirected, or the app sent this account back to login for another reason, such as an unverified or not-yet-approved account. The password is probably fine. ${handoffOffered ? 'The "Take over" offer in the dashboard is the fix: sign in there once and TestPilot carries that session along for the rest of the run. Otherwise, ' + BYO_SESSION_HINT_INLINE + '.' : BYO_SESSION_HINT}` };
       }
       if (oauthVisible) {
         return { success: false, cause: 'login_credentials', handoffOffered, screenshot: afterScreenshot, error: (hasError
