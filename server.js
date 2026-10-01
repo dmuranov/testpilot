@@ -2863,20 +2863,37 @@ async function isLoginFormStillVisible(page, { requirePassword = false } = {}) {
     if (!any) return false;
     const pw = Array.from(document.querySelectorAll('input[type="password"]')).filter(visible);
     const tokens = (el) => [el.name, el.id, el.placeholder, el.getAttribute('aria-label')].join(' ').replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase().split(/[^a-z]+/).filter(Boolean);
+    const controlText = (el) => ((el.innerText || el.value || el.getAttribute('aria-label') || '') + '').trim().toLowerCase();
+    const controls = () => Array.from(document.querySelectorAll('button, a, input[type="submit"], [role="button"]')).filter(visible);
+    const hasLogout = () => controls().some((el) => /^(log ?out|sign ?out|logout|cerrar sesión|salir|abmelden|déconnexion|esci|uitloggen)\b/.test(controlText(el)) || /\b(log ?out|sign ?out)\b/.test(controlText(el)));
+    const signInWords = /sign ?in|log ?in|login|continue|next|iniciar sesión|acceder|entrar|anmelden|se connecter|accedi|weiter|continuar|siguiente/;
     if (pw.length === 0) {
       if (requirePassword) return false;
+      // A visible Log out / Sign out control is positive evidence of a SIGNED-IN
+      // page. Admin dashboards show the account's email, an invite-by-email
+      // box or a user filter in an input — none of that is a login form.
+      // Seen live: correct credentials, successful login, landing page with an
+      // email input → "could not log in — this is a TestPilot/login issue".
+      if (hasLogout()) return false;
       const emails = Array.from(document.querySelectorAll(formSelector)).filter((el) => visible(el) && el.tagName === 'INPUT');
       const isLoginLike = (el) => {
         const t = tokens(el);
-        if (t.some((x) => x === 'newsletter' || x === 'subscribe' || x === 'search')) return false;
+        if (t.some((x) => x === 'newsletter' || x === 'subscribe' || x === 'search' || x === 'filter' || x === 'invite')) return false;
         const scope = el.closest('form') || el.parentElement?.parentElement || el.parentElement || document;
         const hasPhone = !!scope.querySelector('input[type="tel"], input[name*="phone" i], input[id*="phone" i]');
         const hasMessage = !!scope.querySelector('textarea');
         const freeText = scope.querySelectorAll('input[type="text"], input:not([type])').length;
         if (hasPhone || hasMessage || freeText >= 2) return false;
         const scopeText = (scope.textContent || '').slice(0, 400).toLowerCase();
-        if (/subscribe|newsletter/.test(scopeText) && !/sign in|log in|login|continue/.test(scopeText)) return false;
-        return true;
+        if (/subscribe|newsletter/.test(scopeText) && !signInWords.test(scopeText)) return false;
+        // Without a password input, an email field is a login step only when a
+        // sign-in / continue control goes with it (email-first login) or the
+        // page still offers a sign-in link (logged-out page). Otherwise it is
+        // just a field on a page we are already inside.
+        const scopeControls = Array.from(scope.querySelectorAll('button, a, input[type="submit"], [role="button"]')).filter(visible);
+        const stepControl = scopeControls.some((c) => signInWords.test(controlText(c)));
+        const pageSignIn = controls().some((c) => /^(sign ?in|log ?in|login|iniciar sesión|acceder|entrar|anmelden|se connecter|accedi)\b/.test(controlText(c)) || /\/(login|signin|sign-in|auth)\b/.test(c.getAttribute('href') || ''));
+        return stepControl || pageSignIn;
       };
       return emails.some(isLoginLike);
     }
