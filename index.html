@@ -3828,8 +3828,8 @@ function showCaptureLoginForm(appId) {
       let d; try { d = JSON.parse(ev.data); } catch { return; }
       const runId = d.runId || captureId;
       if (d.type === 'awaiting_2fa') { show2faPrompt(runId, d.message); return; }
-      if (d.type === 'awaiting_oauth_handoff') { showOAuthHandoffPrompt(runId, d.message, d.hostname); return; }
-      if (d.type === 'live_view_ready') { openLiveView(runId, d.hostname); return; }
+      if (d.type === 'awaiting_oauth_handoff') { showOAuthHandoffPrompt(runId, d.message, d.hostname, d.offerId); return; }
+      if (d.type === 'live_view_ready') { openLiveView(runId, d.hostname, d.offerId); return; }
       if (d.type === 'live_frame') { renderLiveFrame(runId, d.data); return; }
       if (d.type === 'done') { tpToast(d.message || 'Login saved'); delete state.savedLogins[appId]; loadSavedLogins(appId); closeLiveOverlay(runId); es.close(); }
       if (d.type === 'error') { tpToast(d.message || 'Capture failed', 'error'); closeLiveOverlay(runId); es.close(); }
@@ -4003,8 +4003,8 @@ function streamSweep(sweepId) {
     // log push, same reason as the other streams — live_frame in particular
     // would otherwise flood the log with raw base64 on every frame.
     if (d.type === 'awaiting_2fa') { show2faPrompt(d.runId, d.message); return; }
-    if (d.type === 'awaiting_oauth_handoff') { showOAuthHandoffPrompt(d.runId, d.message, d.hostname); return; }
-    if (d.type === 'live_view_ready') { openLiveView(d.runId, d.hostname); return; }
+    if (d.type === 'awaiting_oauth_handoff') { showOAuthHandoffPrompt(d.runId, d.message, d.hostname, d.offerId); return; }
+    if (d.type === 'live_view_ready') { openLiveView(d.runId, d.hostname, d.offerId); return; }
     if (d.type === 'live_frame') { renderLiveFrame(d.runId, d.data); return; }
     state.sweep.log = state.sweep.log || [];
     if (d.message) state.sweep.log.push(d);
@@ -4770,8 +4770,8 @@ async function startLearn() {
             // single frame (this is what happened before this fix — a wall
             // of base64 flooding the crawl log). Handle and skip entirely,
             // same shape as the /api/test stream's handling below.
-            if (data.type === 'awaiting_oauth_handoff') { showOAuthHandoffPrompt(data.runId, data.message, data.hostname); continue; }
-            if (data.type === 'live_view_ready') { openLiveView(data.runId, data.hostname); continue; }
+            if (data.type === 'awaiting_oauth_handoff') { showOAuthHandoffPrompt(data.runId, data.message, data.hostname, data.offerId); continue; }
+            if (data.type === 'live_view_ready') { openLiveView(data.runId, data.hostname, data.offerId); continue; }
             if (data.type === 'live_frame') { renderLiveFrame(data.runId, data.data); continue; }
 
             state.learnProgress.push(data);
@@ -4885,11 +4885,43 @@ function closeLiveOverlay(runId) {
   const overlay = document.getElementById('tp-live-overlay');
   if (overlay && !overlay.firstElementChild) overlay.remove();
 }
+// Close THIS box. If a newer offer's box has since taken the run's id, that
+// one stays — closing by runId would remove the box the user still needs.
+function closeLiveBox(runId, box) {
+  if (document.getElementById('oauth-handoff-' + runId) === box) return closeLiveOverlay(runId);
+  box.remove();
+  const overlay = document.getElementById('tp-live-overlay');
+  if (overlay && !overlay.firstElementChild) overlay.remove();
+}
 
-function showOAuthHandoffPrompt(runId, message, hostname) {
-  if (!runId || document.getElementById('oauth-handoff-' + runId)) return;
+// Every takeover signal carries the offer it answers, so the server can refuse
+// a stale box's buttons. Older servers ignore the body.
+function postLiveViewSignal(runId, action, box) {
+  return fetch(`${API}/api/live-view/${encodeURIComponent(runId)}/${action}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ offerId: box?.dataset?.offerId || null }),
+  });
+}
+
+function showOAuthHandoffPrompt(runId, message, hostname, offerId) {
+  if (!runId) return;
+  window._tpSeenOffers = window._tpSeenOffers || new Set();
+  // An offer this document has already shown — replayed by a reconnecting
+  // stream after the user acted on it — never gets a box again.
+  if (offerId && window._tpSeenOffers.has(offerId)) return;
+  const existing = document.getElementById('oauth-handoff-' + runId);
+  if (existing) {
+    // Same offer already on screen: nothing to do. Only an offer never seen
+    // before (a retry's new offer) replaces the box, whose buttons the server
+    // would refuse.
+    if (!offerId || existing.dataset.offerId === offerId) return;
+    if (window._tpLiveViews) delete window._tpLiveViews[runId];
+    existing.remove();
+  }
+  if (offerId) window._tpSeenOffers.add(offerId);
   const box = document.createElement('div');
   box.id = 'oauth-handoff-' + runId;
+  if (offerId) box.dataset.offerId = offerId;
   box.style.cssText = 'width:100%;max-width:720px;margin:auto;padding:14px;border:1px solid var(--accent,#6c5ce7);border-radius:8px;background:var(--bg-elevated,#15151c)';
   // A visible app-name badge, not just prose in the message — scannable at a
   // glance when more than one handoff is stacked at once (see getLiveOverlayHost).
@@ -4905,15 +4937,15 @@ function showOAuthHandoffPrompt(runId, message, hostname) {
   box.scrollIntoView({ block: 'center' });
   box.querySelector(`#oauth-skip-${runId}`).addEventListener('click', async () => {
     box.innerHTML = '<div style="color:var(--text-muted)">Skipped — continuing with the normal error.</div>';
-    await fetch(`${API}/api/live-view/${encodeURIComponent(runId)}/decline`, { method: 'POST' }).catch(() => {});
-    setTimeout(() => closeLiveOverlay(runId), 1500);
+    await postLiveViewSignal(runId, 'decline', box).catch(() => {});
+    setTimeout(() => closeLiveBox(runId, box), 1500);
   });
   box.querySelector(`#oauth-take-${runId}`).addEventListener('click', async () => {
     box.innerHTML = '<div style="color:var(--accent,#6c5ce7)">Connecting…</div>';
-    const r = await fetch(`${API}/api/live-view/${encodeURIComponent(runId)}/accept`, { method: 'POST' }).catch(() => null);
+    const r = await postLiveViewSignal(runId, 'accept', box).catch(() => null);
     if (!r || !r.ok) {
       box.innerHTML = '<div style="color:#e74c3c">Could not start the live view — the offer may have expired. The test will continue with the normal error.</div>';
-      setTimeout(() => closeLiveOverlay(runId), 3000);
+      setTimeout(() => closeLiveBox(runId, box), 3000);
       return;
     }
     // The canvas/controls get built by openLiveView() once the server confirms
@@ -4929,9 +4961,12 @@ function showOAuthHandoffPrompt(runId, message, hostname) {
 // wrong point on the real page (confirmed live: clicking "Accept All" on a
 // cookie banner did nothing when this was 1024x768 against a 1280x800 page).
 const LIVE_VIEW_W = 1280, LIVE_VIEW_H = 800;
-function openLiveView(runId, hostname) {
+function openLiveView(runId, hostname, offerId) {
   const box = document.getElementById('oauth-handoff-' + runId);
   if (!box) return;
+  // A ready event for an earlier offer (replayed or late) must not turn this
+  // offer's prompt into a canvas for a screencast that is not its own.
+  if (offerId && box.dataset.offerId && box.dataset.offerId !== offerId) return;
   box.style.maxWidth = LIVE_VIEW_W + 'px'; // was 720px, sized for the prompt's buttons — too narrow for the canvas
   // Same app-name badge as showOAuthHandoffPrompt — stays labeled once this
   // box turns into the live canvas, still critical when a second handoff for
@@ -4998,8 +5033,8 @@ function openLiveView(runId, hostname) {
   box.querySelector(`#oauth-done-${runId}`).addEventListener('click', async () => {
     box.innerHTML = '<div style="color:var(--accent,#6c5ce7)">Continuing…</div>';
     delete window._tpLiveViews[runId];
-    await fetch(`${API}/api/live-view/${encodeURIComponent(runId)}/done`, { method: 'POST' }).catch(() => {});
-    closeLiveOverlay(runId);
+    await postLiveViewSignal(runId, 'done', box).catch(() => {});
+    closeLiveBox(runId, box);
   });
 }
 
@@ -5145,11 +5180,11 @@ async function runTest() {
           return;
         }
         if (data.type === 'awaiting_oauth_handoff') {
-          showOAuthHandoffPrompt(data.runId, data.message, data.hostname);
+          showOAuthHandoffPrompt(data.runId, data.message, data.hostname, data.offerId);
           return;
         }
         if (data.type === 'live_view_ready') {
-          openLiveView(data.runId, data.hostname);
+          openLiveView(data.runId, data.hostname, data.offerId);
           return;
         }
         if (data.type === 'live_frame') {

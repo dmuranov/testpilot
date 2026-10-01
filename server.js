@@ -2481,16 +2481,33 @@ function awaitTwoFactorCode(runId, { timeoutMs = 5 * 60 * 1000 } = {}) {
 // reused for two sequential waits: "will you take over" (short timeout, so
 // an unattended/background run doesn't stall long), then "are you done"
 // (longer, once a human has actually engaged).
-const pendingLiveView = new Map(); // runId -> { resolve, reject, timer }
+const pendingLiveView = new Map(); // runId -> { resolve, reject, timer, offerId }
 const activeLiveViews = new Map(); // runId -> CDPSession, for the input-relay endpoint to find
 
-function awaitLiveViewSignal(runId, { timeoutMs } = {}) {
+// offerId ties the wait to ONE takeover offer. The dashboard echoes it back on
+// /accept, /decline and /done, so a box left over from an earlier offer for
+// the same run (another tab, a retry) can no longer resolve or reject the
+// current wait. A request without an offerId (older dashboard) still counts.
+function awaitLiveViewSignal(runId, { timeoutMs, offerId = null } = {}) {
   return new Promise((resolve, reject) => {
     const prev = pendingLiveView.get(runId);
     if (prev) { clearTimeout(prev.timer); pendingLiveView.delete(runId); prev.reject(new Error('superseded')); }
     const timer = setTimeout(() => { pendingLiveView.delete(runId); reject(new Error('timeout')); }, timeoutMs);
-    pendingLiveView.set(runId, { resolve, reject, timer });
+    pendingLiveView.set(runId, { resolve, reject, timer, offerId });
   });
+}
+
+// Settles the pending wait for runId with `settle(entry)` — resolve or reject —
+// when the signal's offerId matches the wait's (or either side has none).
+// Returns false when nothing is waiting or the signal belongs to another offer.
+function settleLiveView(runId, offerId, settle) {
+  const p = pendingLiveView.get(runId);
+  if (!p) return false;
+  if (offerId && p.offerId && p.offerId !== offerId) return false;
+  clearTimeout(p.timer);
+  pendingLiveView.delete(runId);
+  settle(p);
+  return true;
 }
 
 // Starts a CDP screencast on `page` and streams frames to the frontend via
@@ -2567,7 +2584,7 @@ async function dispatchLiveInput(runId, evt) {
 // (frontend sees no difference — same live_frame/live_view_ready events),
 // then switches back once the popup closes (OAuth done or cancelled).
 // Returns an unsubscribe function.
-function watchForPopups(originalPage, runId, ctx, hostname) {
+function watchForPopups(originalPage, runId, ctx, hostname, offerId = null) {
   const context = originalPage.context();
   const onNewPage = async (popup) => {
     try {
@@ -2589,12 +2606,12 @@ function watchForPopups(originalPage, runId, ctx, hostname) {
       // actually displaying the OAuth popup (accounts.google.com etc.) — the
       // box identifies which TEST this handoff belongs to, not which page
       // happens to be on screen at this instant.
-      ctx.emit({ type: 'live_view_ready', runId, hostname });
+      ctx.emit({ type: 'live_view_ready', runId, offerId, hostname });
       popup.once('close', async () => {
         if (originalPage.isClosed()) return;
         await stopLiveView(runId);
         await startLiveView(originalPage, runId, ctx).catch(err => console.log(`[live-view] ${runId} startLiveView(original, after popup close) FAILED: ${err.message}`));
-        ctx.emit({ type: 'live_view_ready', runId, hostname });
+        ctx.emit({ type: 'live_view_ready', runId, offerId, hostname });
       });
     } catch (err) { console.log(`[live-view] ${runId} onNewPage handler error: ${err.message}`); }
   };
@@ -2623,14 +2640,16 @@ async function tryOAuthHandoff(page, ctx) {
   // box said which app it was for. Every event below carries the hostname
   // so the frontend can label its box unambiguously.
   const hostname = (() => { try { return new URL(page.url()).hostname; } catch { return ''; } })();
+  const offerId = randomUUID();
   ctx.emit({
     type: 'awaiting_oauth_handoff',
     runId: ctx.runId,
+    offerId,
     hostname,
     message: `${ctx.loginOurMiss ? `TestPilot could not finish the sign-in on ${hostname || 'this app'} (${ctx.loginOurMiss})` : ctx.loginHasError ? `Login failed on ${hostname || 'this app'}` : `The sign-in form on ${hostname || 'this app'} is still on screen after submitting`} and this page also offers a "Sign in with Google" (or similar) button — this account may only work that way. Want to take over and log in yourself? TestPilot picks back up right after.`,
   });
   try {
-    const decision = await awaitLiveViewSignal(ctx.runId, { timeoutMs: 60 * 1000 });
+    const decision = await awaitLiveViewSignal(ctx.runId, { timeoutMs: 60 * 1000, offerId });
     if (decision?.action !== 'accept') return null;
   } catch { return null; } // declined, superseded, or nobody responded within 60s
 
@@ -2645,7 +2664,7 @@ async function tryOAuthHandoff(page, ctx) {
     error: `${attempted ? 'You took over to sign in manually, but' : 'You accepted the takeover, but'} ${why}. Try again, or ${BYO_SESSION_HINT_INLINE}.`,
   });
 
-  const unwatchPopups = watchForPopups(page, ctx.runId, ctx, hostname);
+  const unwatchPopups = watchForPopups(page, ctx.runId, ctx, hostname, offerId);
   try {
     try {
       await startLiveView(page, ctx.runId, ctx);
@@ -2654,9 +2673,16 @@ async function tryOAuthHandoff(page, ctx) {
       // not attempted, so the caller's automatic retry still runs.
       return manualLoginFailed(`the live view could not be started (${e?.message || 'unknown error'})`, { cause: 'login_vision', attempted: false });
     }
-    ctx.emit({ type: 'live_view_ready', runId: ctx.runId, hostname });
+    ctx.emit({ type: 'live_view_ready', runId: ctx.runId, offerId, hostname });
     try {
-      await awaitLiveViewSignal(ctx.runId, { timeoutMs: 10 * 60 * 1000 }); // "I'm done" signal
+      // Only Done ends the user's turn. A second Accept for this same offer
+      // (the box open in two tabs, a double click) is ignored and the wait
+      // continues with the remaining time.
+      const deadline = Date.now() + 10 * 60 * 1000;
+      for (;;) {
+        const sig = await awaitLiveViewSignal(ctx.runId, { timeoutMs: Math.max(1000, deadline - Date.now()), offerId });
+        if (sig?.action === 'done') break;
+      }
     } catch (e) {
       const why = e?.message || '';
       // A newer offer for this run replaced this wait — not this attempt's story.
@@ -2685,7 +2711,7 @@ async function tryOAuthHandoff(page, ctx) {
   // real success stays away from it.
   await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
   await page.waitForTimeout(1500);
-  const stillHasFormAfterSettle = await page.locator(LOGIN_FORM_SELECTOR).first().isVisible({ timeout: 2500 }).catch(() => false);
+  const stillHasFormAfterSettle = await isLoginFormStillVisible(page);
   if (stillHasFormAfterSettle) return manualLoginFailed(`${hostname || 'the app'} still shows its sign-in form afterwards — the manual login did not complete`);
 
   const freshScreenshot = await takeScreenshot(page, 'login-after-handoff');
@@ -2792,6 +2818,52 @@ async function supplyPlaceholderToFileInput(page, fileInputLocator) {
 const BYO_SESSION_HINT_INLINE = 'use "bring your own session" (Advanced, in the TestPilot dashboard) so TestPilot runs with a session you have already signed into';
 const BYO_SESSION_HINT = BYO_SESSION_HINT_INLINE.charAt(0).toUpperCase() + BYO_SESSION_HINT_INLINE.slice(1) + '.';
 const LOGIN_FORM_SELECTOR = 'input[type="email"], input[type="password"], #email, #password, input[name="email"]';
+// The identity (email / username) field, in the order fillFirst tries them.
+// Shared by the fill step and by the post-submit verdict below, so the two
+// can never disagree about what counts as an identity field.
+const LOGIN_IDENTITY_SELECTORS = [
+  '#email', 'input[type="email"]', 'input[name="email"]', 'input[placeholder*="email" i]', 'input[placeholder*="correo" i]', 'input[autocomplete="email"]', 'input[autocomplete="username"]',
+  '#username', '#user-name', '#user', '#userid', '#login',
+  'input[name*="user" i]', 'input[id*="user" i]', 'input[placeholder*="user" i]', 'input[placeholder*="usuario" i]',
+  'input[name="login"]', 'input[name*="handle" i]'
+];
+// Same list restricted to input elements (bare ids like #login also match containers).
+const LOGIN_IDENTITY_INPUT_SELECTOR = LOGIN_IDENTITY_SELECTORS.map((sel) => (sel.startsWith('input') ? sel : 'input' + sel)).join(', ');
+
+// After a submit (ours or the user's), is a LOGIN form still on screen? Any
+// visible login-shaped input says yes — except when the visible password
+// inputs are a change-password / profile box (two of them, or one named
+// new/current/confirm/old), which is a page you only reach logged IN.
+// Deciding "still logged out" from such a page was a false failure.
+async function isLoginFormStillVisible(page) {
+  // One round trip, one default: if the page is mid-navigation and the
+  // evaluate fails, the answer is "no form" — the same default the old
+  // isVisible().catch(() => false) check had.
+  // Conservative on purpose: we only call it a change-password box when
+  // (a) no identity field (email/username, the same list fillFirst uses) is
+  // visible — a login or register panel always has one — and (b) every
+  // visible password input is marked as a changed password by a name/id/
+  // placeholder token new/confirm/repeat/old (split on _ - space and
+  // camelCase); 'current' and autocomplete="new-password" count only
+  // alongside a second password input, since alone they are standard LOGIN
+  // markup (current-password) or a common anti-autofill trick (new-password).
+  // Anything else is still a login form, as before.
+  return await page.evaluate(({ formSelector, identitySelector }) => {
+    const visible = (el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+    const any = Array.from(document.querySelectorAll(formSelector)).some(visible);
+    if (!any) return false;
+    const pw = Array.from(document.querySelectorAll('input[type="password"]')).filter(visible);
+    if (pw.length === 0) return true;
+    let identity = false;
+    try { identity = Array.from(document.querySelectorAll(identitySelector)).some(visible); } catch { identity = false; }
+    if (identity) return true;
+    const tokens = (el) => [el.name, el.id, el.placeholder].join(' ').replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase().split(/[^a-z]+/).filter(Boolean);
+    const several = pw.length >= 2;
+    const isChanged = (el) => tokens(el).some((t) => t === 'new' || t === 'confirm' || t === 'repeat' || t === 'old' || (several && t === 'current'))
+      || (several && el.autocomplete === 'new-password');
+    return !pw.every(isChanged);
+  }, { formSelector: LOGIN_FORM_SELECTOR, identitySelector: LOGIN_IDENTITY_INPUT_SELECTOR }).catch(() => false);
+}
 
 // A visible input[type="email"]/#email alone is NOT reliable evidence of a
 // LOGIN form — plenty of sites have a contact/newsletter/booking form with an
@@ -2845,11 +2917,12 @@ async function hasSignInAffordance(page) {
 // for security. When that OAuth button is visible right next to the form that
 // just failed, it's worth telling the user that up front instead of leaving
 // them to assume TestPilot mistyped a correct password.
-// Classify a failed visionLogin result. The result's own `cause` wins; the
-// regex is the fallback for the older failure returns that do not set one.
+// Every visionLogin failure return names its cause (login_vision = we could not
+// read or drive the form; login_credentials = what we were given did not get us
+// in; login_timeout = a human step did not arrive in time). Anything without
+// one is treated as a credentials outcome, the historical default.
 function loginCauseOf(loginResult) {
-  return loginResult.cause || (/could not find|couldn'?t find|no .*(email|password|login).*field|form|vision|read|locate/i.test(loginResult.error || '')
-    ? 'login_vision' : 'login_credentials');
+  return loginResult.cause || 'login_credentials';
 }
 
 async function hasOAuthSignIn(page) {
@@ -2950,7 +3023,7 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
     // LOUD in the latter so we NEVER return a happy public-only map when the app
     // actually needed a login the crawler couldn't perform.
     if (await hasSignInAffordance(page)) {
-      return { success: false, screenshot, error: 'Credentials were provided but TestPilot could not find a login form — no email/password field on the entry page, and none at common routes (/auth, /login, /signin). The app still shows a "Sign in" control, so it is NOT logged in. If it uses a magic-link or OAuth/SSO popup login (which TestPilot cannot drive headlessly), capture a session in your browser and use "bring your own session".' };
+      return { success: false, cause: 'login_vision', screenshot, error: 'Credentials were provided but TestPilot could not find a login form — no email/password field on the entry page, and none at common routes (/auth, /login, /signin). The app still shows a "Sign in" control, so it is NOT logged in. If it uses a magic-link or OAuth/SSO popup login (which TestPilot cannot drive headlessly), capture a session in your browser and use "bring your own session".' };
     }
     return { success: true, screenshot, message: 'Already logged in or no login form detected' };
   }
@@ -2960,12 +3033,7 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
     // Ordered by intent: email patterns first so an email field always wins when
     // an app offers both, then username patterns for the (very common) apps that
     // sign in with a handle and have no email field anywhere.
-    const emailSelectors = [
-      '#email', 'input[type="email"]', 'input[name="email"]', 'input[placeholder*="email" i]', 'input[placeholder*="correo" i]', 'input[autocomplete="email"]', 'input[autocomplete="username"]',
-      '#username', '#user-name', '#user', '#userid', '#login',
-      'input[name*="user" i]', 'input[id*="user" i]', 'input[placeholder*="user" i]', 'input[placeholder*="usuario" i]',
-      'input[name="login"]', 'input[name*="handle" i]'
-    ];
+    const emailSelectors = LOGIN_IDENTITY_SELECTORS;
     const passSelectors = ['#password', 'input[type="password"]', 'input[name="password"]'];
     // Buttons that ADVANCE an email-first flow to its password step (distinct from
     // the final sign-in submit). "Continue with Email" is Vercel/Auth0/Okta-style.
@@ -3044,12 +3112,12 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
       const otp = await detectOtpField(page);
       if (!otp) return 'none';
       if (!(ctx.runId && typeof ctx.emit === 'function')) {
-        return { success: false, screenshot, error: 'Login reached a 2FA / one-time-code step, but this run has no interactive code channel. Re-run so TestPilot can prompt you for the code, or use a pre-authenticated session.' };
+        return { success: false, cause: 'login_credentials', screenshot, error: 'Login reached a 2FA / one-time-code step, but this run has no interactive code channel. Re-run so TestPilot can prompt you for the code, or use a pre-authenticated session.' };
       }
       ctx.emit({ phase: 'awaiting_2fa', type: 'awaiting_2fa', runId: ctx.runId, message: `A verification code was sent${credentials.email ? ' to ' + credentials.email : ''}. Enter it to continue.` });
       let code;
       try { code = await awaitTwoFactorCode(ctx.runId, { timeoutMs: 5 * 60 * 1000 }); }
-      catch (e) { return { success: false, screenshot: await takeScreenshot(page, 'login-2fa-wait'), error: e.message === 'timeout' ? 'A 2FA code was required but none was entered within 5 minutes.' : 'The 2FA step was interrupted before a code was entered.' }; }
+      catch (e) { return { success: false, cause: 'login_timeout', screenshot: await takeScreenshot(page, 'login-2fa-wait'), error: e.message === 'timeout' ? 'A 2FA code was required but none was entered within 5 minutes.' : 'The 2FA step was interrupted before a code was entered.' }; }
       await fillOtpField(page, otp, code);
       await page.waitForTimeout(400);
       await clickSubmit();
@@ -3088,12 +3156,12 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
       const isNetlifyWall = (/\.netlify\.app$/i.test(host) && /password protected|site password|enter.*password to (view|access)/i.test(bodyText)) || /netlify[^.]{0,30}password protected/i.test(bodyText);
       if (isVercelWall || isNetlifyWall) {
         const plat = isVercelWall ? 'Vercel' : 'Netlify';
-        return { success: false, screenshot, error: `Behind ${plat} Deployment Protection and login couldn't be completed automatically. Most likely it sent a magic LINK (TestPilot can type a CODE you relay, but can't click a link from your inbox), this email isn't authorized on the ${plat} project, or it needs a session. Fix: authorize this email on the ${plat} project, disable Deployment Protection, use a bypass token, or paste a pre-authenticated session.` };
+        return { success: false, cause: 'login_credentials', screenshot, error: `Behind ${plat} Deployment Protection and login couldn't be completed automatically. Most likely it sent a magic LINK (TestPilot can type a CODE you relay, but can't click a link from your inbox), this email isn't authorized on the ${plat} project, or it needs a session. Fix: authorize this email on the ${plat} project, disable Deployment Protection, use a bypass token, or paste a pre-authenticated session.` };
       }
       if (emailFilled) {
-        return { success: false, screenshot, error: 'Email submitted but no password or code field appeared — looks like a magic-LINK login. TestPilot can type a CODE you relay, but cannot click an emailed link. Use a password/code login or a pre-authenticated session.' };
+        return { success: false, cause: 'login_credentials', screenshot, error: 'Email submitted but no password or code field appeared — looks like a magic-LINK login. TestPilot can type a CODE you relay, but cannot click an emailed link. Use a password/code login or a pre-authenticated session.' };
       }
-      return { success: false, screenshot, error: 'Could not find the email/password login fields on this page.' };
+      return { success: false, cause: 'login_vision', screenshot, error: 'Could not find the email/password login fields on this page.' };
     }
 
     // STANDARD password submit (skipped if we already authed via a code step).
@@ -3126,7 +3194,7 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
     // old test (`!newUrl.includes('login')`) was true for every sign-in page
     // whose URL lacks the word "login" — including root-path SPAs — so it
     // reported success for logins that never happened.
-    const formStillVisible = await page.locator(LOGIN_FORM_SELECTOR).first().isVisible({ timeout: 2500 }).catch(() => false);
+    const formStillVisible = await isLoginFormStillVisible(page);
 
     if (formStillVisible) {
       // OAuth buttons on the page decide the story, with or without an error
@@ -3150,7 +3218,7 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
       // decides anything — with a shown error and a filled identity the gate
       // is already satisfied.
       const identityFieldVisible = (hasError && emailFilled) ? true
-        : await page.locator(emailSelectors.map((sel) => (sel.startsWith('input') ? sel : 'input' + sel)).join(', ')).locator('visible=true').count().then((n) => n > 0).catch(() => false);
+        : await page.locator(LOGIN_IDENTITY_INPUT_SELECTOR).locator('visible=true').count().then((n) => n > 0).catch(() => false);
       const ourMiss = !submitted
         ? 'no sign-in button matched, so nothing was sent'
         : (!emailFilled && identityFieldVisible ? 'the email/username field was not recognised, so only the password was typed' : null);
@@ -3184,7 +3252,13 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
 
     return { success: true, screenshot: afterScreenshot, message: `Logged in. Now at: ${newUrl}` };
   } catch (e) {
-    return { success: false, screenshot, error: e.message };
+    // An exception out of our own login driver: an unreachable app or a lost
+    // page is not a form-reading problem, so say which it was.
+    const msg = e?.message || '';
+    const cause = /net::ERR|ERR_NAME|ERR_CONNECTION|page\.goto|Navigation (failed|timeout|interrupted)|navigating to/i.test(msg) ? 'nav_timeout'
+      : /Target (page|context|browser).*closed|Execution context was destroyed|detached|has been closed/i.test(msg) ? 'playwright_error'
+      : 'login_vision';
+    return { success: false, cause, screenshot, error: msg };
   }
 }
 
@@ -6377,36 +6451,33 @@ app.post('/api/2fa/:runId', (req, res) => {
 });
 
 // OAuth login handoff — accept/decline the takeover offer, signal "done",
-// and relay live input. All four resolve/reject the SAME pendingLiveView
-// entry that tryOAuthHandoff (server.js, near the 2FA bridge) is awaiting —
-// accept/decline answer the first wait, done answers the second.
-function resolveLiveView(runId, value) {
-  const p = pendingLiveView.get(runId);
-  if (!p) return false;
-  clearTimeout(p.timer);
-  pendingLiveView.delete(runId);
-  p.resolve(value);
-  return true;
-}
-
+// and relay live input. accept, decline and done all settle the SAME
+// pendingLiveView entry that tryOAuthHandoff (server.js, near the 2FA
+// bridge) is awaiting, through settleLiveView, which also refuses a signal
+// that names another offer — accept/decline answer the first wait, done
+// answers the second.
 app.post('/api/live-view/:runId/accept', (req, res) => {
-  if (!resolveLiveView(req.params.runId, { action: 'accept' })) {
+  // The live view is already running for this run (same offer open in two
+  // tabs, a double click): answering 200 would leave that tab on
+  // "Connecting…" forever, since the Done wait ignores a second accept.
+  if (activeLiveViews.has(req.params.runId)) {
+    return res.status(409).json({ error: 'A live view is already running for this run in another tab or window.' });
+  }
+  if (!settleLiveView(req.params.runId, req.body?.offerId || null, (p) => p.resolve({ action: 'accept' }))) {
     return res.status(404).json({ error: 'No run is waiting for a takeover decision (it may have completed, been superseded, or timed out).' });
   }
   res.json({ ok: true });
 });
 
 app.post('/api/live-view/:runId/decline', (req, res) => {
-  const p = pendingLiveView.get(req.params.runId);
-  if (!p) return res.status(404).json({ error: 'No run is waiting for a takeover decision.' });
-  clearTimeout(p.timer);
-  pendingLiveView.delete(req.params.runId);
-  p.reject(new Error('declined'));
+  if (!settleLiveView(req.params.runId, req.body?.offerId || null, (p) => p.reject(new Error('declined')))) {
+    return res.status(404).json({ error: 'No run is waiting for a takeover decision.' });
+  }
   res.json({ ok: true });
 });
 
 app.post('/api/live-view/:runId/done', (req, res) => {
-  if (!resolveLiveView(req.params.runId, { action: 'done' })) {
+  if (!settleLiveView(req.params.runId, req.body?.offerId || null, (p) => p.resolve({ action: 'done' }))) {
     return res.status(404).json({ error: 'No run is waiting — the handoff may have already ended or timed out.' });
   }
   res.json({ ok: true });
