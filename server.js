@@ -2818,6 +2818,17 @@ async function supplyPlaceholderToFileInput(page, fileInputLocator) {
 const BYO_SESSION_HINT_INLINE = 'use "bring your own session" (Advanced, in the TestPilot dashboard) so TestPilot runs with a session you have already signed into';
 const BYO_SESSION_HINT = BYO_SESSION_HINT_INLINE.charAt(0).toUpperCase() + BYO_SESSION_HINT_INLINE.slice(1) + '.';
 const LOGIN_FORM_SELECTOR = 'input[type="email"], input[type="password"], #email, #password, input[name="email"]';
+// The identity (email / username) field, in the order fillFirst tries them.
+// Shared by the fill step and by the post-submit verdict below, so the two
+// can never disagree about what counts as an identity field.
+const LOGIN_IDENTITY_SELECTORS = [
+  '#email', 'input[type="email"]', 'input[name="email"]', 'input[placeholder*="email" i]', 'input[placeholder*="correo" i]', 'input[autocomplete="email"]', 'input[autocomplete="username"]',
+  '#username', '#user-name', '#user', '#userid', '#login',
+  'input[name*="user" i]', 'input[id*="user" i]', 'input[placeholder*="user" i]', 'input[placeholder*="usuario" i]',
+  'input[name="login"]', 'input[name*="handle" i]'
+];
+// Same list restricted to input elements (bare ids like #login also match containers).
+const LOGIN_IDENTITY_INPUT_SELECTOR = LOGIN_IDENTITY_SELECTORS.map((sel) => (sel.startsWith('input') ? sel : 'input' + sel)).join(', ');
 
 // After a submit (ours or the user's), is a LOGIN form still on screen? Any
 // visible login-shaped input says yes — except when the visible password
@@ -2825,25 +2836,28 @@ const LOGIN_FORM_SELECTOR = 'input[type="email"], input[type="password"], #email
 // new/current/confirm/old), which is a page you only reach logged IN.
 // Deciding "still logged out" from such a page was a false failure.
 async function isLoginFormStillVisible(page) {
-  const anyVisible = await page.locator(LOGIN_FORM_SELECTOR).first().isVisible({ timeout: 2500 }).catch(() => false);
+  const anyVisible = await page.locator(LOGIN_FORM_SELECTOR).locator('visible=true').count().then((n) => n > 0).catch(() => false);
   if (!anyVisible) return false;
   // Conservative on purpose: we only call it a change-password box when
-  // (a) no identity field (email/username) is visible — a login or register
-  // panel always has one — and (b) every visible password input is marked as
-  // a NEW password: autocomplete="new-password", or a name/id/placeholder
-  // token new/confirm/repeat/old (split on _ - space and camelCase).
+  // (a) no identity field (email/username, the same list fillFirst uses) is
+  // visible — a login or register panel always has one — and (b) every
+  // visible password input is marked as a NEW password by a name/id/
+  // placeholder token new/confirm/repeat/old (split on _ - space and
+  // camelCase). autocomplete="new-password" counts only alongside a second
+  // password input: alone it is a common anti-autofill trick on LOGIN forms.
   // autocomplete="current-password" is the standard LOGIN markup and never
   // counts. Anything else is still a login form, as before.
-  const changePasswordShape = await page.evaluate(() => {
+  const changePasswordShape = await page.evaluate((identitySelector) => {
     const visible = (el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
     const pw = Array.from(document.querySelectorAll('input[type="password"]')).filter(visible);
     if (pw.length === 0) return false;
-    const identity = Array.from(document.querySelectorAll('input[type="email"], input#email, input[name="email"], input#username, input[name*="user" i], input[autocomplete="username"], input[autocomplete="email"]')).some(visible);
+    let identity = false;
+    try { identity = Array.from(document.querySelectorAll(identitySelector)).some(visible); } catch { identity = false; }
     if (identity) return false;
     const tokens = (el) => [el.name, el.id, el.placeholder].join(' ').replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase().split(/[^a-z]+/).filter(Boolean);
-    const isNew = (el) => el.autocomplete === 'new-password' || tokens(el).some((t) => t === 'new' || t === 'confirm' || t === 'repeat' || t === 'old');
+    const isNew = (el) => tokens(el).some((t) => t === 'new' || t === 'confirm' || t === 'repeat' || t === 'old') || (el.autocomplete === 'new-password' && pw.length >= 2);
     return pw.every(isNew);
-  }).catch(() => false);
+  }, LOGIN_IDENTITY_INPUT_SELECTOR).catch(() => false);
   return !changePasswordShape;
 }
 
@@ -3015,12 +3029,7 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
     // Ordered by intent: email patterns first so an email field always wins when
     // an app offers both, then username patterns for the (very common) apps that
     // sign in with a handle and have no email field anywhere.
-    const emailSelectors = [
-      '#email', 'input[type="email"]', 'input[name="email"]', 'input[placeholder*="email" i]', 'input[placeholder*="correo" i]', 'input[autocomplete="email"]', 'input[autocomplete="username"]',
-      '#username', '#user-name', '#user', '#userid', '#login',
-      'input[name*="user" i]', 'input[id*="user" i]', 'input[placeholder*="user" i]', 'input[placeholder*="usuario" i]',
-      'input[name="login"]', 'input[name*="handle" i]'
-    ];
+    const emailSelectors = LOGIN_IDENTITY_SELECTORS;
     const passSelectors = ['#password', 'input[type="password"]', 'input[name="password"]'];
     // Buttons that ADVANCE an email-first flow to its password step (distinct from
     // the final sign-in submit). "Continue with Email" is Vercel/Auth0/Okta-style.
@@ -3205,7 +3214,7 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
       // decides anything — with a shown error and a filled identity the gate
       // is already satisfied.
       const identityFieldVisible = (hasError && emailFilled) ? true
-        : await page.locator(emailSelectors.map((sel) => (sel.startsWith('input') ? sel : 'input' + sel)).join(', ')).locator('visible=true').count().then((n) => n > 0).catch(() => false);
+        : await page.locator(LOGIN_IDENTITY_INPUT_SELECTOR).locator('visible=true').count().then((n) => n > 0).catch(() => false);
       const ourMiss = !submitted
         ? 'no sign-in button matched, so nothing was sent'
         : (!emailFilled && identityFieldVisible ? 'the email/username field was not recognised, so only the password was typed' : null);
@@ -3239,8 +3248,13 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
 
     return { success: true, screenshot: afterScreenshot, message: `Logged in. Now at: ${newUrl}` };
   } catch (e) {
-    // An exception out of our own login driver is ours to own.
-    return { success: false, cause: 'login_vision', screenshot, error: e.message };
+    // An exception out of our own login driver: an unreachable app or a lost
+    // page is not a form-reading problem, so say which it was.
+    const msg = e?.message || '';
+    const cause = /net::ERR|ERR_NAME|ERR_CONNECTION|Navigation|Timeout \d+ms exceeded|navigating to/i.test(msg) ? 'nav_timeout'
+      : /Target (page|context|browser).*closed|Execution context was destroyed|detached|has been closed/i.test(msg) ? 'playwright_error'
+      : 'login_vision';
+    return { success: false, cause, screenshot, error: msg };
   }
 }
 
@@ -6433,15 +6447,13 @@ app.post('/api/2fa/:runId', (req, res) => {
 });
 
 // OAuth login handoff — accept/decline the takeover offer, signal "done",
-// and relay live input. All four resolve/reject the SAME pendingLiveView
-// entry that tryOAuthHandoff (server.js, near the 2FA bridge) is awaiting —
-// accept/decline answer the first wait, done answers the second.
-function resolveLiveView(runId, value, offerId = null) {
-  return settleLiveView(runId, offerId, (p) => p.resolve(value));
-}
-
+// and relay live input. accept, decline and done all settle the SAME
+// pendingLiveView entry that tryOAuthHandoff (server.js, near the 2FA
+// bridge) is awaiting, through settleLiveView, which also refuses a signal
+// that names another offer — accept/decline answer the first wait, done
+// answers the second.
 app.post('/api/live-view/:runId/accept', (req, res) => {
-  if (!resolveLiveView(req.params.runId, { action: 'accept' }, req.body?.offerId || null)) {
+  if (!settleLiveView(req.params.runId, req.body?.offerId || null, (p) => p.resolve({ action: 'accept' }))) {
     return res.status(404).json({ error: 'No run is waiting for a takeover decision (it may have completed, been superseded, or timed out).' });
   }
   res.json({ ok: true });
@@ -6455,7 +6467,7 @@ app.post('/api/live-view/:runId/decline', (req, res) => {
 });
 
 app.post('/api/live-view/:runId/done', (req, res) => {
-  if (!resolveLiveView(req.params.runId, { action: 'done' }, req.body?.offerId || null)) {
+  if (!settleLiveView(req.params.runId, req.body?.offerId || null, (p) => p.resolve({ action: 'done' }))) {
     return res.status(404).json({ error: 'No run is waiting — the handoff may have already ended or timed out.' });
   }
   res.json({ ok: true });

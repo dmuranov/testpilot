@@ -4885,6 +4885,14 @@ function closeLiveOverlay(runId) {
   const overlay = document.getElementById('tp-live-overlay');
   if (overlay && !overlay.firstElementChild) overlay.remove();
 }
+// Close THIS box. If a newer offer's box has since taken the run's id, that
+// one stays — closing by runId would remove the box the user still needs.
+function closeLiveBox(runId, box) {
+  if (document.getElementById('oauth-handoff-' + runId) === box) return closeLiveOverlay(runId);
+  box.remove();
+  const overlay = document.getElementById('tp-live-overlay');
+  if (overlay && !overlay.firstElementChild) overlay.remove();
+}
 
 // Every takeover signal carries the offer it answers, so the server can refuse
 // a stale box's buttons. Older servers ignore the body.
@@ -4897,14 +4905,17 @@ function postLiveViewSignal(runId, action, box) {
 
 function showOAuthHandoffPrompt(runId, message, hostname, offerId) {
   if (!runId) return;
+  window._tpSeenOffers = window._tpSeenOffers || new Set();
   const existing = document.getElementById('oauth-handoff-' + runId);
   if (existing) {
-    // Same offer already on screen: nothing to do. A NEWER offer for this run
-    // (a retry) replaces the stale box, whose buttons the server would refuse.
-    if (!offerId || existing.dataset.offerId === offerId) return;
+    // Same offer already on screen, or an OLD offer replayed by a reconnecting
+    // stream: nothing to do. Only an offer never seen before (a retry's new
+    // offer) replaces the box, whose buttons the server would refuse.
+    if (!offerId || existing.dataset.offerId === offerId || window._tpSeenOffers.has(offerId)) return;
     if (window._tpLiveViews) delete window._tpLiveViews[runId];
     existing.remove();
   }
+  if (offerId) window._tpSeenOffers.add(offerId);
   const box = document.createElement('div');
   box.id = 'oauth-handoff-' + runId;
   if (offerId) box.dataset.offerId = offerId;
@@ -4924,14 +4935,14 @@ function showOAuthHandoffPrompt(runId, message, hostname, offerId) {
   box.querySelector(`#oauth-skip-${runId}`).addEventListener('click', async () => {
     box.innerHTML = '<div style="color:var(--text-muted)">Skipped — continuing with the normal error.</div>';
     await postLiveViewSignal(runId, 'decline', box).catch(() => {});
-    setTimeout(() => closeLiveOverlay(runId), 1500);
+    setTimeout(() => closeLiveBox(runId, box), 1500);
   });
   box.querySelector(`#oauth-take-${runId}`).addEventListener('click', async () => {
     box.innerHTML = '<div style="color:var(--accent,#6c5ce7)">Connecting…</div>';
     const r = await postLiveViewSignal(runId, 'accept', box).catch(() => null);
     if (!r || !r.ok) {
       box.innerHTML = '<div style="color:#e74c3c">Could not start the live view — the offer may have expired. The test will continue with the normal error.</div>';
-      setTimeout(() => closeLiveOverlay(runId), 3000);
+      setTimeout(() => closeLiveBox(runId, box), 3000);
       return;
     }
     // The canvas/controls get built by openLiveView() once the server confirms
