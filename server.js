@@ -2602,11 +2602,16 @@ function watchForPopups(originalPage, runId, ctx, hostname) {
   return () => context.off('page', onNewPage);
 }
 
-// Offers the human a live takeover when login failed on a page that also
-// shows an OAuth button. Returns a fresh {success:true,...} if the handoff
-// ended with the user actually logged in, or null to fall through to the
-// normal failure return (declined, timed out, or still not logged in after
-// "done" — never loops, matches the 2FA bridge's failure discipline).
+// Offers the human a live takeover when login did not take on a page that
+// also shows an OAuth button. Returns a fresh {success:true,...} if the
+// handoff ended with the user actually logged in; null when the offer was
+// declined, superseded or ignored (caller falls through to its own failure
+// text); or a {success:false, handoffAttempted:true, handoffOffered:true}
+// result when the user ACCEPTED but the attempt did not end logged in (gave
+// up, took over 10 minutes, live view failed, or the form was still there
+// after "done"). That last case must never be reported as "no password" —
+// the user just tried with their own hands. Never loops, matches the 2FA
+// bridge's failure discipline.
 async function tryOAuthHandoff(page, ctx) {
   // Two runs against DIFFERENT apps can each need a handoff at the same
   // time (a running test hits a login wall while a separate saved-session
@@ -2628,29 +2633,32 @@ async function tryOAuthHandoff(page, ctx) {
     if (decision?.action !== 'accept') return null;
   } catch { return null; } // declined, superseded, or nobody responded within 60s
 
+  // From here on the human accepted and had their turn. Whatever goes wrong
+  // next is reported as a manual login that did not complete — the caller
+  // must not fall through to "this account has no password", which would
+  // contradict what the user just did with their own hands. handoffOffered
+  // is set so the run-test retry does not ask them to take over again.
+  const manualLoginFailed = async (why) => ({
+    success: false, cause: 'login_credentials', handoffAttempted: true, handoffOffered: true,
+    screenshot: await takeScreenshot(page, 'login-after-handoff'),
+    error: `You took over to sign in manually, but ${why}. Try again, or ${BYO_SESSION_HINT.charAt(0).toLowerCase() + BYO_SESSION_HINT.slice(1)}`,
+  });
+
   const unwatchPopups = watchForPopups(page, ctx.runId, ctx, hostname);
   try {
     await startLiveView(page, ctx.runId, ctx);
     ctx.emit({ type: 'live_view_ready', runId: ctx.runId, hostname });
     await awaitLiveViewSignal(ctx.runId, { timeoutMs: 10 * 60 * 1000 }); // "I'm done" signal
-  } catch {
-    return null; // timed out waiting for "done"
+  } catch (e) {
+    return manualLoginFailed(/timed out|timeout/i.test(e?.message || '') ? 'no "done" signal arrived within 10 minutes' : `the live view could not be started (${e?.message || 'unknown error'})`);
   } finally {
     unwatchPopups();
     await stopLiveView(ctx.runId);
   }
 
-  // The human accepted and had their turn. If the form is still there, say THAT —
-  // the caller must not fall through to "this account has no password", which
-  // would contradict what the user just did with their own hands.
-  const manualLoginFailed = async () => ({
-    success: false, cause: 'login_credentials', handoffAttempted: true,
-    screenshot: await takeScreenshot(page, 'login-after-handoff'),
-    error: `You took over and signed in manually, but ${hostname || 'the app'} still shows its sign-in form afterwards — the manual login did not complete. Try again, or ${BYO_SESSION_HINT.charAt(0).toLowerCase() + BYO_SESSION_HINT.slice(1)}`,
-  });
-  const stillHasForm = await page.locator(LOGIN_FORM_SELECTOR).first().isVisible({ timeout: 2500 }).catch(() => false);
-  if (stillHasForm) return manualLoginFailed();
-
+  // No verdict on the form right at "done": a Done click while the OAuth
+  // redirect is still in flight leaves the form rendered for a second or two.
+  // Settle first (below), then judge once.
   // The login form disappearing does NOT mean the app has finished exchanging
   // the OAuth code for its own session cookie yet — confirmed live: a session
   // captured (server.js's saved-session capture) immediately after this point
@@ -2662,7 +2670,7 @@ async function tryOAuthHandoff(page, ctx) {
   await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
   await page.waitForTimeout(1500);
   const stillHasFormAfterSettle = await page.locator(LOGIN_FORM_SELECTOR).first().isVisible({ timeout: 2500 }).catch(() => false);
-  if (stillHasFormAfterSettle) return manualLoginFailed();
+  if (stillHasFormAfterSettle) return manualLoginFailed(`${hostname || 'the app'} still shows its sign-in form afterwards — the manual login did not complete`);
 
   const freshScreenshot = await takeScreenshot(page, 'login-after-handoff');
   return { success: true, screenshot: freshScreenshot, message: `Logged in via manual handoff. Now at: ${page.url()}` };
@@ -3113,7 +3121,10 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
       if (!submitted) {
         return { success: false, cause: 'login_vision', screenshot: afterScreenshot, error: `Could not find the sign-in button on this page — the email and password were filled in, but no submit control matched, so nothing was sent (still at ${newUrl}). ${BYO_SESSION_HINT}` };
       }
-      const identityFieldVisible = await page.locator('input[type="email"], #email, input[name="email"], #username, #user-name, input[name*="user" i]').first().isVisible({ timeout: 1000 }).catch(() => false);
+      let identityFieldVisible = false;
+      for (const sel of emailSelectors) {
+        if (await page.locator(sel).first().isVisible({ timeout: 300 }).catch(() => false)) { identityFieldVisible = true; break; }
+      }
       const oauthVisible = identityFieldVisible && await hasOAuthSignIn(page);
       if (oauthVisible) {
         let handoffOffered = false;
@@ -3130,7 +3141,10 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
       if (hasError) {
         return { success: false, cause: 'login_credentials', screenshot: afterScreenshot, error: 'Login failed — the app showed an error and the sign-in form is still on screen. Check the credentials for this app.' };
       }
-      return { success: false, screenshot: afterScreenshot, error: `Login did not take — the sign-in form is still on screen after submitting (still at ${newUrl}). Either the credentials are wrong, or the username/email field on this app was not recognised. If it signs in with a magic link or SSO popup, capture a session in your browser and use "bring your own session".` };
+      // Both fields were filled and a submit control was clicked to get here, so
+      // this is a credentials/config outcome — not TestPilot failing to read the
+      // form (the bare /form/ in the fallback regex would have said otherwise).
+      return { success: false, cause: 'login_credentials', screenshot: afterScreenshot, error: `Login did not take — the sign-in form is still on screen after submitting (still at ${newUrl}). Either the credentials are wrong, or the username/email field on this app was not recognised. If it signs in with a magic link or SSO popup, ${BYO_SESSION_HINT.charAt(0).toLowerCase() + BYO_SESSION_HINT.slice(1)}` };
     }
 
     return { success: true, screenshot: afterScreenshot, message: `Logged in. Now at: ${newUrl}` };
