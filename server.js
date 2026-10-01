@@ -856,10 +856,13 @@ async function createAppRow({ url_normalized, url_original, owner_email }) {
 // question with no database answer, only an SSH-in-and-read-the-JSON one.
 // Best-effort like the other app_ownership writes here: a failure to record
 // the outcome shouldn't fail the crawl that already happened.
-async function recordLearnOutcome(urlNormalized, patch) {
+// Scoped to the learner's own claim row: with per-account ownership a second
+// learner of the same URL must not rewrite the first learner's outcome.
+async function recordLearnOutcome(urlNormalized, patch, ownerEmail = '') {
   if (!SUPABASE_URL || !urlNormalized) return;
   try {
-    await supabase('PATCH', 'app_ownership', { ...patch, learned_at: new Date().toISOString() }, `?url_normalized=eq.${encodeURIComponent(urlNormalized)}`);
+    const scope = `?url_normalized=eq.${encodeURIComponent(urlNormalized)}` + (ownerEmail ? `&owner_email=eq.${encodeURIComponent(ownerEmail)}` : '');
+    await supabase('PATCH', 'app_ownership', { ...patch, learned_at: new Date().toISOString() }, scope);
   } catch (err) {
     console.warn('[app_ownership] recordLearnOutcome failed:', err.message);
   }
@@ -1685,15 +1688,15 @@ app.post('/api/funnel/start', watchOnboarding('signup', (req) => ({ email: onboa
       });
     }
 
-    // App ownership: if claimed by someone else, reject. Super admin bypasses.
+    // App ownership is per ACCOUNT, not per URL. Every account gets its own
+    // copy of an app (own appId with its owner hash, own crawl, own runs), so
+    // a URL another account learned first — a shared demo app, a teammate's
+    // app — is no reason to turn a prospect away at signup. Seen live
+    // 2026-10-01: a fresh free signup with saucedemo.com was refused because
+    // the founder's account had learned it. The first learner's
+    // app_ownership row stays theirs (claims are insert-if-absent); what an
+    // account may touch is decided by ownsApp() on its own appIds.
     const existingApp = await getAppByNormalized(norm.normalized);
-    if (existingApp && existingApp.owner_email && existingApp.owner_email !== userEmail && !isSuperAdmin(userEmail)) {
-      return res.status(403).json({
-        ok: false,
-        error: 'This app is already learned by another account. Sign in to continue.',
-        code: 'APP_OWNED_BY_OTHER',
-      });
-    }
 
     // Resolve / create user. plan defaults to 'free' on first visit.
     const dbUser = await createOrGetUser(userEmail);
@@ -6327,7 +6330,7 @@ Return ONLY valid JSON.`
         pages_crawled: _pageCount,
         failure_message: null,
         failure_category: null,
-      });
+      }, ownerEmail);
     }
     onProgress?.({ phase: 'complete', message: `Deep crawl complete. ${_pageCount} pages, ${_formCount} forms learned.` });
     // Thin-crawl advisory: only the entry page was reachable — almost always a
@@ -10037,14 +10040,11 @@ app.post('/api/learn', watchOnboarding('crawl', (req) => ({ email: onboardingEma
   const userPlan = sessionUser?.plan || dbUser.plan || 'free';
   const planLimits = PLAN_LIMITS[userPlan] || PLAN_LIMITS.free;
 
-  // Ownership check: if the URL is already claimed by someone else, reject. Super admin bypasses.
+  // Ownership is per account, not per URL (see /api/funnel/start): another
+  // account having learned this URL does not block this one from learning
+  // its own copy. existingApp still tells us whether THIS owner already has
+  // it (re-learn → no new slot).
   const existingApp = await getAppByNormalized(norm.normalized);
-  if (existingApp && existingApp.owner_email && existingApp.owner_email !== ownerEmail && !isSuperAdmin(ownerEmail)) {
-    return res.status(403).json({
-      error: 'This app is already learned by another account.',
-      code: 'APP_OWNED_BY_OTHER',
-    });
-  }
 
   // Slot check: only enforce when learning a NEW app for this user. Re-learning
   // an app the user already owns does not consume an additional slot.
@@ -10117,7 +10117,7 @@ app.post('/api/learn', watchOnboarding('crawl', (req) => ({ email: onboardingEma
       learn_status: 'failed',
       failure_message: String(e.message || '').slice(0, 300),
       failure_category: e.category || 'tool_limitation',
-    });
+    }, ownerEmail);
     // classifyConfigError already exists and is used by /api/test and two
     // other endpoints to turn a raw Anthropic SDK error (e.g. `400
     // {"type":"error","error":{...,"message":"Your credit balance is too
@@ -10390,17 +10390,11 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
   // look up the appId's URL via platformMaps and match by normalized URL.
   const appKnowledge = platformMaps.get(appId);
   if (!appKnowledge) return res.status(404).json({ error: 'App not found. Learn it first.' });
-  if (ownerEmail && appKnowledge?.url) {
-    const norm = normalizeAppUrl(appKnowledge.url);
-    if (norm.ok) {
-      const ownerOfApp = await getAppByNormalized(norm.normalized);
-      if (ownerOfApp && ownerOfApp.owner_email && ownerOfApp.owner_email !== ownerEmail && !isSuperAdmin(ownerEmail)) {
-        return res.status(403).json({
-          error: 'This app belongs to another account.',
-          code: 'APP_OWNED_BY_OTHER',
-        });
-      }
-    }
+  // Per-account ownership: this appId must belong to the requester. The URL
+  // may legitimately be learned by several accounts, each with its own copy,
+  // so the old per-URL lookup is no longer the test.
+  if (ownerEmail && !ownsApp(appId, ownerEmail) && !isSuperAdmin(ownerEmail)) {
+    return res.status(403).json({ error: 'This app belongs to another account.', code: 'APP_OWNED_BY_OTHER' });
   }
 
   // Free run uses support key, otherwise user must provide their own
@@ -13882,7 +13876,11 @@ app.post('/api/security/api-intercept', async (req, res) => {
     // Login User A — OR skip when a captured session was provided (the context
     // is already authenticated via storageState). A stale session is flagged
     // (not aborted) so a dead session can't be silently read as "safe".
-    await pageA.goto(appKnowledge.url, { waitUntil: 'networkidle', timeout: 30000 });
+    // DOM ready, then a BOUNDED settle. "networkidle or give up" failed live
+    // (2026-10-01) on a site whose ads/analytics never go quiet: the scan
+    // reported the site as unreachable while it answered in a second.
+    await pageA.goto(appKnowledge.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await pageA.waitForLoadState('networkidle', { timeout: 12000 }).catch(() => {});
     await pageA.waitForTimeout(1500);
     const preCookiesA = await ctxA.cookies().catch(() => []);
     // Login gating: if User A (or B below) never demonstrably logged in, every
@@ -14075,7 +14073,8 @@ app.post('/api/security/api-intercept', async (req, res) => {
 
     pageB.on('response', captureResponseInto(capturedResponsesB));
 
-    await pageB.goto(appKnowledge.url, { waitUntil: 'networkidle', timeout: 30000 });
+    await pageB.goto(appKnowledge.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await pageB.waitForLoadState('networkidle', { timeout: 12000 }).catch(() => {});
     await pageB.waitForTimeout(1500);
     let authOkB = true, authNoteB = '';
     if (ssB) {
@@ -15829,14 +15828,9 @@ app.post('/api/schedules', async (req, res) => {
   if (!appKnowledge) return res.status(404).json({ error: 'App not found. Learn it first.' });
 
   // Ownership: caller must own the app (super admin bypasses).
-  if (appKnowledge.url) {
-    const norm = normalizeAppUrl(appKnowledge.url);
-    if (norm.ok) {
-      const ownerOfApp = await getAppByNormalized(norm.normalized);
-      if (ownerOfApp && ownerOfApp.owner_email && ownerOfApp.owner_email !== ownerEmail && !isSuperAdmin(ownerEmail))
-        return res.status(403).json({ error: 'This app belongs to another account.', code: 'APP_OWNED_BY_OTHER' });
-    }
-  }
+  // Per-account ownership (see /api/test): the appId must be the requester's own.
+  if (!ownsApp(appId, ownerEmail) && !isSuperAdmin(ownerEmail))
+    return res.status(403).json({ error: 'This app belongs to another account.', code: 'APP_OWNED_BY_OTHER' });
 
   // Keys: BYOK required; only the super admin may lean on the shared support key.
   let keyEnc = null, wantSupport = false;
