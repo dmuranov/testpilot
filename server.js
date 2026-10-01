@@ -2839,10 +2839,12 @@ const BYO_SESSION_HINT_INLINE = 'use "bring your own session" (Advanced, in the 
 const BYO_SESSION_HINT = BYO_SESSION_HINT_INLINE.charAt(0).toUpperCase() + BYO_SESSION_HINT_INLINE.slice(1) + '.';
 // One reading of "did this app need a login?" from a visionLogin result —
 // for learn telemetry and the dashboard's Check Everything default alike.
-// No recorded flow at all (a legacy map) reads as "login required": the safe
-// default is to ask for credentials, not to crawl anonymously.
+// No recorded flow at all (a legacy map) is "unknown" (null): telemetry
+// keeps its historical "assume a login" reading, the dashboard does not
+// force credential fields on a public app learned before flows were kept.
 function loginRequiredFromFlow(lf) {
-  return !(lf && /no login required|public app/i.test(String(lf.message || '')));
+  if (!lf) return null;
+  return !/no login required|public app/i.test(String(lf.message || ''));
 }
 const LOGIN_FORM_SELECTOR = 'input[type="email"], input[type="password"], #email, #password, input[name="email"]';
 // The identity (email / username) field, in the order fillFirst tries them.
@@ -6365,7 +6367,7 @@ Return ONLY valid JSON.`
       const lf = appKnowledge.loginFlow;
       await recordLearnOutcome(urlNormalized, {
         learn_status: 'success',
-        login_required: loginRequiredFromFlow(lf),
+        login_required: loginRequiredFromFlow(lf) !== false,
         login_success: lf ? !!lf.success : null,
         login_message: lf ? String(lf.message || lf.error || '').slice(0, 300) : null,
         pages_crawled: _pageCount,
@@ -6803,8 +6805,9 @@ const PAYMENT_COMMIT_RE = /\b(pay now|complete purchase|place order|complete ord
 const ORDER_OVERVIEW_URL_RE = /\/(checkout|order|booking|reservation)[^?#]*(overview|summary|review|confirm|step-?two|step-?2)/i;
 const ORDER_OVERVIEW_TEXT_RE = /(payment information|order (summary|overview|review)|checkout:?\s*overview|review your order|order total|item total|subtotal|grand total|total:?\s*[$€£]\s*\d)/i;
 // The final commit control as it reads on an overview page: PAYMENT_COMMIT_RE
-// plus the plain "Finish" / "Continue to payment" wordings demo stores use.
-const OVERVIEW_COMMIT_SRC = PAYMENT_COMMIT_RE.source + '|\\b(finish|checkout now|proceed to payment|continue to payment)\\b';
+// plus the plain "Finish" demo stores use. NOT wizard-advance wordings like
+// "Continue to payment" — those sit on the address step, before the review.
+const OVERVIEW_COMMIT_SRC = PAYMENT_COMMIT_RE.source + '|\\bfinish\\b';
 const CHECKOUT_URL_HINT_RE = /[/_-](pagamento|payment|pay|paiement|zahlung|kasse|pago|checkout)([/?_-]|$)/i;
 // "continue"/"next" (+ the same Spanish/Italian equivalents visionLogin's own
 // advanceSelectors already treats as non-final "advance to the next step"
@@ -9205,7 +9208,7 @@ RESPOND ONLY JSON: {"confirmed":true,"actual":"the visible failure, plainly","de
       // Standing on the order review / overview page is reaching the payment
       // step (stop-before-pay): the Checkout panel used to say "did not reach
       // a payment/booking step" for a run that stood in front of "Finish".
-      if (credentials?.paymentMode === 'stop-before-pay' && !result.reachedPaymentStep && status === 'pass') {
+      if (credentials?.paymentMode === 'stop-before-pay' && !result.reachedPaymentStep && status === 'pass' && action.action !== 'done') {
         try {
           const u = new URL(page.url());
           // Three signals together: a checkout-ish path, order totals on the
@@ -9213,12 +9216,13 @@ RESPOND ONLY JSON: {"confirmed":true,"actual":"the visible failure, plainly","de
           // broad (a reviews page says "Total: 12 reviews"; the address step
           // shows an order-summary sidebar with no commit button yet).
           if (ORDER_OVERVIEW_URL_RE.test(u.pathname) || CHECKOUT_URL_HINT_RE.test(u.pathname)) {
-            const txt = (await page.textContent('body').catch(() => '') || '').slice(0, 4000);
+            // rendered text only (textContent would hand back inline scripts first)
+            const txt = (await page.evaluate(() => document.body?.innerText || '').catch(() => '') || '').slice(0, 8000);
             const commitVisible = ORDER_OVERVIEW_TEXT_RE.test(txt) && await page.$$eval('button, a, input[type="submit"]', (els, src) => {
               const re = new RegExp(src, 'i');
               return els.some((el) => (el.offsetWidth || el.offsetHeight) && re.test(String(el.innerText || el.value || '').trim()));
             }, OVERVIEW_COMMIT_SRC).catch(() => false);
-            if (commitVisible) { result.reachedPaymentStep = true; result.paymentOverviewStep = result.steps.length; }
+            if (commitVisible) { result.reachedPaymentStep = true; result.paymentOverviewStep = result.steps[result.steps.length - 1]?.step ?? result.steps.length; }
           }
         } catch {}
       }
@@ -9662,7 +9666,8 @@ Then the JSON action object on the next line.`;
     // Possible/tool/environment/uncertain findings are surfaced separately so
     // a vision misread or selector miss can never flip a clean run to "blocked".
     const passed = result.steps.filter(s => s.status === 'pass').length;
-    const retries = result.steps.filter(s => s.status === 'retry').length;
+    // A click TestPilot refused by policy is not a retry in the user's eyes.
+    const retries = result.steps.filter(s => s.status === 'retry' && !/^BLOCKED — refusing to click/.test(s.outcome || '')).length;
     const fsum = summarizeFindings(result.findings);
     let bugs = fsum.bugs; // confirmed app bugs only (result.bugs already holds these) — may be reconciled to 0 below once the analysis runs
     // Did the agent actually FINISH (reach `done`)? Surface it in the summary so
@@ -9739,6 +9744,24 @@ Then the JSON action object on the next line.`;
     }
 
     // AI Analysis
+    // Rewrites the done step's count tail from the CURRENT counts (bugs may be
+    // reconciled by the analysis). Called after reconciliation, and again when
+    // the analysis call fails, so the last step never contradicts the header.
+    const syncDoneLine = () => {
+        const doneStep = result.steps.find(s => s.action === 'done');
+        if (doneStep) {
+          // Same rule as the mid-run line: no tail on a clean run, otherwise
+          // "summary — (passed, retries, bugs)" with "passed" counting the steps
+          // before done, exactly as it did mid-run. Works in both directions:
+          // bugs cleared by the analysis, or a bug the analysis added.
+          const tail = /\s*(—\s*)?\(\d+ passed, \d+ retries, \d+ confirmed bugs?\)\s*$/;
+          const passedBeforeDone = passed - (doneStep.status === 'pass' ? 1 : 0);
+          const base = String(doneStep.outcome || '').replace(tail, '').trim();
+          doneStep.outcome = (retries === 0 && bugs === 0)
+            ? (base || 'Test completed successfully')
+            : `${base}${base ? ' — ' : ''}(${passedBeforeDone} passed, ${retries} retries, ${bugs} confirmed bug${bugs === 1 ? '' : 's'})`;
+        }
+    };
     emitStep(testId, { type: 'info', message: 'Generating analysis...' });
     try {
       const analysisResp = await withRetry(() => getClient(apiKey).messages.create({
@@ -9837,21 +9860,7 @@ Output structure (exact sections, max 220 words total):
       // written mid-run, before classification and this reconciliation. A
       // report whose header says 0 bugs while the last step says 2 is not
       // honest in either direction — align the tail with the final counts.
-      {
-        const doneStep = result.steps.find(s => s.action === 'done');
-        if (doneStep) {
-          // Same rule as the mid-run line: no tail on a clean run, otherwise
-          // "summary — (passed, retries, bugs)" with "passed" counting the steps
-          // before done, exactly as it did mid-run. Works in both directions:
-          // bugs cleared by the analysis, or a bug the analysis added.
-          const tail = /\s*(—\s*)?\(\d+ passed, \d+ retries, \d+ confirmed bugs?\)\s*$/;
-          const passedBeforeDone = passed - (doneStep.status === 'pass' ? 1 : 0);
-          const base = String(doneStep.outcome || '').replace(tail, '').trim();
-          doneStep.outcome = (retries === 0 && bugs === 0)
-            ? (base || 'Test completed successfully')
-            : `${base}${base ? ' — ' : ''}(${passedBeforeDone} passed, ${retries} retries, ${bugs} confirmed bug${bugs === 1 ? '' : 's'})`;
-        }
-      }
+      syncDoneLine();
       if (reconciled) {
         result.summary.bugs = bugs;
         result.status = blockedDone ? 'blocked'
@@ -9862,6 +9871,7 @@ Output structure (exact sections, max 220 words total):
       }
     } catch (e) {
       result.analysis = `Analysis unavailable: ${e.message}`;
+      syncDoneLine();
     }
 
     emitStep(testId, { type: 'summary', message: `Complete: ${passed} passed, ${retries} retries, ${bugs} confirmed bug${bugs === 1 ? '' : 's'}${fsum.possible ? `, ${fsum.possible} possible (unconfirmed)` : ''}${fsum.toolLimitations ? `, ${fsum.toolLimitations} tool limitation${fsum.toolLimitations === 1 ? '' : 's'}` : ''}`, summary: result.summary, analysis: result.analysis });
@@ -10054,7 +10064,7 @@ app.get('/api/apps', (req, res) => {
       summary: map.summary,
       // learned behind a login (credentials or a saved session) — the dashboard
       // defaults "No login required" from this instead of always ticking it
-      loginRequired: loginRequiredFromFlow(map.loginFlow),
+      loginRequired: loginRequiredFromFlow(map.loginFlow) === true,
     });
   }
   res.json(apps);

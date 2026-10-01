@@ -3201,9 +3201,11 @@ function renderTestDetail() {
         <button class="btn btn-ghost btn-sm" onclick="copyTestDebug()">📋 Copy Debug</button>
         <button class="btn btn-ghost btn-sm" onclick="downloadTestReport()">📥 Download Report</button>
         ${statusBadge(test.status)}
-        ${test.summary?.completionNote ? `<div style="font-size:12px;color:var(--text-muted);margin-top:6px">🛡️ ${escapeHtml(test.summary.completionNote)}</div>` : ''}
       </div>
     </div>
+
+    ${test.summary?.completionNote ? `
+    <div class="card" style="border-left:3px solid var(--text-muted);font-size:13px;line-height:1.6;color:var(--text)">🛡️ ${escapeHtml(test.summary.completionNote)}</div>` : ''}
 
     ${test.analysis ? `
     <div class="card" style="border-left:3px solid var(--accent)">
@@ -3314,7 +3316,7 @@ function renderTestDetail() {
     <div class="card">
       <div class="card-header">
         <div class="card-title">Step-by-Step Log</div>
-        ${test.steps.some(s => s.status === 'retry') ? `<button class="btn btn-ghost btn-sm" onclick="document.querySelectorAll('.step-retry').forEach(el=>el.style.display=el.style.display==='none'?'flex':'none')">🔧 Toggle agent details</button>` : ''}
+        ${test.steps.some(s => s.status === 'retry' && s.policy !== 'refused') ? `<button class="btn btn-ghost btn-sm" onclick="document.querySelectorAll('.step-retry').forEach(el=>el.style.display=el.style.display==='none'?'flex':'none')">🔧 Toggle agent details</button>` : ''}
       </div>
       <div class="test-stream">
         ${test.steps.map(s => renderDetailStep(s)).join('')}
@@ -6767,7 +6769,7 @@ function copyTestDebug() {
   const passed = test.steps.filter(s => s.status === 'pass').length;
   const failed = test.steps.filter(s => s.status === 'fail').length;
   const bugs = test.bugs?.length || 0;
-  const retries = test.steps.filter(s => s.status === 'retry').length;
+  const retries = test.steps.filter(s => s.status === 'retry' && s.policy !== 'refused').length;
   // Did the AGENT actually finish the scenario (reach `done`)? A run can rack up
   // dozens of "passed" step-actions and still never complete the task — it hit
   // the token budget or wandered. "Steps passed" is per-action, NOT completion,
@@ -6827,7 +6829,7 @@ function copyTestDebug() {
   }
 
   // Agent retries as appendix
-  const retrySteps = test.steps.filter(s => s.status === 'retry');
+  const retrySteps = test.steps.filter(s => s.status === 'retry' && s.policy !== 'refused');
   if (retrySteps.length) {
     debug += `\n\n── AGENT RETRIES (${retrySteps.length}) ──────────────────────────────\n`;
     for (const step of retrySteps) {
