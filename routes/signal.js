@@ -8,6 +8,7 @@ import crypto from 'node:crypto';
 import { createClient } from '@supabase/supabase-js';
 import { enqueueFixJob } from '../lib/bridge-client.js';
 import { sendAdminAlert } from '../lib/admin-alert.js';
+import { RUN_MODE } from '../lib/local-run.js';
 
 const router = express.Router();
 
@@ -165,7 +166,7 @@ async function sweepStrandedQueued() {
     console.error('[signal] stranded-queued sweep failed:', e.message);
   }
 }
-setInterval(sweepStrandedQueued, CFG.STRANDED_SWEEP_INTERVAL_MS).unref?.();
+if (RUN_MODE.prodJobs) setInterval(sweepStrandedQueued, CFG.STRANDED_SWEEP_INTERVAL_MS).unref?.(); // writes production error_signatures — production only
 
 // 'ignored' is terminal (see the isClientError branch below) — a 4xx that
 // crosses the enqueue threshold is written off permanently and never
@@ -207,7 +208,7 @@ async function sendIgnoredDigestIfDue() {
     console.error('[signal] ignored-digest failed:', e.message);
   }
 }
-setInterval(sendIgnoredDigestIfDue, CFG.IGNORED_DIGEST_INTERVAL_MS).unref?.();
+if (RUN_MODE.prodJobs) setInterval(sendIgnoredDigestIfDue, CFG.IGNORED_DIGEST_INTERVAL_MS).unref?.();
 
 // -------------------------------------------------------------- normalization
 function normalizePath(p) {

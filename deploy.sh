@@ -14,4 +14,18 @@ git fetch --quiet origin main
 log "deploying origin/main @ $(git rev-parse --short origin/main) (was $(git rev-parse --short HEAD))"
 git reset --hard origin/main
 pm2 reload testpilot >/dev/null 2>&1 || pm2 restart testpilot >/dev/null 2>&1
+# The server must come up in PRODUCTION mode (NODE_ENV=production from
+# ecosystem.config.cjs). In local mode it sends no mail and runs no jobs, so a
+# process started with a bare "pm2 start server.js" would silently go quiet.
+MODE=""
+for i in $(seq 1 30); do
+  MODE=$(curl -s --max-time 5 http://localhost:3001/api/health | grep -o '"runMode":"[a-z]*"' | cut -d'"' -f4)
+  [ -n "$MODE" ] && break
+  sleep 2
+done
 log "done. health: $(curl -s --max-time 8 http://localhost:3001/api/health | head -c 70)"
+log "run mode: ${MODE:-unknown}"
+if [ "$MODE" != "production" ]; then
+  log "ERROR: server is not in production mode (runMode=${MODE:-unknown}). Start it from ecosystem.config.cjs so NODE_ENV=production is set: pm2 delete testpilot && pm2 start ecosystem.config.cjs && pm2 save"
+  exit 1
+fi
