@@ -6,7 +6,7 @@ set -euo pipefail
 cd /home/azureuser/testpilot
 log(){ echo "[deploy $(date -u +%H:%M:%S)] $*"; }
 # health_field <field> <fallback>: one JSON field from /api/health, never fails the script.
-health_field(){ curl -s --max-time 5 http://localhost:3001/api/health | node -e "let d=\"\";process.stdin.on(\"data\",c=>d+=c).on(\"end\",()=>{try{const v=JSON.parse(d)[\"$1\"];console.log(v===undefined?\"$2\":v)}catch{console.log(\"$2\")}})" 2>/dev/null || echo "$2"; }
+health_field(){ (curl -s --max-time 5 http://localhost:3001/api/health || true) | node -e "let d=\"\";process.stdin.on(\"data\",c=>d+=c).on(\"end\",()=>{try{const v=JSON.parse(d)[\"$1\"];console.log(v===undefined?\"$2\":v)}catch{console.log(\"$2\")}})" 2>/dev/null || echo "$2"; }
 for i in $(seq 1 60); do
   AS=$(health_field activeScans 0)
   [ "$AS" = "0" ] && break
