@@ -9,6 +9,9 @@ log(){ echo "[deploy $(date -u +%H:%M:%S)] $*"; }
 # json_field <json> <field> <fallback>
 json_field(){ printf '%s' "$1" | node -e "let d=\"\";process.stdin.on(\"data\",c=>d+=c).on(\"end\",()=>{try{const v=JSON.parse(d)[\"$2\"];console.log(v===undefined?\"$3\":v)}catch{console.log(\"$3\")}})" 2>/dev/null || echo "$3"; }
 health_field(){ json_field "$(curl -s --max-time 5 http://localhost:3001/api/health || true)" "$1" "$2"; }
+# wait_for_mode <tries>: polls /api/health for runMode; prints it (empty if none).
+# Each try is a 5s curl timeout + 2s sleep, so 30 tries is up to ~3.5 minutes.
+wait_for_mode(){ local m="" i; for i in $(seq 1 "$1"); do m=$(health_field runMode ""); [ -n "$m" ] && break; sleep 2; done; printf '%s' "$m"; }
 # Unknown (server down / health 500) is not "zero scans": wait through a
 # transient blip, but a server that cannot answer for 30s has nothing to
 # drain — a crash-looping box must not hold a hotfix for five minutes.
@@ -44,12 +47,7 @@ pm2 save >/dev/null 2>&1 || true   # persist the (possibly repaired) env so a VM
 # The server must come up in PRODUCTION mode (NODE_ENV=production from
 # ecosystem.config.cjs). In local mode it sends no mail and runs no jobs, so a
 # process started with a bare "pm2 start server.js" would silently go quiet.
-MODE=""
-for i in $(seq 1 30); do   # up to ~3.5 min worst case (2s sleep + 5s curl timeout per try)
-  MODE=$(health_field runMode "")
-  [ -n "$MODE" ] && break
-  sleep 2
-done
+MODE=$(wait_for_mode 30)
 H=$(curl -s --max-time 8 http://localhost:3001/api/health || true)
 log "done. status: $(json_field "$H" status unknown) connectivity: $(json_field "$H" connectivity unknown) activeScans: $(json_field "$H" activeScans '?')"
 log "run mode: ${MODE:-unknown}"
@@ -64,12 +62,7 @@ if [ -n "$MODE" ] && [ "$MODE" != "production" ]; then
   pm2 delete testpilot >/dev/null 2>&1 || true
   pm2 start ecosystem.config.cjs --only testpilot >/dev/null 2>&1 || true
   pm2 save >/dev/null 2>&1 || true
-  MODE=""
-  for i in $(seq 1 30); do
-    MODE=$(health_field runMode "")
-    [ -n "$MODE" ] && break
-    sleep 2
-  done
+  MODE=$(wait_for_mode 30)
   log "run mode after repair: ${MODE:-unknown}"
   if [ "$MODE" != "production" ]; then
     log "ERROR: still not in production mode after recreating the process — check pm2 logs and ecosystem.config.cjs"

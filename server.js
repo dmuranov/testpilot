@@ -781,6 +781,13 @@ async function createOrGetUser(email) {
   const existing = await getUserByEmail(email);
   if (existing) return existing;
   if (!SUPABASE_URL) return null;
+  // A local run must never create a production users row for a real person:
+  // production's own stall sweep would mail them later. Every entry point
+  // (funnel, learn, login) creates users here, so the rule lives here. Test
+  // identities (@example.*, TESTPILOT_TESTER_EMAILS, the admin) are fine.
+  if (RUN_MODE.local && !isInternalAddress(email)) {
+    throw new Error(`local run: refusing to create a users row for ${email} — use an @example.com address or one listed in TESTPILOT_TESTER_EMAILS`);
+  }
   try {
     const rows = await supabase('POST', 'users', {
       email,

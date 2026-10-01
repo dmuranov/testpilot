@@ -46,6 +46,11 @@ test('pm2 on the production path counts as production even without NODE_ENV (fir
   assert.equal(runMode({ pm_id: '0', name: 'testpilot' }, '/home/dev/testpilot').isProd, false);
   assert.equal(runMode({}, '/home/azureuser/testpilot').isProd, false);
   assert.equal(runMode({ pm_id: '1', name: 'tp-experiment' }, '/home/azureuser/testpilot').isProd, false);
+  // a sibling checkout whose path merely starts the same is not production; a sub-path is
+  assert.equal(runMode({ pm_id: '0', name: 'testpilot' }, '/home/azureuser/testpilot-staging').isProd, false);
+  assert.equal(runMode({ pm_id: '0', name: 'testpilot' }, '/home/azureuser/testpilot/').isProd, true);
+  // pm2 without an injected name still counts (older pm2)
+  assert.equal(runMode({ pm_id: '0' }, '/home/azureuser/testpilot').isProd, true);
   // TESTPILOT_LOCAL still wins on the box, but the box is still "the production box" for log hygiene
   const forced = runMode({ pm_id: '0', name: 'testpilot', TESTPILOT_LOCAL: '1' }, '/home/azureuser/testpilot');
   assert.equal(forced.isProd, false);
