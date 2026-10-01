@@ -3086,15 +3086,25 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
     const formStillVisible = await page.locator(LOGIN_FORM_SELECTOR).first().isVisible({ timeout: 2500 }).catch(() => false);
 
     if (formStillVisible) {
-      if (hasError) {
-        const oauthVisible = await hasOAuthSignIn(page);
-        if (oauthVisible && ctx.runId && typeof ctx.emit === 'function') {
+      // OAuth buttons on the page decide the story, with or without an error
+      // text. This used to be gated on hasError, so a Base44 app (2026-09-30)
+      // whose form simply stayed put — standard #email/#password/"Sign in"
+      // all matched and were used, no error string detected within 3s — got
+      // the vague "credentials wrong or field not recognised" line, and the
+      // live-view takeover offer never fired. The user had four social-login
+      // buttons on screen and almost certainly no password at all.
+      const oauthVisible = await hasOAuthSignIn(page);
+      if (oauthVisible) {
+        if (ctx.runId && typeof ctx.emit === 'function') {
           const handoffResult = await tryOAuthHandoff(page, ctx);
           if (handoffResult) return handoffResult;
         }
-        return { success: false, screenshot: afterScreenshot, error: oauthVisible
+        return { success: false, screenshot: afterScreenshot, error: hasError
           ? 'Login failed — the app showed an error and the sign-in form is still on screen. This account most likely has NO PASSWORD at all: this page also offers "Sign in with Google" (or similar), and apps show the exact same "invalid credentials" message whether the password is wrong OR the account was only ever created through that button, which never sets a password on the backend. If so, no password will ever work here — this app needs to be tested with a pre-authenticated session instead of email/password (see TestPilot support for the no-terminal way to do this).'
-          : 'Login failed — the app showed an error and the sign-in form is still on screen. Check the credentials for this app.' };
+          : `Login did not take — the sign-in form is still on screen after submitting (still at ${newUrl}), and this page also offers "Continue with Google" (or similar). If you normally sign in to this app with one of those buttons, the account has NO PASSWORD and no password will ever work here. Use "bring your own session" (Advanced, in the dashboard) so TestPilot can run with a session you have already signed into.` };
+      }
+      if (hasError) {
+        return { success: false, screenshot: afterScreenshot, error: 'Login failed — the app showed an error and the sign-in form is still on screen. Check the credentials for this app.' };
       }
       return { success: false, screenshot: afterScreenshot, error: `Login did not take — the sign-in form is still on screen after submitting (still at ${newUrl}). Either the credentials are wrong, or the username/email field on this app was not recognised. If it signs in with a magic link or SSO popup, capture a session in your browser and use "bring your own session".` };
     }
