@@ -2995,7 +2995,13 @@ function nextStepFor({ stage, cause, error = '', handoffOffered = false, handoff
   const ask = { id: 'ask', label: 'Ask TestPilot for help' };
   const session = { id: 'use_session', label: 'Use a signed-in session instead' };
   const takeover = { id: 'take_over_retry', label: 'Run again and sign in yourself' };
-  if (/manual login did not complete|takeover was cancelled/i.test(e)) {
+  if (/session is expired or invalid/i.test(e)) {
+    return { title: 'Your saved session has expired', text: 'This run used a session you captured earlier and the app no longer accepts it. Capture a fresh one from your own browser and run again — nothing else needs to change.', actions: [{ id: 'use_session', label: 'Capture a fresh session' }, ask] };
+  }
+  if (cause === 'login_vision' && /could not find a login form|no email[/]password field/i.test(e)) {
+    return { title: 'TestPilot could not find a sign-in form', text: 'The entry page shows a Sign in control but no email/password form that TestPilot could use. If the app really is public, tick "No login required". If it signs in through a popup or a magic link, use a signed-in session.', actions: [{ id: 'no_login', label: 'It is public — no login' }, session, ask] };
+  }
+  if (handoffAttempted || /manual login did not complete|takeover was cancelled/i.test(e)) {
     return { title: 'Your manual sign-in did not complete', text: 'The app still showed its sign-in form after you handed control back. The most reliable way through is a session you have already signed into: capture one from your own browser and TestPilot runs with it.', actions: [session, ask] };
   }
   if (/NO PASSWORD|Sign in with Google|Continue with Google|OAuth/i.test(e)) {
@@ -3008,9 +3014,6 @@ function nextStepFor({ stage, cause, error = '', handoffOffered = false, handoff
     return { title: 'A verification step did not get an answer in time', text: 'The app asked for a code or a confirmation and nobody answered. Run again and watch for the prompt — TestPilot pauses and waits for you.', actions: [{ id: 'retry', label: 'Run again' }, session, ask] };
   }
   if (cause === 'login_vision') {
-    if (/could not find a login form|no email[/]password field/i.test(e)) {
-      return { title: 'TestPilot could not find a sign-in form', text: 'The entry page shows a Sign in control but no email/password form that TestPilot could use. If the app really is public, tick "No login required". If it signs in through a popup or a magic link, use a signed-in session.', actions: [{ id: 'no_login', label: 'It is public — no login' }, session, ask] };
-    }
     return { title: 'TestPilot could not drive this sign-in form', text: 'The fields or the button on this login page are not ones TestPilot recognises. This is on us, not your password. Sign in yourself once in the live view and TestPilot takes it from there.', actions: [takeover, session, ask] };
   }
   if (cause === 'nav_timeout' || /could not reach|unreachable|ERR_NAME|net::/i.test(e)) {
@@ -13559,20 +13562,25 @@ Respond in plain text, no markdown.` }]
 // next-step card). It explains and points at the next click; it never
 // promises a fix. When the model judges it a product problem, a support
 // ticket goes to the admin with the diagnosis already written.
+const askBuckets = new Map(); // email -> [timestamps] for /api/support/ask
 app.post('/api/support/ask', async (req, res) => {
   const user = requireUser(req, res);
   if (!user) return;
-  const rate = checkMagicLinkRate(`ask:${user.email}`, 3600_000, 20);
-  if (!rate.allowed) return res.status(429).json({ error: 'Too many questions in the last hour — reply to the support email instead.' });
-  if (user.plan === 'free' && isFreeBudgetExceeded()) return res.status(429).json({ error: 'Free help is paused for today — reply to the support email instead.' });
   const { question = '', context = {} } = req.body || {};
   const q = String(question).slice(0, 2000).trim();
+  if (!q && !(context && context.error)) return res.status(400).json({ error: 'Nothing to answer' });
+  // 20 questions per user per hour. Own buckets: the shared magic-link buckets
+  // are pruned to a ten-minute window, which would make this 20 per 10 min.
+  const now = Date.now(), hour = 3600_000;
+  const times = (askBuckets.get(user.email) || []).filter((t) => now - t < hour);
+  if (times.length >= 20) return res.status(429).json({ error: 'Too many questions in the last hour — reply to the support email instead.' });
+  if (user.plan === 'free' && isFreeBudgetExceeded()) return res.status(429).json({ error: 'Free help is paused for today — reply to the support email instead.' });
+  times.push(now); askBuckets.set(user.email, times);
   const ctx = {
     stage: String(context.stage || ''), appUrl: String(context.appUrl || '').slice(0, 300), cause: String(context.cause || ''),
     error: String(context.error || '').slice(0, 1200), next: context.next && typeof context.next === 'object' ? { title: String(context.next.title || ''), text: String(context.next.text || '') } : null,
     steps: Array.isArray(context.steps) ? context.steps.slice(-10).map((s) => String(s).slice(0, 200)) : [],
   };
-  if (!q && !ctx.error) return res.status(400).json({ error: 'Nothing to answer' });
   try {
     const client = getClient(process.env.ANTHROPIC_SUPPORT_KEY);
     const r = await client.messages.create({
