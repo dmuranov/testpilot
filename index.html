@@ -2164,6 +2164,28 @@ function maskKey(key) {
   return key.substring(0, 7) + '•••' + key.substring(key.length - 4);
 }
 
+// Features with no free run: the menu badge and the page note say "needs your
+// key" up front, so a free user is not sent to a form that cannot run.
+// Free-run arithmetic in one place. free_runs_left comes from /api/auth/me
+// when the account has an allowance of more than one run; otherwise the
+// single run is "left" until free_run_used is set.
+function freeRunsLeft() {
+  if (!currentUser || (currentUser.plan && currentUser.plan !== 'free')) return 0;
+  if (typeof currentUser.free_runs_left === 'number') return currentUser.free_runs_left;
+  return currentUser.free_run_used ? 0 : 1;
+}
+function isFreeRunAvailable() { return freeRunsLeft() > 0; }
+function keyBadge() {
+  if (hasApiKey()) return '';
+  return '<span title="Runs on your own Claude API key — no free run for this one" style="font-size:9px;font-weight:700;background:rgba(251,191,36,0.1);color:#f59e0b;border:1px dashed rgba(251,191,36,0.4);border-radius:2px;padding:1px 5px;margin-left:4px">🔑 needs key</span>';
+}
+function keyNote(what) {
+  if (hasApiKey()) return '';
+  return `<div style="max-width:620px;margin:0 0 16px;padding:12px 14px;border:1px solid rgba(251,191,36,0.35);background:rgba(251,191,36,0.06);border-radius:4px;font-size:12.5px;line-height:1.6;color:var(--text-dim)">
+      🔑 <strong style="color:var(--text)">${what} runs on your own Claude API key</strong> — there is no free run for it. Paste your key in the sidebar (bottom left, "Claude API Key"); get one at <a href="https://console.anthropic.com" target="_blank" rel="noopener" style="color:#f59e0b">console.anthropic.com</a>.
+      ${(!currentUser?.plan || currentUser?.plan === 'free') ? 'Your free run works on Flow Test, Security Test, Check Everything, Checkout &amp; Booking and Multi-Role.' : ''}
+    </div>`;
+}
 function hasApiKey() {
   return getApiKey().length > 10;
 }
@@ -2279,7 +2301,26 @@ function toggleTestingNav() {
   render();
 }
 
+// A render() while the mouse button is down replaces the element under the
+// pointer, and the browser then drops the click (mousedown and mouseup must
+// land on the same node). change events fire on blur — i.e. the moment the
+// user clicks somewhere else — and several change handlers re-render, so the
+// click that follows editing a field could vanish. Hold the render until the
+// pointer is released; a release that never arrives (pointer left the window)
+// is covered by the timer.
+let _pointerHeld = false, _renderWhenReleased = false, _pointerTimer = null;
+function _pointerRelease() {
+  _pointerHeld = false;
+  clearTimeout(_pointerTimer); _pointerTimer = null;
+  if (_renderWhenReleased) { _renderWhenReleased = false; setTimeout(render, 0); }
+}
+document.addEventListener('pointerdown', () => { _pointerHeld = true; clearTimeout(_pointerTimer); _pointerTimer = setTimeout(_pointerRelease, 1500); }, true);
+document.addEventListener('pointerup', _pointerRelease, true);
+document.addEventListener('pointercancel', _pointerRelease, true);
+
 function render() {
+  if (_pointerHeld) { _renderWhenReleased = true; return; }
+  if (window.tpFieldHints) tpFieldHints.hide(); // a hint belongs to the field it was shown for, and that field is about to be replaced
   const testingNavOpen = isTestingNavOpen();
   document.getElementById('app').innerHTML = `
     <button class="hamburger" onclick="toggleSidebar()">☰</button>
@@ -2334,7 +2375,7 @@ function render() {
         </button>
         <button class="nav-btn ${state.view === 'chat' ? 'active' : ''}" onclick="gatedNavigate('chat', 'interactive')" data-tooltip="Control your app live through natural language. Type commands like 'Go to Clients, create Ivan Fernandez' and watch TestPilot execute them in real time.">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-          Interactive Test <span style="font-size:9px;font-weight:700;background:${hasFeature('interactive') ? 'rgba(251,191,36,0.15)' : 'rgba(239,68,68,0.1)'};color:${hasFeature('interactive') ? '#f59e0b' : '#ef4444'};border:1px solid ${hasFeature('interactive') ? 'rgba(251,191,36,0.3)' : 'rgba(239,68,68,0.3)'};border-radius:2px;padding:1px 5px;margin-left:4px">${hasFeature('interactive') ? 'BETA' : '🔒 Starter'}</span>
+          Interactive Test <span style="font-size:9px;font-weight:700;background:${hasFeature('interactive') ? 'rgba(251,191,36,0.15)' : 'rgba(239,68,68,0.1)'};color:${hasFeature('interactive') ? '#f59e0b' : '#ef4444'};border:1px solid ${hasFeature('interactive') ? 'rgba(251,191,36,0.3)' : 'rgba(239,68,68,0.3)'};border-radius:2px;padding:1px 5px;margin-left:4px">${hasFeature('interactive') ? 'BETA' : '🔒 Starter'}</span>${hasFeature('interactive') ? keyBadge() : ''}
         </button>
         <button class="nav-btn ${state.view === 'multirole' ? 'active' : ''}" onclick="gatedNavigate('multirole', 'multirole')" data-tooltip="Run the same app with multiple user roles sequentially. E.g. Admin creates a job, Contractor sees and accepts it — all in one automated test run.">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
@@ -2352,11 +2393,11 @@ function render() {
         </button>
         <button class="nav-btn ${state.view === 'widget' ? 'active' : ''}" onclick="navigate('widget')" data-tooltip="Embed a one-line 'Test' button in your own app. You or your team members can run TestPilot on the live page. Runs on your own Anthropic key — your secret key never touches the browser.">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 17l6-6-6-6"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-          Widget <span style="font-size:9px;font-weight:700;background:rgba(251,191,36,0.15);color:#f59e0b;border:1px solid rgba(251,191,36,0.3);border-radius:2px;padding:1px 5px;margin-left:4px">BETA</span>
+          Widget <span style="font-size:9px;font-weight:700;background:rgba(251,191,36,0.15);color:#f59e0b;border:1px solid rgba(251,191,36,0.3);border-radius:2px;padding:1px 5px;margin-left:4px">BETA</span>${keyBadge()}
         </button>
         <button class="nav-btn ${state.view === 'schedules' ? 'active' : ''}" onclick="navigate('schedules')" data-tooltip="Re-run a scenario on a schedule (daily/weekly). TestPilot emails you the moment something that used to pass starts failing — catching regressions from your own changes AND silent platform updates before your users do.">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><polyline points="9 15 11 17 15 13"/></svg>
-          Scheduled Runs <span style="font-size:9px;font-weight:700;background:rgba(251,191,36,0.15);color:#f59e0b;border:1px solid rgba(251,191,36,0.3);border-radius:2px;padding:1px 5px;margin-left:4px">BETA</span>
+          Scheduled Runs <span style="font-size:9px;font-weight:700;background:rgba(251,191,36,0.15);color:#f59e0b;border:1px solid rgba(251,191,36,0.3);border-radius:2px;padding:1px 5px;margin-left:4px">BETA</span>${keyBadge()}
         </button>
         <button class="nav-btn ${state.view === 'history' ? 'active' : ''}" onclick="navigate('history')" data-tooltip="Full history of all test runs — status, bugs found, steps completed. Click any test to see the full step-by-step log with screenshots.">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
@@ -2389,7 +2430,7 @@ function render() {
             <button class="btn btn-ghost btn-sm" style="font-size:10px;padding:3px 8px" onclick="setApiKey('');render()">Change</button>
           </div>
         ` : `
-          <input class="form-input" style="font-size:11px;padding:6px 8px;color:var(--text);background:var(--bg-hover);border-color:${state.apiKeyError ? '#ef4444' : 'rgba(251,191,36,0.3)'}" placeholder="sk-ant-..." id="sidebar-api-key" ${state.apiKeyVerifying ? 'disabled' : ''} onchange="verifyAndSetApiKey(this.value)" />
+          <input class="form-input" style="font-size:11px;padding:6px 8px;color:var(--text);background:var(--bg-hover);border-color:${state.apiKeyError ? '#ef4444' : 'rgba(251,191,36,0.3)'}" placeholder="sk-ant-..." id="sidebar-api-key" autocomplete="off" ${state.apiKeyVerifying ? 'disabled' : ''} onchange="verifyAndSetApiKey(this.value)" />
           ${state.apiKeyVerifying ? `<div style="font-size:10px;color:#f59e0b;margin-top:6px;font-family:'DM Mono',monospace">⟳ Validating with Anthropic…</div>` : ''}
           ${state.apiKeyError ? `<div style="font-size:10px;color:#ef4444;margin-top:6px;font-family:'DM Mono',monospace;line-height:1.4">⚠ ${escapeHtml(state.apiKeyError)}</div>` : ''}
           <p style="font-size:10px;color:var(--text-muted);margin-top:6px;font-family:'DM Mono',monospace;line-height:1.5">Need a key? <a href="https://console.anthropic.com" target="_blank" style="color:#f59e0b;text-decoration:none">console.anthropic.com →</a></p>
@@ -2531,6 +2572,7 @@ function renderWidget() {
       </ul>
     </div>
 
+    ${hasApiKey() ? '' : `<div style="max-width:620px;margin:18px 0 0;padding:12px 14px;border:1px solid rgba(251,191,36,0.35);background:rgba(251,191,36,0.06);border-radius:4px;font-size:12.5px;line-height:1.6;color:var(--text-dim)">🔑 <strong style="color:var(--text)">The widget runs on your own Anthropic key</strong> — there is no free run for it. Paste the key in the form below (it is stored encrypted on the server, not in this browser).</div>`}
     <!-- ── CONNECT FORM ── -->
     <div class="card" style="max-width:620px;margin-top:18px">
       <div class="card-title" style="margin-bottom:16px">Connect an app</div>
@@ -2668,6 +2710,7 @@ function renderSchedules() {
         <button class="btn btn-primary" onclick="navigate('learn')">Learn an App</button>
       </div>
     ` : `
+    ${keyNote('A scheduled run')}
     <!-- ── CREATE FORM ── -->
     <div class="card" style="max-width:640px">
       <div class="card-title" style="margin-bottom:16px">New schedule</div>
@@ -3387,6 +3430,7 @@ function renderChat() {
 
     return `
       <div class="page-header"><h2>Interactive Test</h2></div>
+      ${keyNote('Interactive Test')}
       <div class="card" style="max-width:480px">
         <div class="card-title" style="margin-bottom:16px">Start a Session</div>
         <div class="form-group">
@@ -3526,11 +3570,11 @@ function renderMultiRole() {
           <div style="display:flex;gap:10px;margin-bottom:10px">
             <div class="form-group" style="flex:1;margin-bottom:0">
               <label>Email</label>
-              <input class="form-input" value="${escapeHtml(role.email)}" placeholder="user@app.com" onchange="mrSetRole(${i},'email',this.value)" />
+              <input class="form-input" value="${escapeHtml(role.email)}" placeholder="user@app.com" autocomplete="off" onchange="mrSetRole(${i},'email',this.value)" />
             </div>
             <div class="form-group" style="flex:1;margin-bottom:0">
               <label>Password</label>
-              <input class="form-input" type="password" value="${escapeHtml(role.password)}" placeholder="••••" onchange="mrSetRole(${i},'password',this.value)" />
+              <input class="form-input" type="password" value="${escapeHtml(role.password)}" placeholder="••••" autocomplete="new-password" onchange="mrSetRole(${i},'password',this.value)" />
             </div>
           </div>
           <div class="form-group" style="margin-bottom:0">
@@ -3542,6 +3586,8 @@ function renderMultiRole() {
 
       ${cfg.roles.length < 3 ? `<button class="btn btn-ghost btn-sm" onclick="mrAddRole()" style="margin-bottom:16px">+ Add Role (${cfg.roles.length}/3)</button>` : ''}
 
+      ${state.multiRoleError ? `<div style="margin-bottom:12px;padding:10px 12px;border:1px solid rgba(239,68,68,0.4);background:rgba(239,68,68,0.06);border-radius:4px;font-size:12.5px;line-height:1.6;color:var(--text)">⚠ ${escapeHtml(state.multiRoleError)}</div>` : ''}
+      ${(!hasApiKey() && isFreeRunAvailable()) ? `<div style="margin-bottom:12px;padding:10px 12px;border:1px solid rgba(200,240,64,0.3);background:rgba(200,240,64,0.05);border-radius:4px;font-size:12.5px;line-height:1.6;color:var(--text-dim)">🎁 On the free plan each role is one free run — you have <strong style="color:var(--text)">${freeRunsLeft()}</strong> left.</div>` : ''}
       <button class="btn btn-primary" onclick="runMultiRole()" style="width:100%;justify-content:center" ${state.multiRoleLoading ? 'disabled' : ''}>
         ${state.multiRoleLoading ? '<span class="loader"></span> Starting...' : '▶ Run Multi-Role Test'}
       </button>
@@ -3580,10 +3626,19 @@ async function runMultiRole() {
 
   const cfg = state.multiRoleConfig;
   if (!cfg?.appId) { tpToast('Select an app first'); return; }
-  if (!hasApiKey()) { tpToast('Add your Claude API key in the sidebar first'); return; }
 
   const validRoles = cfg.roles.filter(r => r.email && r.password && r.scenario.trim());
   if (validRoles.length < 2) { tpToast('At least 2 roles need email, password and scenario'); return; }
+
+  // Free plan: each role is one run on the support key (one /api/test call per
+  // role), so the whole sequence needs as many free runs as there are roles.
+  const mrFree = isFreeRunAvailable() && !hasApiKey();
+  if (mrFree && freeRunsLeft() < validRoles.length) {
+    state.multiRoleError = `Multi-Role uses one free run per role: this sequence needs ${validRoles.length}, you have ${freeRunsLeft()} left. Add your Claude API key in the sidebar to run it on your own key.`;
+    render(); return;
+  }
+  if (!mrFree && !hasApiKey()) { state.multiRoleError = 'Multi-Role needs your Claude API key in the sidebar (bottom left) — your free run is used up.'; render(); return; }
+  state.multiRoleError = null;
 
   // Run lifecycle. runId lets the loop detect cancellation (cancelMultiRole
   // bumps the id) without relying on a mutable boolean that the loop body
@@ -3637,7 +3692,9 @@ async function runMultiRole() {
           scenario: role.scenario,
           email: role.email,
           password: role.password,
-          apiKey: getApiKey()
+          apiKey: getApiKey(),
+          freeRun: mrFree,
+          userEmail: currentUser?.email
         }),
         signal: abortCtl.signal,
       });
@@ -3810,8 +3867,8 @@ function showCaptureLoginForm(appId) {
   box.innerHTML = `
     <div style="font-weight:600;margin-bottom:10px">Save a login for this app</div>
     <div class="form-group"><label>Role label</label><input class="form-input" id="cap-role" placeholder="e.g. Owner, Free user" /></div>
-    <div class="form-group"><label>Login email</label><input class="form-input" id="cap-email" placeholder="user@app.com" /></div>
-    <div class="form-group"><label>Password</label><input class="form-input" type="password" id="cap-password" placeholder="leave blank for Google-only — you'll take over live" /></div>
+    <div class="form-group"><label>Login email</label><input class="form-input" id="cap-email" placeholder="user@app.com" autocomplete="off" /></div>
+    <div class="form-group"><label>Password</label><input class="form-input" type="password" id="cap-password" autocomplete="new-password" placeholder="leave blank for Google-only — you'll take over live" /></div>
     <div style="display:flex;gap:8px;margin-top:12px">
       <button class="btn btn-primary" id="cap-start">Capture</button>
       <button class="btn btn-ghost" id="cap-cancel">Cancel</button>
@@ -8208,7 +8265,7 @@ function maybeStartLearnTour() {
 <!-- APP READY — shown the moment a crawl finishes. The crawl used to end
      silently: the view just swapped to the platform map, so users had no
      signal the app was ready or that picking a test was now their move. -->
-<div id="app-ready-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:10000;align-items:center;justify-content:center;padding:20px">
+<div id="app-ready-overlay" onclick="if (event.target === this) closeAppReady()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:10000;align-items:center;justify-content:center;padding:20px">
   <div style="background:#111;border:1px solid rgba(200,240,64,0.2);max-width:480px;width:100%;border-radius:4px;overflow:hidden">
     <div style="background:#0f0f0f;border-bottom:1px solid rgba(200,240,64,0.1);padding:18px 24px;display:flex;align-items:center;justify-content:space-between">
       <div id="app-ready-title" style="font-family:'Syne',sans-serif;font-size:16px;font-weight:800;color:#f4f2ee">Your app is <span style="color:#c8f040">ready to test</span></div>
