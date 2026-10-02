@@ -7885,7 +7885,16 @@ What is your first action?`,
         // other way round — see CHECKOUT_URL_HINT_RE's comment.
         const onPaymentUrl = (() => { try { return CHECKOUT_URL_HINT_RE.test(new URL(page.url()).pathname); } catch { return false; } })();
         const looksSafe = SAFE_NONCOMMIT_CLICK_RE.test(targetText);
-        if (textSaysCommit || (onPaymentUrl && !looksSafe)) {
+        // On booking sites the FIRST "Book now" / "Reserve" is the entry into
+        // the flow (a room card), not the commit. Seen live 2026-10-02: the run
+        // stopped at step 1 on a listing page and reported the booking flow as
+        // verified. Booking-entry words count as the final step only once the
+        // run has filled in details or is on a payment URL. Payment words
+        // (pay now, place order, complete purchase…) still stop immediately.
+        const bookingEntryWord = /^\s*(book( now)?|reserve( now)?|book (this|a) room|reserve (this|a) room)\s*$/i.test(targetText);
+        const detailsEntered = result.steps.some((s) => s.status === 'pass' && (s.action === 'fill' || s.action === 'fill_form'));
+        const entryClick = textSaysCommit && bookingEntryWord && !detailsEntered && !onPaymentUrl;
+        if (!entryClick && (textSaysCommit || (onPaymentUrl && !looksSafe))) {
           result.reachedPaymentStep = true;
           // Scope the claim precisely, in the artifact itself — not just
           // something the presenter has to remember to caveat out loud. This
@@ -9255,7 +9264,12 @@ RESPOND ONLY JSON: {"confirmed":true,"actual":"the visible failure, plainly","de
           // page, and the final commit control visible. Any one alone is too
           // broad (a reviews page says "Total: 12 reviews"; the address step
           // shows an order-summary sidebar with no commit button yet).
-          if (ORDER_OVERVIEW_URL_RE.test(u.pathname) || CHECKOUT_URL_HINT_RE.test(u.pathname)) {
+          // A booking page (/reservation/1, /booking/…) counts once guest
+          // details are in — the same page carries the form, the price summary
+          // and the final "Reserve Now" (seen live 2026-10-02).
+          const onBookingPage = /\/(reservations?|bookings?)(\/|$)/i.test(u.pathname)
+            && result.steps.some((s) => s.status === 'pass' && (s.action === 'fill' || s.action === 'fill_form'));
+          if (ORDER_OVERVIEW_URL_RE.test(u.pathname) || CHECKOUT_URL_HINT_RE.test(u.pathname) || onBookingPage) {
             // rendered text only (textContent would hand back inline scripts first)
             const txt = (await page.evaluate(() => document.body?.innerText || '').catch(() => '') || '').slice(0, 8000);
             const commitVisible = ORDER_OVERVIEW_TEXT_RE.test(txt) && await page.$$eval('button, a, input[type="submit"]', (els, src) => {
