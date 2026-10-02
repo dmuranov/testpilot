@@ -2852,6 +2852,9 @@ function renderLearn() {
               </div>
             `).join('')}
           </div>
+          ${(() => { const last = state.learnProgress[state.learnProgress.length - 1]; return (last && last.phase === 'error' && last.next)
+            ? renderNextStepCard(last.next, { stage: 'crawl', appUrl: document.getElementById('learn-url')?.value || '', cause: last.cause || '', error: last.message || '', steps: state.learnProgress.map(p => p.message).filter(Boolean), view: 'learn' })
+            : ''; })()}
         </div>
       ` : ''}
     </div>`;
@@ -3204,6 +3207,7 @@ function renderTestDetail() {
       </div>
     </div>
 
+    ${test.nextStep ? renderNextStepCard(test.nextStep, { stage: 'test', appId: test.appId, appUrl: test.appUrl || '', cause: test.blockedReason?.cause || '', error: test.steps?.[0]?.outcome || test.blockedReason?.description || '', steps: (test.steps || []).map(s => `${s.action}: ${s.outcome}`), view: 'scenario' }) : ''}
     ${test.summary?.completionNote ? `
     <div class="card" style="border-left:3px solid var(--text-muted);font-size:13px;line-height:1.6;color:var(--text)">🛡️ ${escapeHtml(test.summary.completionNote)}</div>` : ''}
 
@@ -7410,6 +7414,82 @@ function closeWelcome() {
   if (el) el.style.display = 'none';
   if (currentUser?.email) {
     localStorage.setItem('tp_welcome_seen_' + currentUser.email, '1');
+  }
+}
+
+// ── Tier 1: "What to do next" card for a failed run, with one-click actions.
+// ctx: { stage: 'crawl'|'test', appId, appUrl, cause, error, steps, view }
+function renderNextStepCard(next, ctx) {
+  if (!next || !next.title) return '';
+  const c = encodeURIComponent(JSON.stringify(Object.assign({}, ctx, { next: { title: next.title, text: next.text } })));
+  const btn = (a, i) => `<button class="btn ${i === 0 ? 'btn-primary' : 'btn-ghost'} btn-sm" onclick="nextStepAction('${a.id}', '${c}')">${escapeHtml(a.label)}</button>`;
+  return `
+    <div class="card" style="border-left:3px solid var(--accent);margin-top:12px">
+      <div class="card-title" style="margin-bottom:6px">🧭 What to do next</div>
+      <div style="font-size:14px;font-weight:600;margin-bottom:6px">${escapeHtml(next.title)}</div>
+      <div style="font-size:13px;line-height:1.6;color:var(--text);margin-bottom:12px">${escapeHtml(next.text || '')}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px">${(next.actions || []).map(btn).join('')}</div>
+    </div>`;
+}
+function nextStepAction(id, encoded) {
+  let ctx = {}; try { ctx = JSON.parse(decodeURIComponent(encoded)); } catch {}
+  const formView = ctx.stage === 'crawl' ? 'learn' : (ctx.view || 'scenario');
+  const after = (fn) => setTimeout(fn, 80);
+  switch (id) {
+    case 'take_over_retry':
+    case 'retry':
+    case 'fix_credentials':
+      navigate(formView);
+      after(() => {
+        const pw = document.getElementById(ctx.stage === 'crawl' ? 'learn-password' : 'test-password');
+        if (id === 'fix_credentials' && pw) { pw.focus(); pw.select?.(); }
+        tpToast(id === 'take_over_retry' ? 'Run again — when "Take over & log in myself" appears, click it and sign in once.' : id === 'fix_credentials' ? 'Enter a test login that works on your app, then run again.' : 'Run again and watch for the prompt.');
+      });
+      return;
+    case 'use_session':
+      if (ctx.stage === 'crawl' || !ctx.appId) {
+        navigate('learn');
+        after(() => { const ta = document.getElementById('learn-session-state'); const d = ta?.closest('details'); if (d) d.open = true; ta?.scrollIntoView({ block: 'center' }); ta?.focus(); });
+      } else {
+        navigate(formView);
+        after(() => { try { showCaptureLoginForm(ctx.appId); } catch { tpToast('Open "+ Capture new role" to sign in once and reuse that session.'); } });
+      }
+      return;
+    case 'no_login':
+      navigate('learn');
+      after(() => { const cb = document.getElementById('learn-no-login'); if (cb && !cb.checked) { cb.checked = true; cb.dispatchEvent(new Event('change')); } tpToast('"No login required" is ticked — start learning again.'); });
+      return;
+    case 'check_url':
+      navigate('learn');
+      after(() => { const u = document.getElementById('learn-url'); u?.focus(); u?.select?.(); });
+      return;
+    case 'ask':
+    default:
+      askTestPilot(ctx);
+  }
+}
+// ── Tier 2: the support overlay opens with the run attached and Claude answers first.
+async function askTestPilot(ctx) {
+  showSupportModal();
+  const overlay = document.getElementById('support-overlay');
+  const desc = overlay?.querySelector('#support-desc');
+  if (desc) desc.value = `[${ctx.stage === 'crawl' ? 'Learn' : 'Run'} failed on ${ctx.appUrl || 'my app'}] ${ctx.error ? ctx.error.slice(0, 300) : ''}\n\nWhat I expected: `;
+  let box = overlay?.querySelector('#support-ai-reply');
+  if (!box && overlay) {
+    box = document.createElement('div');
+    box.id = 'support-ai-reply';
+    box.style.cssText = 'margin:0 0 12px;padding:12px;border:1px solid var(--accent);border-radius:4px;font-size:13px;line-height:1.6;white-space:pre-wrap';
+    overlay.querySelector('#support-form-body')?.prepend(box);
+  }
+  if (!box) return;
+  box.textContent = 'Looking at your run…';
+  try {
+    const res = await fetch(`${API}/api/support/ask`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: '', context: { stage: ctx.stage, appUrl: ctx.appUrl, cause: ctx.cause, error: ctx.error, next: ctx.next, steps: ctx.steps || [] } }) });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) { box.textContent = d.error || 'The helper is not available right now — describe the problem below and a person will answer.'; return; }
+    box.textContent = '🤖 ' + d.reply + (d.escalated ? '\n\n(This has been passed to the team — add anything useful below and send.)' : '\n\nNot solved? Add what you expected below and send it to a person.');
+  } catch {
+    box.textContent = 'The helper is not available right now — describe the problem below and a person will answer.';
   }
 }
 

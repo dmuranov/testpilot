@@ -2986,6 +2986,42 @@ async function hasSignInAffordance(page) {
 // read or drive the form; login_credentials = what we were given did not get us
 // in; login_timeout = a human step did not arrive in time). Anything without
 // one is treated as a credentials outcome, the historical default.
+// Tier 1 of client help: the moment a run fails, the client sees WHY in one
+// sentence and the one or two things that will actually get them through —
+// not a paragraph of error text and a help email ten minutes later.
+// Actions are ids the dashboard knows how to perform (renderNextStepCard).
+function nextStepFor({ stage, cause, error = '', handoffOffered = false, handoffAttempted = false } = {}) {
+  const e = String(error || '');
+  const ask = { id: 'ask', label: 'Ask TestPilot for help' };
+  const session = { id: 'use_session', label: 'Use a signed-in session instead' };
+  const takeover = { id: 'take_over_retry', label: 'Run again and sign in yourself' };
+  if (/manual login did not complete|takeover was cancelled/i.test(e)) {
+    return { title: 'Your manual sign-in did not complete', text: 'The app still showed its sign-in form after you handed control back. The most reliable way through is a session you have already signed into: capture one from your own browser and TestPilot runs with it.', actions: [session, ask] };
+  }
+  if (/NO PASSWORD|Sign in with Google|Continue with Google|OAuth/i.test(e)) {
+    return { title: 'This account may have no password', text: 'The app offers Google/Microsoft-style sign-in. If you normally sign in that way, no password will ever work here. Sign in yourself once in the live view, or use a signed-in session — either one lets TestPilot carry on as you.', actions: [takeover, session, ask] };
+  }
+  if (/fresh, empty sign-in form|sent TestPilot back|bounced/i.test(e)) {
+    return { title: 'Your app accepted the login, then sent us back to sign-in', text: 'That is not a wrong password. The session was not kept when the app redirected, or the account is not allowed in yet. A session you have already signed into gets around it.', actions: [session, takeover, ask] };
+  }
+  if (cause === 'login_timeout') {
+    return { title: 'A verification step did not get an answer in time', text: 'The app asked for a code or a confirmation and nobody answered. Run again and watch for the prompt — TestPilot pauses and waits for you.', actions: [{ id: 'retry', label: 'Run again' }, session, ask] };
+  }
+  if (cause === 'login_vision') {
+    if (/could not find a login form|no email[/]password field/i.test(e)) {
+      return { title: 'TestPilot could not find a sign-in form', text: 'The entry page shows a Sign in control but no email/password form that TestPilot could use. If the app really is public, tick "No login required". If it signs in through a popup or a magic link, use a signed-in session.', actions: [{ id: 'no_login', label: 'It is public — no login' }, session, ask] };
+    }
+    return { title: 'TestPilot could not drive this sign-in form', text: 'The fields or the button on this login page are not ones TestPilot recognises. This is on us, not your password. Sign in yourself once in the live view and TestPilot takes it from there.', actions: [takeover, session, ask] };
+  }
+  if (cause === 'nav_timeout' || /could not reach|unreachable|ERR_NAME|net::/i.test(e)) {
+    return { title: 'We could not reach the app', text: 'The address did not answer. Check the URL (it must be reachable from the internet, not localhost), then try again.', actions: [{ id: 'check_url', label: 'Check the URL' }, ask] };
+  }
+  if (cause === 'login_credentials') {
+    return { title: 'Check the test login', text: 'The app did not let these credentials in. Use a test account that signs in with email and password on this exact app (not your TestPilot account), then run again. If it signs in another way, use a signed-in session.', actions: [{ id: 'fix_credentials', label: 'Fix the login and run again' }, session, ask] };
+  }
+  return { title: 'This run did not get through', text: 'Tell us what you expected and TestPilot will look at the run with you.', actions: [ask] };
+}
+
 function loginCauseOf(loginResult) {
   return loginResult.cause || 'login_credentials';
 }
@@ -7330,6 +7366,7 @@ async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey)
         description: `Not a bug in your app — TestPilot could not verify the login credentials given for this run. ${loginAttempts}: ${loginResult.error} ${loginAdvice}`,
       });
       result.steps.push({ step: 0, action: 'login', status: 'fail', outcome: loginResult.error, category: result.blockedReason.category });
+      result.nextStep = nextStepFor({ stage: 'test', cause: loginCause, error: loginResult.error, handoffOffered: loginResult.handoffOffered, handoffAttempted: loginResult.handoffAttempted });
       // findings (not just steps) is what renderTestDetail's "Couldn't verify"
       // panel reads — without this a login-blocked run showed 0 steps/0 bugs
       // and nothing else: no reasoning, no reference to the credentials it
@@ -10254,7 +10291,7 @@ app.post('/api/learn', watchOnboarding('crawl', (req) => ({ email: onboardingEma
     // A crawl that never succeeded must not keep the user's only free slot.
     await releaseFailedClaim(norm.normalized, ownerEmail);
     alertOnboardingIssue({ stage: 'crawl', email: ownerEmail, url, error: cfg ? cfg.friendly : e.message, code: e.category || 'tool_limitation', detail: cfg ? e.message : undefined });
-    res.write(`data: ${JSON.stringify({ phase: 'error', message: cfg ? cfg.friendly : e.message, category: e.category || 'tool_limitation' })}\n\n`);
+    res.write(`data: ${JSON.stringify({ phase: 'error', message: cfg ? cfg.friendly : e.message, category: e.category || 'tool_limitation', cause: e.failureCause || null, next: nextStepFor({ stage: 'crawl', cause: e.failureCause, error: e.message }) })}\n\n`);
   }
   res.end();
 });
@@ -13516,6 +13553,51 @@ Respond in plain text, no markdown.` }]
     res.status(500).json({ error: e.message });
   }
 }
+
+// Tier 2 of client help: "Ask TestPilot" from a failed run. The reply is
+// written by Claude with the run attached (cause, error, last steps, the
+// next-step card). It explains and points at the next click; it never
+// promises a fix. When the model judges it a product problem, a support
+// ticket goes to the admin with the diagnosis already written.
+app.post('/api/support/ask', async (req, res) => {
+  const user = requireUser(req, res);
+  if (!user) return;
+  const rate = checkMagicLinkRate(`ask:${user.email}`, 3600_000, 20);
+  if (!rate.allowed) return res.status(429).json({ error: 'Too many questions in the last hour — reply to the support email instead.' });
+  if (user.plan === 'free' && isFreeBudgetExceeded()) return res.status(429).json({ error: 'Free help is paused for today — reply to the support email instead.' });
+  const { question = '', context = {} } = req.body || {};
+  const q = String(question).slice(0, 2000).trim();
+  const ctx = {
+    stage: String(context.stage || ''), appUrl: String(context.appUrl || '').slice(0, 300), cause: String(context.cause || ''),
+    error: String(context.error || '').slice(0, 1200), next: context.next && typeof context.next === 'object' ? { title: String(context.next.title || ''), text: String(context.next.text || '') } : null,
+    steps: Array.isArray(context.steps) ? context.steps.slice(-10).map((s) => String(s).slice(0, 200)) : [],
+  };
+  if (!q && !ctx.error) return res.status(400).json({ error: 'Nothing to answer' });
+  try {
+    const client = getClient(process.env.ANTHROPIC_SUPPORT_KEY);
+    const r = await client.messages.create({
+      model: 'claude-sonnet-5',
+      max_tokens: 600,
+      system: `You are TestPilot's in-app helper. TestPilot is an AI tester for no-code web apps: it signs in to the client's app with a TEST login, learns it, and runs scenarios, security scans and click-checks. The person asking is a client whose run just failed. Answer in plain, friendly English, at most 120 words, no markdown. Say what went wrong in one sentence, then the exact next click(s) in TestPilot or in their app. The options that exist in TestPilot: run again; "Take over & log in myself" in the live view (offered when a login does not take); "Advanced — bring your own session" / "+ Capture new role" (run with a session they signed into); tick "No login required" for a public app; fix the test login (email+password on THEIR app, not their TestPilot account); check the app URL. Never invent features, never promise a fix or a timeline, never ask for their password. If the failure looks like a TestPilot defect rather than something they can change, say you have passed it to the team. End your reply with a final line exactly "ESCALATE: yes" if it looks like a TestPilot defect, otherwise "ESCALATE: no".`,
+      messages: [{ role: 'user', content: `Run context:\nstage: ${ctx.stage}\napp: ${ctx.appUrl}\ncause: ${ctx.cause}\nerror shown: ${ctx.error}\nnext-step card shown: ${ctx.next ? ctx.next.title + ' — ' + ctx.next.text : '(none)'}\nlast steps:\n${ctx.steps.join('\n') || '(none)'}\n\nClient's question: ${q || '(no question — they clicked Ask for help)'}` }],
+    });
+    const raw = (r.content || []).map((c) => c.text || '').join('').trim();
+    const escalate = /ESCALATE:\s*yes\s*$/i.test(raw);
+    const reply = raw.replace(/\n?\s*ESCALATE:\s*(yes|no)\s*$/i, '').trim();
+    if (escalate) {
+      mailer({
+        from: '"TestPilot Support" <hello@testpilotapp.dev>', to: SIGNUP_NOTIFY_EMAIL, replyTo: user.email,
+        subject: `🆘 Support (in-app ask): ${(q || ctx.error).replace(/\s+/g, ' ').slice(0, 60)}`,
+        html: `<div style="font-family:sans-serif;max-width:640px"><h2>In-app help escalated</h2><p><strong>From:</strong> ${escHtml(user.email)} (${escHtml(user.plan || 'free')} plan)</p><p><strong>App:</strong> ${escHtml(ctx.appUrl)} · <strong>stage:</strong> ${escHtml(ctx.stage)} · <strong>cause:</strong> ${escHtml(ctx.cause)}</p><h3>Error shown</h3><p style="background:#f5f5f5;padding:12px;white-space:pre-wrap">${escHtml(ctx.error)}</p><h3>Client asked</h3><p style="background:#f5f5f5;padding:12px;white-space:pre-wrap">${escHtml(q || '(clicked Ask for help)')}</p><h3>Reply given</h3><p style="background:#e8f5e9;padding:12px;white-space:pre-wrap">${escHtml(reply)}</p><h3>Last steps</h3><pre style="background:#f5f5f5;padding:12px;white-space:pre-wrap">${escHtml(ctx.steps.join('\n'))}</pre></div>`,
+      }).catch((e) => console.warn('[support/ask] escalation mail failed:', e.message));
+    }
+    console.log(`[support/ask] ${user.email} stage=${ctx.stage} cause=${ctx.cause} escalate=${escalate}`);
+    res.json({ reply, escalated: escalate });
+  } catch (e) {
+    console.warn('[support/ask] failed:', e.message);
+    res.status(502).json({ error: 'The helper is not available right now — send the request to support below and a person will answer.' });
+  }
+});
 
 app.post('/api/support', async (req, res) => {
   // Widget path: signal.js/support-widget.js post JSON, already parsed into
