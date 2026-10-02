@@ -341,6 +341,12 @@ async function runLearnStream({ url, userEmail, appEmail, appPw }) {
             }, 1300);
             return;
           }
+          if (ev.phase === 'error' && ev.next && ev.next.title) {
+            // Tier 1 on the first-run page: the same "what to do next" the
+            // dashboard shows, with the dashboard as the place to act on it.
+            appendStream('step-learn-stream', '🧭 ' + ev.next.title + ' — ' + (ev.next.text || ''), 'info');
+            appendStream('step-learn-stream', 'Open your dashboard to fix it and run again: ' + window.location.origin + '/app', 'info');
+          }
           if (ev.phase === 'error') {
             // A 200 response with an in-band error line is invisible to
             // signal.js's fetch wrapper — it already marked this call
