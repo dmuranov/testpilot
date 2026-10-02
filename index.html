@@ -2110,6 +2110,7 @@ function getApiKey() {
 }
 
 function setApiKey(key) {
+  state.multiRoleError = null; // a "needs key" refusal is answered by this
   if (key) {
     localStorage.setItem(_apiKeyName(), key.trim());
   } else {
@@ -2179,12 +2180,13 @@ function keyBadge() {
   if (hasApiKey()) return '';
   return '<span title="Runs on your own Claude API key — no free run for this one" style="font-size:9px;font-weight:700;background:rgba(251,191,36,0.1);color:#f59e0b;border:1px dashed rgba(251,191,36,0.4);border-radius:2px;padding:1px 5px;margin-left:4px">🔑 needs key</span>';
 }
+function keyBox(html, margin) {
+  return `<div style="max-width:620px;margin:${margin || '0 0 16px'};padding:12px 14px;border:1px solid rgba(251,191,36,0.35);background:rgba(251,191,36,0.06);border-radius:4px;font-size:12.5px;line-height:1.6;color:var(--text-dim)">🔑 ${html}</div>`;
+}
 function keyNote(what) {
   if (hasApiKey()) return '';
-  return `<div style="max-width:620px;margin:0 0 16px;padding:12px 14px;border:1px solid rgba(251,191,36,0.35);background:rgba(251,191,36,0.06);border-radius:4px;font-size:12.5px;line-height:1.6;color:var(--text-dim)">
-      🔑 <strong style="color:var(--text)">${what} runs on your own Claude API key</strong> — there is no free run for it. Paste your key in the sidebar (bottom left, "Claude API Key"); get one at <a href="https://console.anthropic.com" target="_blank" rel="noopener" style="color:#f59e0b">console.anthropic.com</a>.
-      ${(!currentUser?.plan || currentUser?.plan === 'free') ? 'Your free run works on Flow Test, Security Test, Check Everything, Checkout &amp; Booking and Multi-Role.' : ''}
-    </div>`;
+  return keyBox(`<strong style="color:var(--text)">${what} runs on your own Claude API key</strong> — there is no free run for it. Paste your key in the sidebar (bottom left, "Claude API Key"); get one at <a href="https://console.anthropic.com" target="_blank" rel="noopener" style="color:#f59e0b">console.anthropic.com</a>.
+      ${isFreeRunAvailable() ? 'Your free run works on Flow Test, Security Test, Check Everything, Checkout &amp; Booking and Multi-Role.' : ''}`);
 }
 function hasApiKey() {
   return getApiKey().length > 10;
@@ -2314,7 +2316,12 @@ function _pointerRelease() {
   clearTimeout(_pointerTimer); _pointerTimer = null;
   if (_renderWhenReleased) { _renderWhenReleased = false; setTimeout(render, 0); }
 }
-document.addEventListener('pointerdown', () => { _pointerHeld = true; clearTimeout(_pointerTimer); _pointerTimer = setTimeout(_pointerRelease, 1500); }, true);
+document.addEventListener('pointerdown', (e) => {
+  // A native <select> opens its popup on pointerdown and sends no pointerup
+  // when an option is picked — its change handlers must render at once.
+  if (e.target && e.target.closest && e.target.closest('select')) return;
+  _pointerHeld = true; clearTimeout(_pointerTimer); _pointerTimer = setTimeout(_pointerRelease, 1000);
+}, true);
 document.addEventListener('pointerup', _pointerRelease, true);
 document.addEventListener('pointercancel', _pointerRelease, true);
 
@@ -2393,7 +2400,7 @@ function render() {
         </button>
         <button class="nav-btn ${state.view === 'widget' ? 'active' : ''}" onclick="navigate('widget')" data-tooltip="Embed a one-line 'Test' button in your own app. You or your team members can run TestPilot on the live page. Runs on your own Anthropic key — your secret key never touches the browser.">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 17l6-6-6-6"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-          Widget <span style="font-size:9px;font-weight:700;background:rgba(251,191,36,0.15);color:#f59e0b;border:1px solid rgba(251,191,36,0.3);border-radius:2px;padding:1px 5px;margin-left:4px">BETA</span>${keyBadge()}
+          Widget <span style="font-size:9px;font-weight:700;background:rgba(251,191,36,0.15);color:#f59e0b;border:1px solid rgba(251,191,36,0.3);border-radius:2px;padding:1px 5px;margin-left:4px">BETA</span>
         </button>
         <button class="nav-btn ${state.view === 'schedules' ? 'active' : ''}" onclick="navigate('schedules')" data-tooltip="Re-run a scenario on a schedule (daily/weekly). TestPilot emails you the moment something that used to pass starts failing — catching regressions from your own changes AND silent platform updates before your users do.">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><polyline points="9 15 11 17 15 13"/></svg>
@@ -2572,7 +2579,7 @@ function renderWidget() {
       </ul>
     </div>
 
-    ${hasApiKey() ? '' : `<div style="max-width:620px;margin:18px 0 0;padding:12px 14px;border:1px solid rgba(251,191,36,0.35);background:rgba(251,191,36,0.06);border-radius:4px;font-size:12.5px;line-height:1.6;color:var(--text-dim)">🔑 <strong style="color:var(--text)">The widget runs on your own Anthropic key</strong> — there is no free run for it. Paste the key in the form below (it is stored encrypted on the server, not in this browser).</div>`}
+    ${toks.length ? '' : keyBox('<strong style="color:var(--text)">The widget runs on your own Anthropic key</strong> — there is no free run for it. Paste the key in the form below (it is stored encrypted on the server, not in this browser).', '18px 0 0')}
     <!-- ── CONNECT FORM ── -->
     <div class="card" style="max-width:620px;margin-top:18px">
       <div class="card-title" style="margin-bottom:16px">Connect an app</div>
@@ -3597,24 +3604,28 @@ function renderMultiRole() {
 function mrSetApp(appId) {
   if (!state.multiRoleConfig) state.multiRoleConfig = { appId: '', roles: [{name:'Role 1',email:'',password:'',scenario:''},{name:'Role 2',email:'',password:'',scenario:''}] };
   state.multiRoleConfig.appId = appId;
+  state.multiRoleError = null;
   render();
 }
 
 function mrSetRole(i, field, value) {
   if (!state.multiRoleConfig) return;
   state.multiRoleConfig.roles[i][field] = value;
+  state.multiRoleError = null; // the refusal was about the old form
 }
 
 function mrAddRole() {
   if (!state.multiRoleConfig) return;
   if (state.multiRoleConfig.roles.length >= 3) return;
   state.multiRoleConfig.roles.push({ name: `Role ${state.multiRoleConfig.roles.length + 1}`, email: '', password: '', scenario: '' });
+  state.multiRoleError = null;
   render();
 }
 
 function mrRemoveRole(i) {
   if (!state.multiRoleConfig) return;
   state.multiRoleConfig.roles.splice(i, 1);
+  state.multiRoleError = null;
   render();
 }
 
@@ -3637,7 +3648,17 @@ async function runMultiRole() {
     state.multiRoleError = `Multi-Role uses one free run per role: this sequence needs ${validRoles.length}, you have ${freeRunsLeft()} left. Add your Claude API key in the sidebar to run it on your own key.`;
     render(); return;
   }
-  if (!mrFree && !hasApiKey()) { state.multiRoleError = 'Multi-Role needs your Claude API key in the sidebar (bottom left) — your free run is used up.'; render(); return; }
+  if (!mrFree && !hasApiKey()) {
+    state.multiRoleError = (currentUser?.plan === 'free' || !currentUser?.plan)
+      ? 'Multi-Role needs your Claude API key in the sidebar (bottom left) — your free run is used up.'
+      : 'Add your Claude API key in the sidebar (bottom left) first — Multi-Role runs on your own key.';
+    render(); return;
+  }
+  // /api/test caps a free run at 100 words; check every role before any run is spent.
+  if (mrFree) {
+    const long = validRoles.find(r => r.scenario.trim().split(/\s+/).filter(Boolean).length > 100);
+    if (long) { state.multiRoleError = `Free runs are limited to 100 words per role — ${long.name} is longer. Shorten it, or add your Claude API key.`; render(); return; }
+  }
   state.multiRoleError = null;
 
   // Run lifecycle. runId lets the loop detect cancellation (cancelMultiRole
@@ -8271,7 +8292,7 @@ function maybeStartLearnTour() {
 <!-- APP READY — shown the moment a crawl finishes. The crawl used to end
      silently: the view just swapped to the platform map, so users had no
      signal the app was ready or that picking a test was now their move. -->
-<div id="app-ready-overlay" onclick="if (event.target === this) closeAppReady()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:10000;align-items:center;justify-content:center;padding:20px">
+<div id="app-ready-overlay" onpointerdown="this._bd = (event.target === this)" onclick="if (this._bd && event.target === this) closeAppReady()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:10000;align-items:center;justify-content:center;padding:20px">
   <div style="background:#111;border:1px solid rgba(200,240,64,0.2);max-width:480px;width:100%;border-radius:4px;overflow:hidden">
     <div style="background:#0f0f0f;border-bottom:1px solid rgba(200,240,64,0.1);padding:18px 24px;display:flex;align-items:center;justify-content:space-between">
       <div id="app-ready-title" style="font-family:'Syne',sans-serif;font-size:16px;font-weight:800;color:#f4f2ee">Your app is <span style="color:#c8f040">ready to test</span></div>
