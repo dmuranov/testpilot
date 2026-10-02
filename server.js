@@ -295,7 +295,7 @@ const isSuperAdmin = (e) => !!e && canonicalEmail(e) === canonicalEmail(SUPER_AD
 // temporary promo ("3 runs for prospects") is one commit that touches only it
 // and `git revert` of that commit cannot conflict. 1 = the single free run.
 
-const FREE_RUNS_DEFAULT = 3;   // TEMPORARY (2026-09-27): revert this commit to go back to 1
+const FREE_RUNS_DEFAULT = 1;
 
 const TESTER_EMAILS = new Set(
   String(process.env.TESTPILOT_TESTER_EMAILS || '')
