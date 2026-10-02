@@ -7885,7 +7885,28 @@ What is your first action?`,
         // other way round — see CHECKOUT_URL_HINT_RE's comment.
         const onPaymentUrl = (() => { try { return CHECKOUT_URL_HINT_RE.test(new URL(page.url()).pathname); } catch { return false; } })();
         const looksSafe = SAFE_NONCOMMIT_CLICK_RE.test(targetText);
-        if (textSaysCommit || (onPaymentUrl && !looksSafe)) {
+        // On booking sites the FIRST "Book now" / "Reserve" is the entry into
+        // the flow (a room card), not the commit. Seen live 2026-10-02: the run
+        // stopped at step 1 on a listing page and reported the booking flow as
+        // verified. The decision is made from the PAGE, fail-safe: a
+        // booking-entry button is let through only when the page looks like a
+        // listing — no details/payment form on screen and no order total.
+        // Anything else (a form, a total, a payment URL, or an error reading
+        // the page) stops, as before. Payment words (pay now, place order,
+        // complete purchase…) always stop immediately.
+        const bookingEntryWord = /^\s*(book( now)?|reserve( now)?|book (this|a) room|reserve (this|a) room)\s*$/i.test(targetText);
+        let entryClick = false;
+        if (textSaysCommit && bookingEntryWord && !onPaymentUrl) {
+          const looksLikeListing = await page.evaluate((totalSrc) => {
+            const visible = (el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+            const detailInputs = Array.from(document.querySelectorAll('input[type="email"], input[type="tel"], input[type="password"], input[autocomplete^="cc-"], input[name*="card" i], input[name*="first" i], input[name*="last" i], input[name*="phone" i], input[name*="email" i], iframe[src*="stripe"], iframe[src*="paypal"]')).some(visible);
+            const text = (document.body?.innerText || '').slice(0, 8000);
+            return !detailInputs && !new RegExp(totalSrc, 'i').test(text);
+          }, ORDER_OVERVIEW_TEXT_RE.source).catch(() => false);
+          entryClick = looksLikeListing === true;
+        }
+        if (entryClick) action._bookingEntry = true;
+        if (!entryClick && (textSaysCommit || (onPaymentUrl && !looksSafe))) {
           result.reachedPaymentStep = true;
           // Scope the claim precisely, in the artifact itself — not just
           // something the presenter has to remember to caveat out loud. This
@@ -9242,7 +9263,7 @@ RESPOND ONLY JSON: {"confirmed":true,"actual":"the visible failure, plainly","de
         // the report can point at "this is the checkout/booking step" even when
         // the run didn't stop there (test-card mode, or a plain scenario test
         // that happens to pass through a payment flow).
-        ...(action.action === 'click' && status === 'pass' && PAYMENT_COMMIT_RE.test(String(stepTarget))
+        ...(action.action === 'click' && status === 'pass' && !action._bookingEntry && PAYMENT_COMMIT_RE.test(String(stepTarget))
           ? { milestone: 'payment_commit' } : {}),
       });
       // Standing on the order review / overview page is reaching the payment
@@ -9255,7 +9276,12 @@ RESPOND ONLY JSON: {"confirmed":true,"actual":"the visible failure, plainly","de
           // page, and the final commit control visible. Any one alone is too
           // broad (a reviews page says "Total: 12 reviews"; the address step
           // shows an order-summary sidebar with no commit button yet).
-          if (ORDER_OVERVIEW_URL_RE.test(u.pathname) || CHECKOUT_URL_HINT_RE.test(u.pathname)) {
+          // A booking page (/reservation/1, /booking/…) counts once guest
+          // details are in — the same page carries the form, the price summary
+          // and the final "Reserve Now" (seen live 2026-10-02).
+          const onBookingPage = /\/(reservations?|bookings?)(\/|$)/i.test(u.pathname)
+            && result.steps.some((s) => s.status === 'pass' && (s.action === 'fill' || s.action === 'fill_form'));
+          if (ORDER_OVERVIEW_URL_RE.test(u.pathname) || CHECKOUT_URL_HINT_RE.test(u.pathname) || onBookingPage) {
             // rendered text only (textContent would hand back inline scripts first)
             const txt = (await page.evaluate(() => document.body?.innerText || '').catch(() => '') || '').slice(0, 8000);
             const commitVisible = ORDER_OVERVIEW_TEXT_RE.test(txt) && await page.$$eval('button, a, input[type="submit"]', (els, src) => {
