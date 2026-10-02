@@ -202,6 +202,9 @@ router.post('/apps/:app_id/staging/provision', async (req, res) => {
     if (app.netlify_site_id) {
       return res.json({ success: true, message: 'Staging already provisioned', staging_url: app.staging_url });
     }
+    if (!NETLIFY_TOKEN) {
+      return res.status(503).json({ error: 'Staging Safe is not switched on for this TestPilot yet: the operator has not configured the Netlify connection. Your GitHub connection is saved; the staging site will be created once it is.', code: 'STAGING_NOT_CONFIGURED' });
+    }
 
     console.log(`[Staging Safe] Provisioning Netlify site for app ${app_id} (${app.name})`);
     const { netlify_site_id, staging_url } = await provisionNetlifySite();

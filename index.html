@@ -595,10 +595,14 @@ async function ssAutoConnectRepo(appId) {
 
     // Now provision Netlify
     const prov = await fetch(`/api/v1/apps/${appId}/staging/provision`, { method: 'POST' });
-    const provData = await prov.json();
+    const provData = await prov.json().catch(() => ({}));
     if (provData.staging_url) {
       state.stagingSafe.stagingUrl = provData.staging_url;
       render();
+    } else if (!prov.ok) {
+      // Before, a failed provision was only logged to the console and the page
+      // sat on "Connect" with no explanation.
+      tpToast(provData.error || 'Could not create the staging site.', 'error');
     }
   } catch (e) {
     console.error('Auto-connect repo failed:', e.message);
@@ -2177,16 +2181,16 @@ function freeRunsLeft() {
 }
 function isFreeRunAvailable() { return freeRunsLeft() > 0; }
 function keyBadge() {
-  if (hasApiKey()) return '';
+  if (hasApiKey() || isFreeRunAvailable()) return '';
   return '<span title="Runs on your own Claude API key — no free run for this one" style="font-size:9px;font-weight:700;background:rgba(251,191,36,0.1);color:#f59e0b;border:1px dashed rgba(251,191,36,0.4);border-radius:2px;padding:1px 5px;margin-left:4px">🔑 needs key</span>';
 }
 function keyBox(html, margin) {
   return `<div style="max-width:620px;margin:${margin || '0 0 16px'};padding:12px 14px;border:1px solid rgba(251,191,36,0.35);background:rgba(251,191,36,0.06);border-radius:4px;font-size:12.5px;line-height:1.6;color:var(--text-dim)">🔑 ${html}</div>`;
 }
-function keyNote(what) {
+function keyNote(what, freeText) {
   if (hasApiKey()) return '';
-  return keyBox(`<strong style="color:var(--text)">${what} runs on your own Claude API key</strong> — there is no free run for it. Paste your key in the sidebar (bottom left, "Claude API Key"); get one at <a href="https://console.anthropic.com" target="_blank" rel="noopener" style="color:#f59e0b">console.anthropic.com</a>.
-      ${isFreeRunAvailable() ? 'Your free run works on Flow Test, Security Test, Check Everything, Checkout &amp; Booking and Multi-Role.' : ''}`);
+  if (isFreeRunAvailable()) return freeText ? keyBox('🎁 ' + freeText + ` You have <strong style="color:var(--text)">${freeRunsLeft()}</strong> free run${freeRunsLeft() === 1 ? '' : 's'} left.`) : '';
+  return keyBox(`<strong style="color:var(--text)">${what} runs on your Claude API key</strong> — your free run is used up. Paste your key in the sidebar (bottom left, "Claude API Key"); get one at <a href="https://console.anthropic.com" target="_blank" rel="noopener" style="color:#f59e0b">console.anthropic.com</a>.`);
 }
 function hasApiKey() {
   return getApiKey().length > 10;
@@ -2579,12 +2583,14 @@ function renderWidget() {
       </ul>
     </div>
 
-    ${toks.length ? '' : keyBox('<strong style="color:var(--text)">The widget runs on your own Anthropic key</strong> — there is no free run for it. Paste the key in the form below (it is stored encrypted on the server, not in this browser).', '18px 0 0')}
+    ${toks.length ? '' : (isFreeRunAvailable()
+        ? keyBox(`🎁 On the free plan you can connect the widget without a key: each run from it is one free run, and you have <strong style="color:var(--text)">${freeRunsLeft()}</strong> left. Add your Anthropic key below instead to run without limit.`, '18px 0 0')
+        : keyBox('<strong style="color:var(--text)">The widget runs on your own Anthropic key</strong> — your free run is used up. Paste the key in the form below (it is stored encrypted on the server, not in this browser).', '18px 0 0'))}
     <!-- ── CONNECT FORM ── -->
     <div class="card" style="max-width:620px;margin-top:18px">
       <div class="card-title" style="margin-bottom:16px">Connect an app</div>
       <div class="form-group">
-        <label>Your Anthropic API key *</label>
+        <label>Your Anthropic API key ${isFreeRunAvailable() ? '<span style="color:var(--text-muted);font-weight:400">(optional on the free plan)</span>' : '*'}</label>
         <input class="form-input" id="widget-key" type="password" placeholder="sk-ant-..." autocomplete="off" />
         <div style="font-size:11px;color:var(--text-muted);margin-top:4px;font-family:'DM Mono',monospace">// stored encrypted, never shown in the browser · get one at console.anthropic.com</div>
       </div>
@@ -2664,7 +2670,8 @@ async function connectWidget() {
   const noLogin = document.getElementById('widget-no-login')?.checked;
   const email = noLogin ? '' : document.getElementById('widget-email')?.value?.trim();
   const password = noLogin ? '' : document.getElementById('widget-password')?.value;
-  if (!anthropicKey || !/^sk-ant-/.test(anthropicKey)) { state.widgetError = 'Enter a valid Anthropic API key (sk-ant-…).'; return render(); }
+  if (!anthropicKey && !isFreeRunAvailable()) { state.widgetError = 'Enter your Anthropic API key (sk-ant-…) — your free run is used up.'; return render(); }
+  if (anthropicKey && !/^sk-ant-/.test(anthropicKey)) { state.widgetError = 'Enter a valid Anthropic API key (sk-ant-…).'; return render(); }
   if (!appUrl) { state.widgetError = 'Enter the URL of the app you want to embed the widget in.'; return render(); }
   if (!noLogin && (!email || !password)) { state.widgetError = 'Enter a test login so we can crawl past the sign-in wall — or check “No login required” if it\'s public.'; return render(); }
 
@@ -2672,7 +2679,7 @@ async function connectWidget() {
   try {
     const res = await fetch(API + '/api/embed/connect', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ anthropicKey, appUrl, email, password }),
+      body: JSON.stringify({ anthropicKey: anthropicKey || undefined, appUrl, email, password }),
     });
     const data = await res.json();
     if (!res.ok) { state.widgetError = data.error || 'Could not connect this app.'; }
@@ -2717,7 +2724,7 @@ function renderSchedules() {
         <button class="btn btn-primary" onclick="navigate('learn')">Learn an App</button>
       </div>
     ` : `
-    ${keyNote('A scheduled run')}
+    ${keyNote('A scheduled run', 'Your free run covers the first scheduled execution; after that the schedule pauses until you add your key.')}
     <!-- ── CREATE FORM ── -->
     <div class="card" style="max-width:640px">
       <div class="card-title" style="margin-bottom:16px">New schedule</div>
@@ -2816,13 +2823,13 @@ async function createSchedule() {
   if (!appId) { state.scheduleError = 'Pick an app.'; return render(); }
   if (!scenario) { state.scheduleError = 'Describe what to test in plain English.'; return render(); }
   const apiKey = getApiKey();
-  if (!apiKey) { state.scheduleError = 'Add your Anthropic API key in the sidebar first — scheduled runs use your own key.'; return render(); }
+  if (!apiKey && !isFreeRunAvailable()) { state.scheduleError = 'Add your Anthropic API key in the sidebar first — your free run is used up.'; return render(); }
   state.scheduleCreating = true; render();
   try {
     const _schedRepeatable = document.getElementById('sched-repeatable') ? document.getElementById('sched-repeatable').checked : true;
     const res = await fetch(API + '/api/schedules', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ appId, scenario: scenario + repeatableClause(_schedRepeatable), intervalHours, apiKey, alertEmail: alertEmail || undefined, sessionState: sessionState || undefined }),
+      body: JSON.stringify({ appId, scenario: scenario + repeatableClause(_schedRepeatable), intervalHours, apiKey: apiKey || undefined, alertEmail: alertEmail || undefined, sessionState: sessionState || undefined }),
     });
     const data = await res.json();
     if (!res.ok) { state.scheduleError = data.error || 'Could not create the schedule.'; }
@@ -3437,7 +3444,7 @@ function renderChat() {
 
     return `
       <div class="page-header"><h2>Interactive Test</h2></div>
-      ${keyNote('Interactive Test')}
+      ${keyNote('Interactive Test', 'Your free run covers one interactive session of up to 20 commands.')}
       <div class="card" style="max-width:480px">
         <div class="card-title" style="margin-bottom:16px">Start a Session</div>
         <div class="form-group">
@@ -3594,7 +3601,7 @@ function renderMultiRole() {
       ${cfg.roles.length < 3 ? `<button class="btn btn-ghost btn-sm" onclick="mrAddRole()" style="margin-bottom:16px">+ Add Role (${cfg.roles.length}/3)</button>` : ''}
 
       ${state.multiRoleError ? `<div style="margin-bottom:12px;padding:10px 12px;border:1px solid rgba(239,68,68,0.4);background:rgba(239,68,68,0.06);border-radius:4px;font-size:12.5px;line-height:1.6;color:var(--text)">⚠ ${escapeHtml(state.multiRoleError)}</div>` : ''}
-      ${(!hasApiKey() && isFreeRunAvailable()) ? `<div style="margin-bottom:12px;padding:10px 12px;border:1px solid rgba(200,240,64,0.3);background:rgba(200,240,64,0.05);border-radius:4px;font-size:12.5px;line-height:1.6;color:var(--text-dim)">🎁 On the free plan each role is one free run — you have <strong style="color:var(--text)">${freeRunsLeft()}</strong> left.</div>` : ''}
+      ${(!hasApiKey() && isFreeRunAvailable()) ? `<div style="margin-bottom:12px;padding:10px 12px;border:1px solid rgba(200,240,64,0.3);background:rgba(200,240,64,0.05);border-radius:4px;font-size:12.5px;line-height:1.6;color:var(--text-dim)">🎁 The whole sequence is one free run — you have <strong style="color:var(--text)">${freeRunsLeft()}</strong> left.</div>` : ''}
       <button class="btn btn-primary" onclick="runMultiRole()" style="width:100%;justify-content:center" ${state.multiRoleLoading ? 'disabled' : ''}>
         ${state.multiRoleLoading ? '<span class="loader"></span> Starting...' : '▶ Run Multi-Role Test'}
       </button>
@@ -3641,13 +3648,11 @@ async function runMultiRole() {
   const validRoles = cfg.roles.filter(r => r.email && r.password && r.scenario.trim());
   if (validRoles.length < 2) { tpToast('At least 2 roles need email, password and scenario'); return; }
 
-  // Free plan: each role is one run on the support key (one /api/test call per
-  // role), so the whole sequence needs as many free runs as there are roles.
+  // Free plan: the whole sequence is one free run. The roles run as separate
+  // /api/test calls; the server ties them together by sequenceId so only the
+  // first role pays.
   const mrFree = isFreeRunAvailable() && !hasApiKey();
-  if (mrFree && freeRunsLeft() < validRoles.length) {
-    state.multiRoleError = `Multi-Role uses one free run per role: this sequence needs ${validRoles.length}, you have ${freeRunsLeft()} left. Add your Claude API key in the sidebar to run it on your own key.`;
-    render(); return;
-  }
+  const mrSequenceId = 'seq_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
   if (!mrFree && !hasApiKey()) {
     state.multiRoleError = (currentUser?.plan === 'free' || !currentUser?.plan)
       ? 'Multi-Role needs your Claude API key in the sidebar (bottom left) — your free run is used up.'
@@ -3715,6 +3720,8 @@ async function runMultiRole() {
           password: role.password,
           apiKey: getApiKey(),
           freeRun: mrFree,
+          sequenceId: mrFree ? mrSequenceId : undefined,
+          sequenceRoles: mrFree ? validRoles.length : undefined,
           userEmail: currentUser?.email
         }),
         signal: abortCtl.signal,
@@ -5467,7 +5474,7 @@ async function startChat() {
 
   if (!appId) { tpToast('Select an app first'); return; }
   if (!noLogin && (!email || !password)) { tpToast('Credentials required, or check "No login required"'); return; }
-  if (!hasApiKey()) { tpToast('Add your Claude API key in the sidebar first'); return; }
+  if (!hasApiKey() && !isFreeRunAvailable()) { tpToast('Add your Claude API key in the sidebar first — your free run is used up'); return; }
 
   const remember = document.getElementById('chat-remember')?.checked;
   if (remember) { saveCredentials(appId, email, password); }
@@ -5479,7 +5486,7 @@ async function startChat() {
     const res = await fetch(`${API}/api/chat/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ appId, email, password, apiKey: getApiKey() })
+      body: JSON.stringify({ appId, email, password, apiKey: getApiKey() || undefined })
     });
 
     if (!res.ok) {
@@ -5492,7 +5499,12 @@ async function startChat() {
 
     const data = await res.json();
     state.chatSession = data;
+    if (data.freeChat) {
+      // the free run was spent on this session: keep the account's view honest
+      fetch('/api/auth/me').then(r => r.ok ? r.json() : null).then(j => { if (j) { Object.assign(currentUser, j); currentUser.free_run_used = j.free_run_used === true; render(); } }).catch(() => {});
+    }
     state.chatMessages = [
+      ...(data.freeChat ? [{ role: 'assistant', content: `🎁 This session is your free run: up to ${data.commandsLeft} commands on us. Add your Claude API key in the sidebar for unlimited sessions.` }] : []),
       // Field is `loggedIn` on the response — reading `loginSuccess` made this
       // undefined every time, so every session opened by claiming login failed.
       { role: 'assistant', content: data.loggedIn ? `Logged in and ready. I'm on ${data.url}. What would you like to test?` : `I could not confirm a login — I may still be on the sign-in page${data.url ? ` (currently at ${data.url})` : ''}. Tell me what to do, or end the session and check the credentials.`, screenshot: data.screenshot }
