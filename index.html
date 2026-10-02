@@ -3798,6 +3798,12 @@ async function runMultiRole() {
     state.multiRoleLoading = false;
     state._multiRoleAbort = null;
   }
+  // A free sequence spent runs (or got them refunded): take the account's
+  // view from the server so the "runs left" note and the Learn gate are right.
+  if (mrFree) {
+    try { const me = await fetch('/api/auth/me'); if (me.ok) { const j = await me.json(); Object.assign(currentUser, j); currentUser.free_run_used = j.free_run_used === true; } } catch {}
+    if (state._multiRoleRunId === myRunId) render();
+  }
   render();
 }
 
