@@ -303,6 +303,18 @@ router.post('/apps/:app_id/github/connect-repo', async (req, res) => {
     if (!app.github_access_token) return res.status(400).json({ error: 'GitHub not connected. Connect GitHub first.' });
 
     const [owner, repoName] = repo.split('/');
+    // Switching repositories: the previous repository's hook would keep
+    // firing at this app (the webhook guard ignores it, but it is noise and a
+    // hook the user never asked to keep). Best effort — a failed delete must
+    // not block the connect.
+    if (app.github_repo && app.github_repo !== repo && app.github_webhook_id) {
+      try {
+        const del = await fetch(`https://api.github.com/repos/${app.github_repo}/hooks/${app.github_webhook_id}`, {
+          method: 'DELETE', headers: { 'Authorization': `Bearer ${app.github_access_token}`, 'Accept': 'application/vnd.github+json' },
+        });
+        console.log(`[Staging Safe] app=${app_id} removed hook ${app.github_webhook_id} from ${app.github_repo} (${del.status})`);
+      } catch (e) { console.warn(`[Staging Safe] app=${app_id} could not remove the hook on ${app.github_repo}: ${e.message}`); }
+    }
     const webhook = await registerGithubWebhook(app.github_access_token, owner, repoName, app_id);
 
     const { error: updateError } = await supabaseClient

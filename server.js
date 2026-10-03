@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { runStagingSafeTests } from './routes/staging-test.js';
-import netlifyRoutes, { triggerStagingDeploy } from './routes/netlify.js';
+import netlifyRoutes, { triggerStagingDeploy, repoHeadMain } from './routes/netlify.js';
 import githubRoutes from './routes/github.js';
 import signalRoutes from './routes/signal.js';
 import { classifyFailure, summarizeFindings, isConfirmedAppBug, Category, Confidence } from './routes/classify.js';
@@ -12312,19 +12312,18 @@ app.post('/api/v1/apps/:appId/baseline', async (req, res) => {
   const { appId } = req.params;
   if (!ownsApp(appId, requesterEmail(req))) return res.status(403).json({ error: 'This app belongs to another account.', code: 'OWNERSHIP_MISMATCH' });
   try {
-    const rows = await supabase('GET', 'apps', null, `?app_id=eq.${encodeURIComponent(appId)}&select=github_repo,github_access_token,netlify_site_id,last_commit_sha,last_commit_message`);
+    const rows = await supabase('GET', 'apps', null, `?app_id=eq.${encodeURIComponent(appId)}&select=github_repo,github_access_token,netlify_site_id`);
     const app = Array.isArray(rows) ? rows[0] : null;
     if (!app || !app.github_repo || !app.github_access_token) return res.status(400).json({ error: 'Connect GitHub first.', code: 'GITHUB_NOT_CONNECTED' });
     if (!app.netlify_site_id) return res.status(400).json({ error: 'The staging site is not provisioned yet.', code: 'STAGING_NOT_PROVISIONED' });
     const scenarios = await supabase('GET', 'scenarios', null, `?app_id=eq.${encodeURIComponent(appId)}&status=eq.active&select=scenario_id`);
     if (!Array.isArray(scenarios) || scenarios.length === 0) return res.status(400).json({ error: 'Save at least one scenario first.', code: 'NO_SCENARIOS' });
-    // The baseline is the connected repository's current head, read from
-    // GitHub — not the recorded last push, which can lag or (before the
-    // webhook's repository guard) come from another repository.
-    const gh = await fetch(`https://api.github.com/repos/${app.github_repo}/commits/HEAD`, { headers: { Authorization: `Bearer ${app.github_access_token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'TestPilot' } });
-    if (!gh.ok) return res.status(502).json({ error: `Could not read the repository's latest commit from GitHub (${gh.status}).` });
-    const c = await gh.json();
-    const sha = c.sha, message = 'Baseline: ' + String(c.commit?.message || '').split(/\r?\n/)[0];
+    // The baseline is the connected repository's head on main — the branch
+    // the push webhook deploys — read from GitHub, never a recorded sha.
+    let head;
+    try { head = await repoHeadMain(app.github_repo, app.github_access_token); }
+    catch (e) { return res.status(502).json({ error: e.message }); }
+    const sha = head.sha, message = head.message || 'Baseline run';
     res.json({ ok: true, commit_sha: sha, scenarios: scenarios.length, message: 'Baseline started: deploying the current commit and running your scenarios. Results appear under Monitor and by email.' });
     triggerStagingDeploy(appId, sha, message).catch((err) => console.error(`[Staging Safe] Baseline failed for app=${appId}:`, err.message));
   } catch (e) { if (!res.headersSent) res.status(500).json({ error: e.message }); }
