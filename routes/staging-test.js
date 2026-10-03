@@ -46,7 +46,7 @@ export function classifyScenarioOutcome(testResult) {
 export async function runStagingSafeTests(
   appId,
   commitSha,
-  commitMessage,
+  commitMessageIn,
   {
     supabase,        // the supabase() helper from server.js
     runAgentTest,    // the existing runAgentTest() from server.js
@@ -57,6 +57,7 @@ export async function runStagingSafeTests(
     emitStep,        // the existing emitStep() from server.js
   }
 ) {
+  const commitMessage = String(commitMessageIn || 'Manual deploy');   // a baseline or manual deploy carries no push message
   console.log(`[Staging Safe] Starting auto-test for app=${appId} commit=${commitSha}`);
 
   try {

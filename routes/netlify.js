@@ -333,7 +333,7 @@ router.post('/apps/:app_id/staging/deploy', async (req, res) => {
 
     res.json({ success: true, message: 'Staging deploy started', commit_sha: sha });
 
-    triggerStagingDeploy(app_id, sha, app.last_commit_message).catch(err => {
+    triggerStagingDeploy(app_id, sha, app.last_commit_message || 'Manual deploy').catch(err => {
       console.error('Manual staging deploy failed:', err.message);
     });
 
