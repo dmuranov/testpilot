@@ -237,6 +237,29 @@ function updateAppLoginSiteLabel() {
   el.textContent = host ? ' for ' + host : ' for the app above';
 }
 
+// The form's first step is retried once when the browser got no response at
+// all (fetch threw: stale socket, a blip, a restart). Only that step: starting
+// a test or a checkout must not be sent twice, because the first request may
+// have been processed and only its answer lost. A gateway error is a
+// response, so it is not retried either — the server may have done the work.
+async function postJsonRetryOnNoResponse(url, body) {
+  const once = () => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  try { return await once(); }
+  catch (e) {
+    if (e && e.name === 'AbortError') throw e;          // the page is going away
+    if (navigator.onLine === false) throw e;             // a retry cannot succeed
+    await new Promise((r) => setTimeout(r, 1200));
+    return once();
+  }
+}
+// "No response" and "an answer we could not read" are different problems;
+// say which one it was.
+function requestFailureText(e, action) {
+  return (e && e.name === 'TypeError')
+    ? 'Could not reach TestPilot — check your connection and ' + action + ' again'
+    : 'TestPilot answered unexpectedly — ' + action + ' again, and if it repeats use Support';
+}
+
 async function startFunnel() {
   clearErr('step-start-err');
   const email = document.getElementById('f-email').value.trim().toLowerCase();
@@ -260,11 +283,7 @@ async function startFunnel() {
   if (!attrib) { try { attrib = JSON.parse(localStorage.getItem('tp_attrib') || 'null'); } catch (e) {} }
 
   try {
-    const res = await fetch('/api/funnel/start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userEmail: email, url, source: attrib?.source || '', medium: attrib?.medium || '', campaign: attrib?.campaign || '' }),
-    });
+    const res = await postJsonRetryOnNoResponse('/api/funnel/start', { userEmail: email, url, source: attrib?.source || '', medium: attrib?.medium || '', campaign: attrib?.campaign || '' });
     const data = await res.json();
     if (!res.ok || !data.ok) {
       btn.disabled = false; btn.textContent = 'Continue →';
@@ -287,7 +306,7 @@ async function startFunnel() {
     if (sPw && appPw) sPw.value = appPw;
   } catch (e) {
     btn.disabled = false; btn.textContent = 'Continue →';
-    showErr('step-start-err', 'Network error — try again');
+    showErr('step-start-err', requestFailureText(e, 'press Continue'));
   }
 }
 
@@ -386,6 +405,7 @@ async function runFunnelTest() {
   btn.disabled = true; btn.textContent = 'Starting…';
 
   try {
+    // Not retried on purpose: a second POST could spend the free run twice.
     const res = await fetch('/api/test', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -408,7 +428,7 @@ async function runFunnelTest() {
     streamTest(data.testId);
   } catch (e) {
     btn.disabled = false; btn.textContent = 'Run test →';
-    showErr('step-scenario-err', 'Network error — try again');
+    showErr('step-scenario-err', requestFailureText(e, 'press Run test'));
   }
 }
 
@@ -478,6 +498,7 @@ async function checkout(plan) {
   // Hand off to the existing checkout endpoint. /api/checkout creates a
   // Stripe session and returns a redirect URL.
   try {
+    // Not retried on purpose: a second POST could open a second Stripe session.
     const res = await fetch('/api/billing/checkout', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -489,8 +510,8 @@ async function checkout(plan) {
     } else {
       alert(data.error || 'Could not start checkout');
     }
-  } catch {
-    alert('Network error — try again');
+  } catch (e) {
+    alert(requestFailureText(e, 'try'));
   }
 }
 </script>
