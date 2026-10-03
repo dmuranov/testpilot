@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { runStagingSafeTests } from './routes/staging-test.js';
-import netlifyRoutes from './routes/netlify.js';
+import netlifyRoutes, { triggerStagingDeploy } from './routes/netlify.js';
 import githubRoutes from './routes/github.js';
 import signalRoutes from './routes/signal.js';
 import { classifyFailure, summarizeFindings, isConfirmedAppBug, Category, Confidence } from './routes/classify.js';
@@ -309,6 +309,76 @@ const isTesterEmail = (e) => !!e && TESTER_EMAILS.has(canonicalEmail(e));
 const runsFor = (e) => isTesterEmail(e) ? Math.max(TESTER_RUNS, FREE_RUNS) : FREE_RUNS;
 const freeRuns = createFreeRunAllowance({ canonicalEmail, runsFor, file: './free-runs-used.json', fs });
 freeRuns.load();
+// A run counts (is charged) only when it got far enough to judge the app.
+// One list for every free-run path: /api/test, the widget, the scheduler.
+const CHARGED_RUN_STATUSES = ['completed', 'completed_with_bugs', 'completed_with_unverified'];
+// The base free run, burned/refunded in one place (DB row + every live
+// session of that identity).
+function burnBaseFreeRun(email) {
+  if (!email) return;
+  supabase('PATCH', 'users', { free_run_used: true }, `?email=eq.${encodeURIComponent(email)}`).catch(() => {});
+  let dirty = false;
+  for (const [, s] of sessions) { if (s.email === email) { s.free_run_used = true; dirty = true; } }
+  if (dirty) saveSessions();
+}
+function refundBaseFreeRun(email) {
+  if (!email) return;
+  supabase('PATCH', 'users', { free_run_used: false }, `?email=eq.${encodeURIComponent(email)}`).catch(() => {});
+  let dirty = false;
+  for (const [, s] of sessions) { if (s.email === email) { s.free_run_used = false; dirty = true; } }
+  if (dirty) saveSessions();
+}
+// A free run taken outside a request (the scheduler, the widget): base run if
+// unspent, else an extra from the allowance. Returns null when none is left.
+// The caller commits/refunds the hold like a request handler would.
+// `detachedBase` is the synchronous marker for the base run: the DB write is
+// fire-and-forget and the owner may have no live session, so without it a
+// burst of parallel calls would all see the base run as unspent.
+const detachedBase = new Set();   // emails whose base run this process burned without a session
+async function takeFreeRunDetached(email) {
+  const dbUser = await getUserByEmail(email);
+  if (!dbUser) return null;
+  // A paying plan is not on the free allowance: its runs are covered by the
+  // subscription, so a widget or schedule set up while free keeps working.
+  if ((dbUser.plan || 'free') !== 'free') return { base: false, paid: true, commit() {}, refund() {} };
+  let rawUsed = !!dbUser.free_run_used || detachedBase.has(email);
+  for (const [, s] of sessions) { if (s.email === email && s.free_run_used) rawUsed = true; }
+  if (!rawUsed) {
+    detachedBase.add(email);
+    burnBaseFreeRun(email);
+    return { base: true, commit() {}, refund() { detachedBase.delete(email); refundBaseFreeRun(email); } };
+  }
+  if (!freeRuns.available(email)) return null;
+  const hold = freeRuns.reserve({ end() {} }, email);   // no response to release on — commit right away
+  hold.commit();
+  return { base: false, commit() {}, refund() { hold.refund(); } };
+}
+// Multi-Role on the free plan: the dashboard runs one /api/test per role,
+// in order. One free run covers the whole sequence: the first role pays,
+// the next ones (same account, same sequenceId, within the hour) do not.
+const freeSequences = new Map();   // sequenceId -> { email, appId, left, expires }
+// Is this request a later role of a paid-for sequence? Non-consuming: the
+// slot is spent by consumeFreeSequence() when the role actually starts, so a
+// role that fails validation can be retried.
+function freeSequenceFollowUp(sequenceId, email, appId) {
+  const seq = sequenceId ? freeSequences.get(sequenceId) : null;
+  if (!seq || seq.email !== email || seq.appId !== appId || seq.expires < Date.now()) return false;
+  return seq.left > 0;
+}
+function consumeFreeSequence(sequenceId) {
+  const seq = freeSequences.get(sequenceId);
+  if (!seq) return;
+  seq.left -= 1;
+  if (seq.left <= 0) freeSequences.delete(sequenceId);
+}
+// Called when the first role starts (after every check, next to the burn), so
+// a first role that never ran cannot open free follow-ups.
+function openFreeSequence(sequenceId, email, appId, roles) {
+  const n = Number(roles) || 0;
+  if (!sequenceId || typeof sequenceId !== 'string' || sequenceId.length > 64 || n < 2 || n > 3) return;
+  for (const [id, s] of freeSequences) { if (s.expires < Date.now()) freeSequences.delete(id); }
+  freeSequences.set(sequenceId, { email, appId, left: n - 1, expires: Date.now() + 3600_000 });
+}
 // Non-consuming: what free_run_used should LOOK like to the client and the
 // funnel — an identity with extra runs left still has a free run.
 function freeRunExhausted(email, rawUsed, plan) {
@@ -1488,7 +1558,7 @@ function resolveEmbedToken(token) {
     let apiKey = null;
     try { apiKey = rec.keyEnc ? decryptSecret(rec.keyEnc) : null; }
     catch (e) { console.error('[embed] decrypt failed:', e.message); return null; }
-    return { owner: rec.owner, apiKey, appId: rec.appId, appUrl: rec.appUrl };
+    return { owner: rec.owner, apiKey, appId: rec.appId, appUrl: rec.appUrl, freeWidget: !!rec.freeWidget };
   }
   // Back-compat: env map (support-key BYOK, no per-owner key).
   try { const map = JSON.parse(process.env.TP_EMBED_TOKENS || '{}'); if (map[token]) return { owner: map[token], apiKey: null, appId: null, appUrl: null }; } catch {}
@@ -1503,8 +1573,23 @@ app.post('/api/embed/connect', async (req, res) => {
   if (!user) return;
   try {
     const { anthropicKey, appUrl, email, password } = req.body || {};
-    if (!anthropicKey || !/^sk-ant-/.test(String(anthropicKey))) {
+    // Free plan: no key needed — the widget's runs take the account's free
+    // run(s) on the support key (gated per run in /api/embed/run).
+    const freeWidget = !anthropicKey && user.plan === 'free';
+    if (!freeWidget && (!anthropicKey || !/^sk-ant-/.test(String(anthropicKey)))) {
       return res.status(400).json({ error: 'A valid Anthropic API key (sk-ant-…) is required.' });
+    }
+    if (freeWidget) {
+      // The crawl below runs on the support key: same gates as a free learn,
+      // and one free widget per account so connects cannot be used as free crawls.
+      if (!process.env.ANTHROPIC_SUPPORT_KEY) return res.status(400).json({ error: 'A valid Anthropic API key (sk-ant-…) is required.' });
+      if (isFreeBudgetExceeded()) return res.status(429).json({ error: 'Free runs are paused for today — add your own Anthropic key, or try again tomorrow.', code: 'FREE_BUDGET_EXCEEDED' });
+      const dbUser = await getUserByEmail(user.email);
+      if (freeRunExhausted(user.email, user.free_run_used || dbUser?.free_run_used, 'free')) return res.status(402).json({ error: 'Your free run is used up — add your Anthropic key to connect the widget.', code: 'FREE_RUN_USED' });
+      const ownerLc = (user.email || '').trim().toLowerCase();
+      for (const rec of embedTokens.values()) {
+        if (rec.freeWidget && !rec.revoked && rec.owner === ownerLc) return res.status(400).json({ error: 'The free plan covers one widget. Revoke the existing one below, or add your Anthropic key for another.', code: 'FREE_WIDGET_EXISTS' });
+      }
     }
     if (!appUrl) return res.status(400).json({ error: 'appUrl required' });
     if (!embedEncKey()) return res.status(500).json({ error: 'Server key store not configured (TP_EMBED_ENC_KEY).' });
@@ -1513,12 +1598,15 @@ app.post('/api/embed/connect', async (req, res) => {
     if (!norm.ok) return res.status(400).json({ error: norm.error, code: norm.code });
 
     // Validate the key with a tiny call before we store it.
-    try {
-      const client = getClient(anthropicKey);
-      await client.messages.create({ model: 'claude-haiku-4-5-20251001', max_tokens: 4, messages: [{ role: 'user', content: 'ping' }] });
-    } catch (e) {
-      return res.status(400).json({ error: 'Anthropic key rejected: ' + String(e.message || '').slice(0, 140) });
+    if (!freeWidget) {
+      try {
+        const client = getClient(anthropicKey);
+        await client.messages.create({ model: 'claude-haiku-4-5-20251001', max_tokens: 4, messages: [{ role: 'user', content: 'ping' }] });
+      } catch (e) {
+        return res.status(400).json({ error: 'Anthropic key rejected: ' + String(e.message || '').slice(0, 140) });
+      }
     }
+    const crawlKey = freeWidget ? process.env.ANTHROPIC_SUPPORT_KEY : anthropicKey;
 
     const owner = (user.email || '').trim().toLowerCase();
     const ownerH = userHash(owner);
@@ -1533,7 +1621,7 @@ app.post('/api/embed/connect', async (req, res) => {
 
     const token = newPkToken();
     const rec = {
-      token, owner, keyEnc: encryptSecret(anthropicKey),
+      token, owner, keyEnc: freeWidget ? null : encryptSecret(anthropicKey), freeWidget,
       appId: learnedAppId, appUrl: norm.original,
       createdAt: new Date().toISOString(), revoked: false, learning: !learnedAppId,
     };
@@ -1551,7 +1639,7 @@ app.post('/api/embed/connect', async (req, res) => {
         const appId = appUrl.replace(/https?:\/\//, '').replace(/[^a-z0-9]/gi, '-').substring(0, 40) + '--' + ownerH.substring(0, 4) + '-' + randomUUID().substring(0, 4);
         try {
           await acquireScanSlot();
-          await crawlApp(appId, norm.navigable, { email, password }, '', anthropicKey, () => {}, owner, { explicitScheme: norm.explicitScheme });
+          await crawlApp(appId, norm.navigable, { email, password }, '', crawlKey, () => {}, owner, { explicitScheme: norm.explicitScheme });
           rec.appId = appId; rec.learning = false; saveEmbedTokens();
           console.log('[embed] learned app for token', token.slice(0, 14), '→', appId);
         } catch (e) {
@@ -1639,8 +1727,17 @@ app.post('/api/embed/run', async (req, res) => {
     }
 
     // BYOK: the owner's stored key. Legacy env-map tokens fall back to support.
+    // A free-plan widget (no key stored) spends one of the owner's free runs
+    // per run on the support key — the token is public, so this is the gate
+    // that keeps a copied snippet from spending more than the account has.
     const effectiveApiKey = resolved.apiKey || process.env.ANTHROPIC_SUPPORT_KEY;
     if (!effectiveApiKey) return res.status(500).json({ error: 'No API key available for this token.' });
+    let freeHold = null;
+    if (!resolved.apiKey && resolved.freeWidget) {
+      if (isFreeBudgetExceeded()) return res.status(429).json({ error: 'Free runs are paused for today — the app owner can add a Claude API key to the widget, or try again tomorrow.', code: 'FREE_BUDGET_EXCEEDED' });
+      freeHold = await takeFreeRunDetached(owner);
+      if (!freeHold) return res.status(402).json({ error: 'The free run for this widget is used up. The app owner can add a Claude API key in TestPilot → Widget to keep it running.', code: 'FREE_RUN_USED' });
+    }
 
     const testId = randomUUID();
     res.json({ testId, status: 'started' });
@@ -1649,7 +1746,7 @@ app.post('/api/embed/run', async (req, res) => {
       await acquireScanSlot();
       try { await runAgentTest(testId, appKnowledge, scenario, { ownerEmail: owner, sessionState, allowReplay: true }, effectiveApiKey); }
       catch (e) { const r = testResults.get(testId); if (r) { r.status = 'error'; r.error = e.message; } }
-      finally { releaseScanSlot(); }
+      finally { releaseScanSlot(); if (freeHold && !CHARGED_RUN_STATUSES.includes(testResults.get(testId)?.status)) freeHold.refund(); }
     })();
   } catch (e) {
     if (!res.headersSent) res.status(500).json({ error: e.message });
@@ -10543,14 +10640,22 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
   const dbUser = ownerEmail ? await getUserByEmail(ownerEmail) : null;
   const userPlan = sessionUser?.plan || dbUser?.plan || 'free';
   let extraRunHold = null;
+  let sequenceFollowUp = false;   // a later role of a free Multi-Role sequence: already paid for
+  let sequenceToOpen = null;      // first role of one: registered when the run starts
   if (userPlan === 'free') {
     const _rawUsed = !!(sessionUser?.free_run_used || dbUser?.free_run_used);
-    // Extra runs only for a real session: the cookie-less path takes the
-    // email from the body, and an email is not a secret.
-    const _gate = takeExtraRunOrDeny(res, sessionUser ? ownerEmail : '', _rawUsed,
-      { error: 'Free run already used. Choose a plan to continue.', code: 'FREE_RUN_USED' });
-    if (_gate.denied) return;
-    extraRunHold = _gate.hold;
+    const { sequenceId, sequenceRoles } = req.body || {};
+    if (sessionUser && freeRun && freeSequenceFollowUp(sequenceId, ownerEmail, appId)) {
+      sequenceFollowUp = true;
+    } else {
+      // Extra runs only for a real session: the cookie-less path takes the
+      // email from the body, and an email is not a secret.
+      const _gate = takeExtraRunOrDeny(res, sessionUser ? ownerEmail : '', _rawUsed,
+        { error: 'Free run already used. Choose a plan to continue.', code: 'FREE_RUN_USED' });
+      if (_gate.denied) return;
+      extraRunHold = _gate.hold;
+      if (sessionUser && freeRun && sequenceId) sequenceToOpen = { sequenceId, roles: sequenceRoles };
+    }
     // One free run per free account, enforced by free_run_used below — that
     // flag is the real control, and it is persisted, so a forged session cannot
     // spend a second one.
@@ -10626,15 +10731,11 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
   // burn — if the test errors out the user still loses their free run, but
   // that prevents abuse via aborted-then-retried calls. Frontend gets the 402
   // on the NEXT /api/test attempt.
-  const freeRunBurned = userPlan === 'free' && !!ownerEmail && !extraRunHold;   // an extra run touches only the counter
-  if (freeRunBurned) {
-    supabase('PATCH', 'users', { free_run_used: true }, `?email=eq.${encodeURIComponent(ownerEmail)}`).catch(() => {});
-    let dirty = false;
-    for (const [, session] of sessions) {
-      if (session.email === ownerEmail) { session.free_run_used = true; dirty = true; }
-    }
-    if (dirty) saveSessions();
-  }
+  const freeRunBurned = userPlan === 'free' && !!ownerEmail && !extraRunHold && !sequenceFollowUp;   // an extra run touches only the counter; a sequence follow-up was paid by its first role
+  if (freeRunBurned) burnBaseFreeRun(ownerEmail);
+  // The run is starting: this is where a free sequence opens or a follow-up slot is spent.
+  if (userPlan === 'free' && sequenceToOpen) openFreeSequence(sequenceToOpen.sequenceId, ownerEmail, appId, sequenceToOpen.roles);
+  if (sequenceFollowUp) consumeFreeSequence(req.body.sequenceId);
 
   // Run behind the concurrency cap: acquire a slot (awaits if queued), run, then
   // release so the next queued scan starts. Owner is stamped inside runAgentTest
@@ -10672,7 +10773,7 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
       // Charged only when the run produced a verdict about the app. Repeat guard:
       // two consecutive completed_with_unverified on the same (user, app,
       // scenario) = the tool failing to confirm → the 2nd is free.
-      const CHARGED_STATUSES = ['completed', 'completed_with_bugs', 'completed_with_unverified'];
+      const CHARGED_STATUSES = CHARGED_RUN_STATUSES;
       if (!CHARGED_STATUSES.includes(_finalStatus)) {
         const _r = testResults.get(testId);
         alertOnboardingIssue({ stage: 'test', email: ownerEmail, url: appKnowledge?.url, status: _finalStatus, error: _r?.error || `run ended ${_finalStatus || 'without a status'}`, code: _finalStatus, detail: `scenario: ${String(scenario || '').slice(0, 300)} | testId ${testId}` });
@@ -12194,6 +12295,42 @@ app.patch('/api/v1/apps/:appId/scenarios/:scenarioId', async (req, res) => {
 // from the crawl), generates candidate scenarios, persists them, returns the
 // list. Idempotent-ish: dedupes by name within the existing app's scenarios
 // before writing, so re-clicking "Suggest" doesn't pile duplicates.
+// Report history for the Monitor step: one row per tested commit, written by
+// runStagingSafeTests (routes/staging-test.js).
+app.get('/api/v1/apps/:appId/reports', async (req, res) => {
+  const { appId } = req.params;
+  if (!ownsApp(appId, requesterEmail(req))) return res.status(403).json({ error: 'This app belongs to another account.', code: 'OWNERSHIP_MISMATCH' });
+  try {
+    const list = await supabase('GET', 'reports', null, `?app_id=eq.${encodeURIComponent(appId)}&order=created_at.desc&limit=30&select=*`);
+    res.json(Array.isArray(list) ? list : []);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Baseline: deploy the repo's current commit to staging and run the saved
+// scenarios against it — the same path a push takes, started by hand.
+app.post('/api/v1/apps/:appId/baseline', async (req, res) => {
+  const { appId } = req.params;
+  if (!ownsApp(appId, requesterEmail(req))) return res.status(403).json({ error: 'This app belongs to another account.', code: 'OWNERSHIP_MISMATCH' });
+  try {
+    const rows = await supabase('GET', 'apps', null, `?app_id=eq.${encodeURIComponent(appId)}&select=github_repo,github_access_token,netlify_site_id,last_commit_sha,last_commit_message`);
+    const app = Array.isArray(rows) ? rows[0] : null;
+    if (!app || !app.github_repo || !app.github_access_token) return res.status(400).json({ error: 'Connect GitHub first.', code: 'GITHUB_NOT_CONNECTED' });
+    if (!app.netlify_site_id) return res.status(400).json({ error: 'The staging site is not provisioned yet.', code: 'STAGING_NOT_PROVISIONED' });
+    const scenarios = await supabase('GET', 'scenarios', null, `?app_id=eq.${encodeURIComponent(appId)}&status=eq.active&select=scenario_id`);
+    if (!Array.isArray(scenarios) || scenarios.length === 0) return res.status(400).json({ error: 'Save at least one scenario first.', code: 'NO_SCENARIOS' });
+    let sha = app.last_commit_sha, message = app.last_commit_message || 'Baseline run';
+    if (!sha) {
+      // No push seen yet: take the default branch's head from GitHub.
+      const gh = await fetch(`https://api.github.com/repos/${app.github_repo}/commits/HEAD`, { headers: { Authorization: `Bearer ${app.github_access_token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'TestPilot' } });
+      if (!gh.ok) return res.status(502).json({ error: `Could not read the repository's latest commit from GitHub (${gh.status}).` });
+      const c = await gh.json();
+      sha = c.sha; message = (c.commit?.message || 'Baseline run').split('\n')[0];
+    }
+    res.json({ ok: true, commit_sha: sha, scenarios: scenarios.length, message: 'Baseline started: deploying the current commit and running your scenarios. Results appear under Monitor and by email.' });
+    triggerStagingDeploy(appId, sha, message).catch((err) => console.error(`[Staging Safe] Baseline failed for app=${appId}:`, err.message));
+  } catch (e) { if (!res.headersSent) res.status(500).json({ error: e.message }); }
+});
+
 app.post('/api/v1/apps/:appId/scenarios/suggest', async (req, res) => {
   const { appId } = req.params;
   const map = platformMaps.get(appId);
@@ -12436,6 +12573,7 @@ function requireChatSession(req, res) {
   return session;
 }
 
+const FREE_CHAT_COMMANDS = 20;   // one free interactive session = this many commands on the support key
 app.post('/api/chat/start', async (req, res) => {
   const user = requireUser(req, res);
   if (!user) return;
@@ -12461,7 +12599,15 @@ app.post('/api/chat/start', async (req, res) => {
     }
   }
 
-  const { appId, email, password, apiKey, securityMode } = req.body;
+  const { appId, email, password, securityMode } = req.body;
+  let { apiKey } = req.body;
+  // Free plan without a key: the session runs on the support key — the free
+  // run was taken above — capped at FREE_CHAT_COMMANDS commands.
+  const freeChat = !apiKey && user.plan === 'free';
+  if (freeChat) {
+    if (isFreeBudgetExceeded()) return res.status(429).json({ error: 'Free runs are paused for today — add your own Claude API key, or try again tomorrow.', code: 'FREE_BUDGET_EXCEEDED' });
+    apiKey = process.env.ANTHROPIC_SUPPORT_KEY;
+  }
   if (!apiKey) return res.status(400).json({ error: 'API key required' });
   const appKnowledge = platformMaps.get(appId);
   if (!appKnowledge) return res.status(404).json({ error: 'App not found' });
@@ -12531,6 +12677,7 @@ app.post('/api/chat/start', async (req, res) => {
 
     chatSessions.set(sessionId, {
       browser, context, page, appId, apiKey,
+      freeChat, commandsLeft: freeChat ? FREE_CHAT_COMMANDS : null,
       history: [],
       userId: user.userId,
       ownerEmail: user.email,
@@ -12548,10 +12695,7 @@ app.post('/api/chat/start', async (req, res) => {
     // (browser launched, page loaded, login attempted). Flat consume, no
     // refund path: see the plan-gate comment above for why.
     if (user.plan === 'free' && !extraRunHold) {   // an extra run touches only the counter
-      supabase('PATCH', 'users', { free_run_used: true }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
-      let _chatDirty = false;
-      for (const [, s] of sessions) { if (s.email === user.email) { s.free_run_used = true; _chatDirty = true; } }
-      if (_chatDirty) saveSessions();
+      burnBaseFreeRun(user.email);
     } else if (user.plan === 'onerun') {
       const dbUser = await getUserByEmail(user.email);
       const credits = Number(dbUser?.credits || 0);
@@ -12564,7 +12708,7 @@ app.post('/api/chat/start', async (req, res) => {
     }
 
     if (extraRunHold) extraRunHold.commit();
-    res.json({ sessionId, screenshot, url: page.url(), loggedIn: loginResult.success });
+    res.json({ sessionId, screenshot, url: page.url(), loggedIn: loginResult.success, freeChat, commandsLeft: freeChat ? FREE_CHAT_COMMANDS : null });
   } catch (e) {
     console.error('Chat start error:', e.message);
     if (browser) {
@@ -12578,10 +12722,20 @@ app.post('/api/chat/:sessionId/message', async (req, res) => {
   const session = requireChatSession(req, res);
   if (!session) return;
 
-  const { message, apiKey } = req.body;
+  const { message } = req.body;
+  // A free session stays on the support key for its whole life: the client's
+  // key is ignored here, so a session is never half free, half BYOK.
+  const apiKey = session.freeChat ? null : req.body.apiKey;
+  if (session.freeChat) {
+    if (session.commandsLeft <= 0) return res.status(402).json({ error: `Your free interactive session is at its ${FREE_CHAT_COMMANDS}-command limit. Add your Claude API key in the sidebar and start a new session to keep going.`, code: 'FREE_CHAT_LIMIT' });
+    if (isFreeBudgetExceeded()) return res.status(429).json({ error: 'Free runs are paused for today — add your own Claude API key, or try again tomorrow.', code: 'FREE_BUDGET_EXCEEDED' });
+  }
   const page = session.page;
   const appKnowledge = platformMaps.get(session.appId);
   if (!appKnowledge) return res.status(404).json({ error: 'App knowledge not found' });
+  // A command counts once the work starts; a handler error below gives it back.
+  let commandCounted = false;
+  if (session.freeChat) { session.commandsLeft -= 1; commandCounted = true; }
   const knowledgeCtx = buildKnowledgeContext(appKnowledge);
 
   try {
@@ -12783,6 +12937,7 @@ Based ONLY on what is visible in this CURRENT screenshot (after the actions ran)
 
     res.json({ reply: finalReply, actions: allResults, screenshot: afterScreenshot, url: page.url() });
   } catch (e) {
+    if (commandCounted) session.commandsLeft += 1;   // nothing ran: the command is not spent
     res.status(500).json({ error: e.message });
   }
 });
@@ -16016,9 +16171,18 @@ async function runSchedule(s) {
   const appKnowledge = platformMaps.get(s.appId);
   if (!appKnowledge) return finish('App not learned (map missing) — re-learn it.');
 
-  let apiKey = null;
+  let apiKey = null, freeHold = null;
   try { if (s.keyEnc) apiKey = decryptSecret(s.keyEnc); } catch {}
   if (!apiKey && s.useSupportKey) apiKey = process.env.ANTHROPIC_SUPPORT_KEY;
+  if (!apiKey && s.freeSchedule) {
+    // Each execution is one free run. When the account has none left the
+    // schedule pauses and says so, instead of failing silently every interval.
+    if (isFreeBudgetExceeded()) return finish('Free runs are paused for today — this execution was skipped.');
+    freeHold = await takeFreeRunDetached(s.ownerEmail);
+    if (!freeHold) { s.active = false; return finish('Your free run is used up — add your Claude API key to this schedule (delete and recreate it with the key) to keep it running.'); }
+    if (!process.env.ANTHROPIC_SUPPORT_KEY) { freeHold.refund(); return finish('No usable API key on schedule.'); }
+    apiKey = process.env.ANTHROPIC_SUPPORT_KEY;
+  }
   if (!apiKey) return finish('No usable API key on schedule.');
 
   let sessionState = null;
@@ -16035,6 +16199,7 @@ async function runSchedule(s) {
   } finally {
     releaseScanSlot();
     recordScanOutcome(testResults.get(testId)?.status);
+    if (freeHold && !CHARGED_RUN_STATUSES.includes(testResults.get(testId)?.status)) freeHold.refund();
   }
 
   const result = testResults.get(testId);
@@ -16109,10 +16274,16 @@ app.post('/api/schedules', async (req, res) => {
   if (!ownsApp(appId, ownerEmail) && !isSuperAdmin(ownerEmail))
     return res.status(403).json({ error: 'This app belongs to another account.', code: 'APP_OWNED_BY_OTHER' });
 
-  // Keys: BYOK required; only the super admin may lean on the shared support key.
-  let keyEnc = null, wantSupport = false;
+  // Keys: BYOK, or the super admin on the shared support key, or a free-plan
+  // schedule that spends the account's free run(s) one execution at a time.
+  let keyEnc = null, wantSupport = false, freeSchedule = false;
   if (apiKey) { try { keyEnc = encryptSecret(apiKey); } catch { return res.status(500).json({ error: 'Secret store unavailable' }); } }
   else if (useSupportKey && isSuperAdmin(ownerEmail)) wantSupport = true;
+  else if (user.plan === 'free') {
+    const dbUser = await getUserByEmail(ownerEmail);
+    if (freeRunExhausted(ownerEmail, user.free_run_used || dbUser?.free_run_used, 'free')) return res.status(402).json({ error: 'Your free run is used up — add your Claude API key to schedule runs.', code: 'FREE_RUN_USED' });
+    freeSchedule = true;
+  }
   else return res.status(400).json({ error: 'An Anthropic apiKey is required for scheduled runs.' });
 
   let sessionStateEnc = null;
@@ -16126,7 +16297,7 @@ app.post('/api/schedules', async (req, res) => {
   const rec = {
     id, appId, scenario: String(scenario).slice(0, 2000),
     ownerEmail, ownerUserId: user.userId || null,
-    keyEnc, useSupportKey: wantSupport, sessionStateEnc,
+    keyEnc, useSupportKey: wantSupport, freeSchedule, sessionStateEnc,
     intervalHours: interval,
     alertEmail: (alertEmail || ownerEmail || '').trim().toLowerCase() || null,
     active: true, createdAt: new Date().toISOString(),

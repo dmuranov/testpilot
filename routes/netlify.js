@@ -202,6 +202,9 @@ router.post('/apps/:app_id/staging/provision', async (req, res) => {
     if (app.netlify_site_id) {
       return res.json({ success: true, message: 'Staging already provisioned', staging_url: app.staging_url });
     }
+    if (!NETLIFY_TOKEN) {
+      return res.status(503).json({ error: 'Staging Safe is not switched on for this TestPilot yet: the operator has not configured the Netlify connection. Your GitHub connection is saved; the staging site will be created once it is.', code: 'STAGING_NOT_CONFIGURED' });
+    }
 
     console.log(`[Staging Safe] Provisioning Netlify site for app ${app_id} (${app.name})`);
     const { netlify_site_id, staging_url } = await provisionNetlifySite();
@@ -286,6 +289,8 @@ export async function triggerStagingDeploy(appId, commitSha, commitMessage) {
     console.log(`[Staging Safe] Deploying commit ${commitSha} for app ${appId}`);
     const deploy = await deployToNetlify(app, commitSha);
     console.log(`[Staging Safe] Deploy complete: ${deploy.staging_url}`);
+    // A manual deploy (baseline, "deploy now") records the commit like a push does.
+    await supabaseClient.from('apps').update({ last_commit_sha: commitSha, last_commit_message: commitMessage || null }).eq('app_id', appId);
 
     // Auto-run scenarios after the deploy is live. server.js sets
     // globalThis.__tpHelpers because importing helpers from ../server.js
@@ -328,7 +333,7 @@ router.post('/apps/:app_id/staging/deploy', async (req, res) => {
 
     res.json({ success: true, message: 'Staging deploy started', commit_sha: sha });
 
-    triggerStagingDeploy(app_id, sha, app.last_commit_message).catch(err => {
+    triggerStagingDeploy(app_id, sha, app.last_commit_message || 'Manual deploy').catch(err => {
       console.error('Manual staging deploy failed:', err.message);
     });
 

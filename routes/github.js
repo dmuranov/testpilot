@@ -190,6 +190,9 @@ async function getUserRepos(accessToken) {
 router.get('/auth/github', async (req, res) => {
   const { app_id } = req.query;
   if (!app_id) return res.status(400).json({ error: 'app_id is required' });
+  if (!GITHUB_CLIENT_ID || !GITHUB_CLIENT_SECRET) {
+    return res.status(503).send('Staging Safe is not switched on for this TestPilot yet: the GitHub connection has not been configured by the operator. Use the back button; the other tests are unaffected.');
+  }
 
   // Was open to any visitor naming any app_id. The flow now only starts for the
   // signed-in owner of that app, which is also what binds the nonce below.
