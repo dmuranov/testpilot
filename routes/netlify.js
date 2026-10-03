@@ -289,6 +289,8 @@ export async function triggerStagingDeploy(appId, commitSha, commitMessage) {
     console.log(`[Staging Safe] Deploying commit ${commitSha} for app ${appId}`);
     const deploy = await deployToNetlify(app, commitSha);
     console.log(`[Staging Safe] Deploy complete: ${deploy.staging_url}`);
+    // A manual deploy (baseline, "deploy now") records the commit like a push does.
+    await supabaseClient.from('apps').update({ last_commit_sha: commitSha, last_commit_message: commitMessage || null }).eq('app_id', appId);
 
     // Auto-run scenarios after the deploy is live. server.js sets
     // globalThis.__tpHelpers because importing helpers from ../server.js

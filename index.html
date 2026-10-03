@@ -19,6 +19,12 @@
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
 <script type="text/javascript">/* Cookie consent — gates Microsoft Clarity (GDPR/ePrivacy: no analytics before opt-in; choice remembered). */
 (function(){var KEY='tp-cookie-consent';function loadClarity(){(function(c,l,a,r,i,t,y){c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y)})(window,document,"clarity","script","w97af8wesr");}function get(){try{return localStorage.getItem(KEY);}catch(e){return null;}}function decide(v){try{localStorage.setItem(KEY,v);}catch(e){}var b=document.getElementById('tp-consent');if(b&&b.parentNode)b.parentNode.removeChild(b);if(v==='granted')loadClarity();}var c=get();if(c==='granted'){loadClarity();return;}if(c==='denied'){return;}function show(){if(document.getElementById('tp-consent'))return;var d=document.createElement('div');d.id='tp-consent';d.setAttribute('role','dialog');d.setAttribute('aria-label','Cookie consent');d.style.cssText='position:fixed;left:16px;right:16px;bottom:16px;z-index:2147483647;max-width:560px;margin:0 auto;background:#111;border:1px solid rgba(200,240,64,0.3);border-radius:6px;padding:16px 18px;font-family:system-ui,-apple-system,sans-serif;box-shadow:0 8px 32px rgba(0,0,0,0.55)';d.innerHTML='<p style="margin:0 0 12px;font-size:13px;line-height:1.6;color:#cfcfcf">We use analytics cookies (Microsoft Clarity) to see how TestPilot is used and improve it. Accept or decline — your choice is remembered. See our <a href="/privacy.html" style="color:#c8f040">Privacy Policy</a>.</p><div style="display:flex;gap:8px;justify-content:flex-end"><button id="tpc-no" style="background:transparent;border:1px solid #444;color:#ccc;font-size:13px;padding:8px 16px;border-radius:4px;cursor:pointer">Decline</button><button id="tpc-yes" style="background:#c8f040;border:none;color:#080808;font-weight:700;font-size:13px;padding:8px 16px;border-radius:4px;cursor:pointer">Accept</button></div>';document.body.appendChild(d);document.getElementById('tpc-yes').onclick=function(){decide('granted');};document.getElementById('tpc-no').onclick=function(){decide('denied');};}if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',show);}else{show();}})();
+// The repository list, shown when GitHub is connected but no repository name matched the app.
+function ssRepoChooser(ss) {
+  if (Array.isArray(ss.repos)) return `<div style="margin:12px 0"><div style="font-size:12px;color:var(--text-dim);margin-bottom:8px">GitHub is connected. None of your repositories is named like this app — pick the one that holds its code:</div><div style="display:flex;flex-direction:column;gap:6px;max-height:260px;overflow:auto">${ss.repos.map(r => `<button class="btn btn-ghost btn-sm" style="justify-content:space-between" onclick="ssConnectRepo('${tpEsc(ss.app?.appId || '')}', '${tpEsc(r.full_name)}')"><span>${tpEsc(r.full_name)}</span><span style="font-size:10px;color:var(--text-muted)">${r.private ? 'private' : 'public'}</span></button>`).join('')}</div></div>`;
+  if (ss.connectingRepo) return `<div style="margin:12px 0;font-size:12px;color:var(--text-dim)"><span class="loader"></span> Connecting ${tpEsc(ss.connectingRepo)} and creating the staging site…</div>`;
+  return '';
+}
 function renderStagingSafe() {
   const ss = state.stagingSafe;
   const phases = ['Connect', 'Learn', 'Scenarios', 'Baseline', 'Monitor'];
@@ -127,6 +133,7 @@ function renderStagingSafe() {
               : `<span class="badge badge-yellow">Provisioning…</span>`
             }
           </div>
+          ${ssRepoChooser(ss)}
           ${ss.stagingUrl ? `
             <div style="font-size:11px;font-family:'DM Mono',monospace;color:var(--text-muted);line-height:1.7;margin-top:12px;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius)">
               Unlisted, not password-protected — the random name is the only thing keeping this
@@ -147,7 +154,7 @@ function renderStagingSafe() {
             deploy to an unlisted staging URL, and run your scenarios automatically.
           </p>
 
-          <div style="margin-bottom:16px" id="ss-repo-list"></div>
+          <div style="margin-bottom:16px" id="ss-repo-list">${ssRepoChooser(ss)}</div>
 
           <button class="btn btn-primary" style="width:100%;justify-content:center;gap:10px" onclick="ssConnectGitHub()">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
@@ -189,12 +196,16 @@ function renderStagingSafe() {
           and use that knowledge to propose scenarios. Provide a test account it can use.
         </p>
 
-        <div class="form-group">
+        <div class="form-group" style="display:flex;align-items:center;gap:10px">
+          <input type="checkbox" id="ss-no-login" ${ss.noLogin ? 'checked' : ''} onchange="state.stagingSafe.noLogin = this.checked; render()" style="width:16px;height:16px;accent-color:var(--accent);cursor:pointer" />
+          <label for="ss-no-login" style="cursor:pointer;font-size:13px;color:var(--text-dim);margin:0">No login required — the staging site is public</label>
+        </div>
+        <div class="form-group" style="${ss.noLogin ? 'display:none' : ''}">
           <label>Test Account Email</label>
           <input class="form-input" id="ss-cred-email" placeholder="test@yourapp.com"
             value="${ss.app?.test_credentials_email || ''}" />
         </div>
-        <div class="form-group">
+        <div class="form-group" style="${ss.noLogin ? 'display:none' : ''}">
           <label>Test Account Password</label>
           <input class="form-input" type="password" id="ss-cred-password" placeholder="••••••••"
             value="${ss.app?.test_credentials_password || ''}" />
@@ -577,21 +588,38 @@ async function ssAutoConnectRepo(appId) {
     const repos = data.repos || [];
     if (repos.length === 0) return;
 
-    // Auto-select: prefer repo whose name matches app name, else take first
+    // A repository whose name matches the app is connected on its own; with
+    // no match the list is shown and the user picks. (Before, "any repo named
+    // dashboard or app, else the first one" could register a webhook on an
+    // unrelated repository.)
     const app = state.stagingSafe.app;
-    const appName = (app?.name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-    const match = repos.find(r => r.name.toLowerCase().replace(/[^a-z0-9]/g, '').includes(appName))
-      || repos.find(r => r.name.toLowerCase().includes('dashboard') || r.name.toLowerCase().includes('app'))
-      || repos[0];
+    const appName = (app?.name || app?.summary?.appName || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const match = appName.length >= 4 ? repos.find(r => norm(r.name).includes(appName) || appName.includes(norm(r.name))) : null;
+    if (!match) {
+      state.stagingSafe.repos = repos.slice(0, 30);
+      render();
+      return;
+    }
+    await ssConnectRepo(appId, match.full_name);
+  } catch (e) {
+    console.error('Auto-connect repo failed:', e.message);
+  }
+}
 
-    if (!match) return;
-
-    // Connect the repo
-    await fetch(`/api/v1/apps/${appId}/github/connect-repo`, {
+async function ssConnectRepo(appId, fullName) {
+  state.stagingSafe.repos = null;
+  state.stagingSafe.connectingRepo = fullName;
+  render();
+  try {
+    const cr = await fetch(`/api/v1/apps/${appId}/github/connect-repo`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ repo: match.full_name })
+      body: JSON.stringify({ repo: fullName })
     });
+    const crData = await cr.json().catch(() => ({}));
+    if (!cr.ok) { tpToast(crData.error || 'Could not connect the repository.', 'error'); state.stagingSafe.connectingRepo = null; render(); return; }
+    state.stagingSafe.repo = fullName;
 
     // Now provision Netlify
     const prov = await fetch(`/api/v1/apps/${appId}/staging/provision`, { method: 'POST' });
@@ -605,45 +633,70 @@ async function ssAutoConnectRepo(appId) {
       tpToast(provData.error || 'Could not create the staging site.', 'error');
     }
   } catch (e) {
-    console.error('Auto-connect repo failed:', e.message);
+    tpToast('Could not connect the repository — try again.', 'error');
   }
+  state.stagingSafe.connectingRepo = null;
+  render();
 }
 
 async function ssStartLearn() {
   const app = state.stagingSafe.app;
-  const email = document.getElementById('ss-cred-email')?.value?.trim();
-  const password = document.getElementById('ss-cred-password')?.value?.trim();
+  const noLogin = !!state.stagingSafe.noLogin;
+  const email = noLogin ? '' : document.getElementById('ss-cred-email')?.value?.trim();
+  const password = noLogin ? '' : document.getElementById('ss-cred-password')?.value?.trim();
 
-  if (!email || !password) {
-    tpToast('Please enter test credentials first');
+  if (!noLogin && (!email || !password)) {
+    tpToast('Enter a test login, or tick "No login required"');
     return;
   }
 
   state.stagingSafe.learnStatus = 'running';
+  state.stagingSafe.learnError = null;
   render();
 
-  // Use existing /api/learn endpoint with staging URL
+  // Same /api/learn as the Learn page, pointed at the staging URL. It streams
+  // progress; the step is complete when the crawl says so, not when the
+  // response headers arrive.
   const stagingUrl = state.stagingSafe.stagingUrl || app.url;
-  const res = await fetch('/api/learn', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      url: stagingUrl,
-      email: email,
-      password: password,
-      description: 'Staging Safe learn for ' + (app.name || app.appId),
-      apiKey: getApiKey(),
-      freeLearn: currentUser?.plan === 'free' && !currentUser?.free_run_used
-    })
-  });
-
-  if (res.ok || res.status === 200) {
-    state.stagingSafe.learnStatus = 'complete';
-    render();
-  } else {
+  try {
+    const res = await fetch('/api/learn', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        url: stagingUrl,
+        email: email,
+        password: password,
+        description: 'Staging Safe learn for ' + (app.name || app.appId),
+        apiKey: getApiKey(),
+        userEmail: currentUser?.email,
+        freeLearn: currentUser?.plan === 'free' && !currentUser?.free_run_used
+      })
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      state.stagingSafe.learnStatus = 'failed';
+      state.stagingSafe.learnError = err.error || ('Learn failed (' + res.status + ')');
+      render(); return;
+    }
+    const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = ''; let failed = null;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const parts = buf.split('\n\n'); buf = parts.pop();
+      for (const p of parts) {
+        const line = p.split('\n').find(l => l.startsWith('data:'));
+        if (!line) continue;
+        try { const ev = JSON.parse(line.slice(5)); if (ev.type === 'error') failed = ev.message || 'Learn failed'; } catch {}
+      }
+    }
+    state.stagingSafe.learnStatus = failed ? 'failed' : 'complete';
+    state.stagingSafe.learnError = failed;
+  } catch (e) {
     state.stagingSafe.learnStatus = 'failed';
-    render();
+    state.stagingSafe.learnError = 'Network error — try again.';
   }
+  render();
 }
 
 async function ssSuggestScenarios() {
@@ -748,22 +801,17 @@ async function ssRunBaseline() {
   const app = state.stagingSafe.app;
   if (!app) return;
 
-  // Trigger baseline via the existing test infrastructure
-  await fetch(`/api/v1/apps/${app.appId}/baseline`, {
+  // The server deploys the current commit to staging and runs the saved
+  // scenarios — the same path a push takes. Results land under Monitor.
+  const res = await fetch(`/api/v1/apps/${app.appId}/baseline`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ apiKey: getApiKey() })
-  });
-
-  // For now optimistically mark as run — real status comes from SSE/polling
+  }).catch(() => null);
+  const data = res ? await res.json().catch(() => ({})) : {};
+  if (!res || !res.ok) { tpToast(data.error || 'Could not start the baseline run.', 'error'); return; }
   state.stagingSafe.baselineRun = true;
-
-  // Update scenario baseline_results (will be populated by the server)
-  state.stagingSafe.scenarios = state.stagingSafe.scenarios.map(sc => ({
-    ...sc,
-    baseline_result: 'passing' // placeholder — server will update
-  }));
-
+  tpToast(data.message || 'Baseline started.');
   render();
 }
 
@@ -2182,7 +2230,7 @@ function freeRunsLeft() {
 function isFreeRunAvailable() { return freeRunsLeft() > 0; }
 function keyBadge() {
   if (hasApiKey() || isFreeRunAvailable()) return '';
-  return '<span title="Runs on your own Claude API key — no free run for this one" style="font-size:9px;font-weight:700;background:rgba(251,191,36,0.1);color:#f59e0b;border:1px dashed rgba(251,191,36,0.4);border-radius:2px;padding:1px 5px;margin-left:4px">🔑 needs key</span>';
+  return '<span title="Your free run is used up — this needs your own Claude API key" style="font-size:9px;font-weight:700;background:rgba(251,191,36,0.1);color:#f59e0b;border:1px dashed rgba(251,191,36,0.4);border-radius:2px;padding:1px 5px;margin-left:4px">🔑 needs key</span>';
 }
 function keyBox(html, margin) {
   return `<div style="max-width:620px;margin:${margin || '0 0 16px'};padding:12px 14px;border:1px solid rgba(251,191,36,0.35);background:rgba(251,191,36,0.06);border-radius:4px;font-size:12.5px;line-height:1.6;color:var(--text-dim)">🔑 ${html}</div>`;
