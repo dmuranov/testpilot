@@ -16364,15 +16364,15 @@ globalThis.__tpHelpers = { supabase, runAgentTest, testResults, testStreams, pla
 // unaffected (flag unset → listens as before).
 if (process.env.GAUNTLET !== '1') {
   const httpServer = app.listen(PORT, () => console.log(`TestPilot V2 running on http://localhost:${PORT}`));
-  // Node closes an idle keep-alive connection after 5s by default. A browser
-  // that still holds that socket sends its next POST into a closed connection
-  // and gets a network error — and Chrome does not retry a failed POST. Seen
-  // on 2026-09-28: the first-run form, filled in over ~30s, answered "Network
-  // error — try again" on the first Continue and worked on the second. Keep
-  // idle connections longer than any browser or proxy does (60s), and let
-  // the headers timeout stay above it as Node requires.
-  httpServer.keepAliveTimeout = 65_000;
-  httpServer.headersTimeout = 66_000;
+  // Node closes an idle keep-alive connection after 5s by default. Caddy, in
+  // front of this process in production, keeps its upstream connections for
+  // 2 minutes and — like a browser — does not retry a POST that died on a
+  // stale socket: the client gets a 502. Seen on 2026-09-28: the first-run
+  // form, filled in over ~30s, answered "Network error — try again" on the
+  // first Continue and worked on the second. Keep idle connections open
+  // longer than Caddy's 2 minutes; headersTimeout must stay above it.
+  httpServer.keepAliveTimeout = 130_000;
+  httpServer.headersTimeout = 131_000;
 }
 
 // Exported for the local gauntlet runner (test/gauntlet) to drive the crawl
