@@ -223,10 +223,12 @@ export async function runStagingSafeTests(
         // Update scenario last_result — but NOT on inconclusive: we don't want
         // a flaky "couldn't test" to clobber the last meaningful baseline.
         if (result !== 'inconclusive') {
-          // A scenario's first real result is its baseline. Without this every
-          // run was "new" and a regression could never be detected.
+          // The baseline is the last known state: set by the first real result
+          // and moved on every fix or regression, so a fixed scenario is not
+          // "fixed" again on every commit and breaking it again is a regression.
           const patch = { last_result: result };
-          if (baselineResult === 'not_run') patch.baseline_result = result === 'passed' ? 'passing' : 'failing';
+          const nowState = result === 'passed' ? 'passing' : 'failing';
+          if (baselineResult !== nowState) patch.baseline_result = nowState;
           await supabase('PATCH', 'scenarios', patch,
             `?scenario_id=eq.${scenario.scenario_id}`
           ).catch(() => {});
@@ -307,16 +309,19 @@ export async function runStagingSafeTests(
       // A failed scenario is a confirmed app defect: never "safe to publish",
       // even when it is not a regression (first run, or already failing).
       const blocked = regressions > 0 || totalFailed > 0;
-      const statusEmoji = blocked ? '⚠️' : '✅';
+      const nothingTested = totalPassed === 0 && totalFailed === 0;   // every scenario was inconclusive
+      const statusEmoji = blocked ? '⚠️' : nothingTested ? '⏳' : '✅';
       const statusLine = regressions > 0
         ? `${regressions} regression${regressions > 1 ? 's' : ''} detected`
         : totalFailed > 0
           ? `${totalFailed} scenario${totalFailed > 1 ? 's' : ''} failing`
           : fixes > 0
             ? `${fixes} issue${fixes > 1 ? 's' : ''} fixed`
-            : inconclusive > 0
-              ? `All tested scenarios passed (${inconclusive} couldn't be tested)`
-              : 'All scenarios passed';
+            : nothingTested
+              ? `No scenario could be tested (${inconclusive})`
+              : inconclusive > 0
+                ? `All tested scenarios passed (${inconclusive} couldn't be tested)`
+                : 'All scenarios passed';
 
       const scenarioRows = testRunResults.map(r => {
         const icon = r.result === 'passed' ? '✅' : r.result === 'inconclusive' ? '⏳' : '❌';
@@ -391,6 +396,7 @@ export async function runStagingSafeTests(
               <p style="margin:0;font-size:14px;font-weight:700">
                 ${regressions > 0 ? '⚠️ Do not publish yet — review regressions first.'
                   : totalFailed > 0 ? '⚠️ Review before publishing — a scenario found a defect in this build.'
+                  : nothingTested ? '⏳ Nothing could be tested on this build — no verdict. Check the test login or try again.'
                   : '✅ Safe to publish.'}
               </p>
               ${inconclusive > 0 ? `<p style="margin:8px 0 0;font-size:12px;color:#cbd5e1">⏳ ${inconclusive} scenario${inconclusive > 1 ? 's' : ''} couldn’t be tested (login/tool/API issue, not your app) — already auto-retried once. These do <strong>not</strong> count as regressions.</p>` : ''}
