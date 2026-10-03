@@ -237,6 +237,20 @@ function updateAppLoginSiteLabel() {
   el.textContent = host ? ' for ' + host : ' for the app above';
 }
 
+// A POST that never reached the server (stale keep-alive socket, a blip in
+// the connection, a restart) is retried once after a short pause before the
+// user is told anything. Only when no response came back at all, or the
+// answer was a gateway error, so a real 4xx is never sent twice.
+async function postJsonWithRetry(url, body) {
+  const once = () => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  try {
+    const res = await once();
+    if (![502, 503, 504].includes(res.status)) return res;
+  } catch (e) { /* no response at all: retry below */ }
+  await new Promise((r) => setTimeout(r, 1200));
+  return once();
+}
+
 async function startFunnel() {
   clearErr('step-start-err');
   const email = document.getElementById('f-email').value.trim().toLowerCase();
@@ -260,11 +274,7 @@ async function startFunnel() {
   if (!attrib) { try { attrib = JSON.parse(localStorage.getItem('tp_attrib') || 'null'); } catch (e) {} }
 
   try {
-    const res = await fetch('/api/funnel/start', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userEmail: email, url, source: attrib?.source || '', medium: attrib?.medium || '', campaign: attrib?.campaign || '' }),
-    });
+    const res = await postJsonWithRetry('/api/funnel/start', { userEmail: email, url, source: attrib?.source || '', medium: attrib?.medium || '', campaign: attrib?.campaign || '' });
     const data = await res.json();
     if (!res.ok || !data.ok) {
       btn.disabled = false; btn.textContent = 'Continue →';
@@ -287,7 +297,7 @@ async function startFunnel() {
     if (sPw && appPw) sPw.value = appPw;
   } catch (e) {
     btn.disabled = false; btn.textContent = 'Continue →';
-    showErr('step-start-err', 'Network error — try again');
+    showErr('step-start-err', 'Could not reach TestPilot (tried twice) — check your connection and press Continue again');
   }
 }
 
@@ -386,17 +396,13 @@ async function runFunnelTest() {
   btn.disabled = true; btn.textContent = 'Starting…';
 
   try {
-    const res = await fetch('/api/test', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        appId: state.appId,
-        scenario,
-        email: appEmail,
-        password: appPw,
-        freeRun: true,
-        userEmail: state.userEmail,
-      }),
+    const res = await postJsonWithRetry('/api/test', {
+      appId: state.appId,
+      scenario,
+      email: appEmail,
+      password: appPw,
+      freeRun: true,
+      userEmail: state.userEmail,
     });
     const data = await res.json();
     if (!res.ok || !data.testId) {
@@ -408,7 +414,7 @@ async function runFunnelTest() {
     streamTest(data.testId);
   } catch (e) {
     btn.disabled = false; btn.textContent = 'Run test →';
-    showErr('step-scenario-err', 'Network error — try again');
+    showErr('step-scenario-err', 'Could not reach TestPilot (tried twice) — check your connection and press Run test again');
   }
 }
 
@@ -478,11 +484,7 @@ async function checkout(plan) {
   // Hand off to the existing checkout endpoint. /api/checkout creates a
   // Stripe session and returns a redirect URL.
   try {
-    const res = await fetch('/api/billing/checkout', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ plan }),
-    });
+    const res = await postJsonWithRetry('/api/billing/checkout', { plan });
     const data = await res.json();
     if (data.url) {
       window.location.href = data.url;
@@ -490,7 +492,7 @@ async function checkout(plan) {
       alert(data.error || 'Could not start checkout');
     }
   } catch {
-    alert('Network error — try again');
+    alert('Could not reach TestPilot (tried twice) — check your connection and try again');
   }
 }
 </script>

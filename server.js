@@ -16363,7 +16363,16 @@ globalThis.__tpHelpers = { supabase, runAgentTest, testResults, testStreams, pla
 // and must NOT bind the port or run the SaaS server. Normal prod start is
 // unaffected (flag unset → listens as before).
 if (process.env.GAUNTLET !== '1') {
-  app.listen(PORT, () => console.log(`TestPilot V2 running on http://localhost:${PORT}`));
+  const httpServer = app.listen(PORT, () => console.log(`TestPilot V2 running on http://localhost:${PORT}`));
+  // Node closes an idle keep-alive connection after 5s by default. A browser
+  // that still holds that socket sends its next POST into a closed connection
+  // and gets a network error — and Chrome does not retry a failed POST. Seen
+  // on 2026-09-28: the first-run form, filled in over ~30s, answered "Network
+  // error — try again" on the first Continue and worked on the second. Keep
+  // idle connections longer than any browser or proxy does (60s), and let
+  // the headers timeout stay above it as Node requires.
+  httpServer.keepAliveTimeout = 65_000;
+  httpServer.headersTimeout = 66_000;
 }
 
 // Exported for the local gauntlet runner (test/gauntlet) to drive the crawl
