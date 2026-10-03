@@ -12318,14 +12318,13 @@ app.post('/api/v1/apps/:appId/baseline', async (req, res) => {
     if (!app.netlify_site_id) return res.status(400).json({ error: 'The staging site is not provisioned yet.', code: 'STAGING_NOT_PROVISIONED' });
     const scenarios = await supabase('GET', 'scenarios', null, `?app_id=eq.${encodeURIComponent(appId)}&status=eq.active&select=scenario_id`);
     if (!Array.isArray(scenarios) || scenarios.length === 0) return res.status(400).json({ error: 'Save at least one scenario first.', code: 'NO_SCENARIOS' });
-    let sha = app.last_commit_sha, message = app.last_commit_message || 'Baseline run';
-    if (!sha) {
-      // No push seen yet: take the default branch's head from GitHub.
-      const gh = await fetch(`https://api.github.com/repos/${app.github_repo}/commits/HEAD`, { headers: { Authorization: `Bearer ${app.github_access_token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'TestPilot' } });
-      if (!gh.ok) return res.status(502).json({ error: `Could not read the repository's latest commit from GitHub (${gh.status}).` });
-      const c = await gh.json();
-      sha = c.sha; message = (c.commit?.message || 'Baseline run').split('\n')[0];
-    }
+    // The baseline is the connected repository's current head, read from
+    // GitHub — not the recorded last push, which can lag or (before the
+    // webhook's repository guard) come from another repository.
+    const gh = await fetch(`https://api.github.com/repos/${app.github_repo}/commits/HEAD`, { headers: { Authorization: `Bearer ${app.github_access_token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'TestPilot' } });
+    if (!gh.ok) return res.status(502).json({ error: `Could not read the repository's latest commit from GitHub (${gh.status}).` });
+    const c = await gh.json();
+    const sha = c.sha, message = 'Baseline: ' + String(c.commit?.message || '').split(/\r?\n/)[0];
     res.json({ ok: true, commit_sha: sha, scenarios: scenarios.length, message: 'Baseline started: deploying the current commit and running your scenarios. Results appear under Monitor and by email.' });
     triggerStagingDeploy(appId, sha, message).catch((err) => console.error(`[Staging Safe] Baseline failed for app=${appId}:`, err.message));
   } catch (e) { if (!res.headersSent) res.status(500).json({ error: e.message }); }

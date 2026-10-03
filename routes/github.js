@@ -373,12 +373,20 @@ router.post('/webhooks/github/:app_id', express.raw({ type: 'application/json' }
     // commit they care about is the latest, which they'll deploy manually).
     const { data: appRow } = await supabaseClient
       .from('apps')
-      .select('monitoring_paused')
+      .select('monitoring_paused, github_repo')
       .eq('app_id', app_id)
       .maybeSingle();
     if (appRow?.monitoring_paused) {
       console.log(`[GitHub Webhook] app=${app_id} ignoring push — monitoring is paused`);
       return res.json({ received: true, action: 'ignored', reason: 'monitoring_paused' });
+    }
+    // Only pushes from the repository this app is connected to count. A hook
+    // left on another repository (an earlier auto-pick connected the wrong
+    // one) must not overwrite the app's commit or deploy foreign code.
+    const pushedRepo = String(payload.repository?.full_name || '').toLowerCase();
+    if (!appRow?.github_repo || pushedRepo !== String(appRow.github_repo).toLowerCase()) {
+      console.warn(`[GitHub Webhook] app=${app_id} ignoring push from ${pushedRepo || 'unknown repo'} — connected repo is ${appRow?.github_repo || 'none'}`);
+      return res.json({ received: true, action: 'ignored', reason: 'repository_mismatch' });
     }
 
     await supabaseClient
