@@ -569,7 +569,7 @@ async function ssConnectGitHub() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       app_id: app.appId,
-      name: app.name || app.appId,
+      name: app.summary?.appName || app.name || app.appId,
       live_url: app.url || '',
       user_email: currentUser?.email || '',
       user_id: currentUser?.email || ''

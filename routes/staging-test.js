@@ -6,6 +6,16 @@
 
 import { randomUUID } from 'crypto';
 
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// The staging row's name is often the internal app id (the dashboard used to
+// send it); the learned map's app name, else the live URL's host, reads better.
+function displayName(app, knowledge) {
+  const learned = knowledge?.summary?.appName;
+  if (learned && !/^(unknown|untitled)$/i.test(String(learned).trim())) return String(learned);
+  if (app?.name && app.name !== app.app_id) return String(app.name);
+  try { return new URL(app?.live_url || app?.staging_url).host; } catch { return String(app?.name || app?.app_id || 'Your app'); }
+}
+
 // Decide a scenario's TRUSTWORTHY outcome from a runAgentTest result.
 // The whole point of Staging Safe is to tell the user "your commit broke
 // something". It must NEVER cry regression because TestPilot itself couldn't
@@ -83,6 +93,7 @@ export async function runStagingSafeTests(
 
     // ── 3. Get the app knowledge map (from crawl/Learn step) ──
     let appKnowledge = platformMaps.get(appId);
+    const appName = displayName(app, appKnowledge);
     if (!appKnowledge) {
       console.warn(`[Staging Safe] No platform map for app ${appId} — tests may be less accurate`);
       // Create a minimal knowledge object so runAgentTest can still attempt
@@ -183,7 +194,9 @@ export async function runStagingSafeTests(
         // Failure detail, tagged with WHY so the user can tell an app defect
         // from a "couldn't test" condition at a glance.
         const failedStep = testResult.steps?.find(s => s.status === 'fail');
-        let failureReason = failedStep?.outcome || testResult.error || testResult.blockedReason?.description || null;
+        const firstBug = Array.isArray(testResult.bugs) ? testResult.bugs[0] : null;
+        let failureReason = (result === 'failed' && (firstBug?.description || firstBug?.what))
+          || failedStep?.outcome || testResult.error || testResult.blockedReason?.description || null;
         if (result === 'inconclusive') {
           failureReason = `Could not test (${decision.reason})${failureReason ? `: ${failureReason}` : ''}`;
         }
@@ -210,7 +223,11 @@ export async function runStagingSafeTests(
         // Update scenario last_result — but NOT on inconclusive: we don't want
         // a flaky "couldn't test" to clobber the last meaningful baseline.
         if (result !== 'inconclusive') {
-          await supabase('PATCH', 'scenarios', { last_result: result },
+          // A scenario's first real result is its baseline. Without this every
+          // run was "new" and a regression could never be detected.
+          const patch = { last_result: result };
+          if (baselineResult === 'not_run') patch.baseline_result = result === 'passed' ? 'passing' : 'failing';
+          await supabase('PATCH', 'scenarios', patch,
             `?scenario_id=eq.${scenario.scenario_id}`
           ).catch(() => {});
         }
@@ -287,14 +304,19 @@ export async function runStagingSafeTests(
 
     // ── 7. Send email notification to user ──
     if (app.user_email) {
-      const statusEmoji = regressions > 0 ? '⚠️' : '✅';
+      // A failed scenario is a confirmed app defect: never "safe to publish",
+      // even when it is not a regression (first run, or already failing).
+      const blocked = regressions > 0 || totalFailed > 0;
+      const statusEmoji = blocked ? '⚠️' : '✅';
       const statusLine = regressions > 0
         ? `${regressions} regression${regressions > 1 ? 's' : ''} detected`
-        : fixes > 0
-          ? `${fixes} issue${fixes > 1 ? 's' : ''} fixed`
-          : inconclusive > 0
-            ? `No regressions${inconclusive > 0 ? ` (${inconclusive} couldn't be tested)` : ''}`
-            : 'All scenarios unchanged';
+        : totalFailed > 0
+          ? `${totalFailed} scenario${totalFailed > 1 ? 's' : ''} failing`
+          : fixes > 0
+            ? `${fixes} issue${fixes > 1 ? 's' : ''} fixed`
+            : inconclusive > 0
+              ? `All tested scenarios passed (${inconclusive} couldn't be tested)`
+              : 'All scenarios passed';
 
       const scenarioRows = testRunResults.map(r => {
         const icon = r.result === 'passed' ? '✅' : r.result === 'inconclusive' ? '⏳' : '❌';
@@ -309,15 +331,15 @@ export async function runStagingSafeTests(
           ? 'color:#999;font-size:13px;font-style:italic'
           : 'color:#666;font-size:13px';
         return `<tr>
-          <td style="padding:8px 12px;border-bottom:1px solid #eee">${icon} ${r.name}${badge}</td>
-          <td style="padding:8px 12px;border-bottom:1px solid #eee;${reasonStyle}">${r.failure_reason || '—'}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #eee">${icon} ${esc(r.name)}${badge}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #eee;${reasonStyle}">${r.failure_reason ? esc(String(r.failure_reason).slice(0, 400)) : '—'}</td>
         </tr>`;
       }).join('');
 
       await mailer({
         from: 'TestPilot Staging Safe <hello@testpilotapp.dev>',
         to: app.user_email,
-        subject: `${statusEmoji} ${app.name}: ${statusLine} — ${commitMessage.slice(0, 50)}`.replace(/\s+/g, " ").trim(),
+        subject: `${statusEmoji} ${appName}: ${statusLine} — ${commitMessage.slice(0, 50)}`.replace(/\s+/g, " ").trim(),
         html: `
           <div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:32px 20px">
             <h2 style="font-size:20px;font-weight:800;margin-bottom:4px">
@@ -325,9 +347,9 @@ export async function runStagingSafeTests(
               <span style="font-weight:400;font-size:14px;color:#888;margin-left:8px">Staging Safe</span>
             </h2>
 
-            <div style="background:#f9f9f9;border-left:4px solid ${regressions > 0 ? '#ef4444' : '#22c55e'};padding:16px;margin:20px 0;border-radius:0 4px 4px 0">
+            <div style="background:#f9f9f9;border-left:4px solid ${blocked ? '#ef4444' : '#22c55e'};padding:16px;margin:20px 0;border-radius:0 4px 4px 0">
               <p style="margin:0;font-size:15px;font-weight:700;color:#080808">${statusEmoji} ${statusLine}</p>
-              <p style="margin:4px 0 0;font-size:13px;color:#666">Commit: <code>${commitSha.slice(0, 7)}</code> — ${commitMessage.slice(0, 80)}</p>
+              <p style="margin:4px 0 0;font-size:13px;color:#666">${esc(appName)} · Commit: <code>${commitSha.slice(0, 7)}</code> — ${esc(commitMessage.slice(0, 80))}</p>
             </div>
 
             <div style="display:flex;gap:16px;margin:20px 0">
@@ -367,7 +389,9 @@ export async function runStagingSafeTests(
 
             <div style="background:#080808;color:#f4f2ee;padding:16px;border-radius:4px;margin:20px 0">
               <p style="margin:0;font-size:14px;font-weight:700">
-                ${regressions > 0 ? '⚠️ Do not publish yet — review regressions first.' : '✅ Safe to publish.'}
+                ${regressions > 0 ? '⚠️ Do not publish yet — review regressions first.'
+                  : totalFailed > 0 ? '⚠️ Review before publishing — a scenario found a defect in this build.'
+                  : '✅ Safe to publish.'}
               </p>
               ${inconclusive > 0 ? `<p style="margin:8px 0 0;font-size:12px;color:#cbd5e1">⏳ ${inconclusive} scenario${inconclusive > 1 ? 's' : ''} couldn’t be tested (login/tool/API issue, not your app) — already auto-retried once. These do <strong>not</strong> count as regressions.</p>` : ''}
             </div>
