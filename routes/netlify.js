@@ -279,6 +279,19 @@ router.get('/apps/:app_id/staging', async (req, res) => {
 // INTERNAL: Deploy commit to staging
 // Called by the GitHub webhook handler
 // ─────────────────────────────────────────────
+// The head of the connected repository on main — the branch the push webhook
+// deploys — so a baseline or a manual deploy never uses a recorded sha that
+// may be stale or, before the webhook's repository guard, from another repo.
+export async function repoHeadMain(repo, accessToken) {
+  const r = await fetch(`https://api.github.com/repos/${repo}/commits/main`, {
+    headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/vnd.github+json', 'User-Agent': 'TestPilot' },
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!r.ok) throw new Error(`Could not read the repository's latest commit on main from GitHub (${r.status}).`);
+  const c = await r.json();
+  return { sha: c.sha, message: String(c.commit?.message || '').split(/\r?\n/)[0] };
+}
+
 export async function triggerStagingDeploy(appId, commitSha, commitMessage) {
   try {
     const { data: app, error } = await supabaseClient.from('apps').select('*').eq('app_id', appId).single();
@@ -324,16 +337,23 @@ router.post('/apps/:app_id/staging/deploy', async (req, res) => {
 
   try {
     const { data: app, error } = await supabaseClient
-      .from('apps').select('last_commit_sha, last_commit_message').eq('app_id', app_id).single();
+      .from('apps').select('github_repo, github_access_token').eq('app_id', app_id).single();
 
     if (error || !app) return res.status(404).json({ error: 'app not found' });
+    if (!app.github_repo || !app.github_access_token) return res.status(400).json({ error: 'Connect GitHub first.' });
 
-    const sha = commit_sha || app.last_commit_sha;
-    if (!sha) return res.status(400).json({ error: 'No commit SHA available. Push a commit first.' });
+    // An explicit sha deploys that commit; otherwise the repository's head on main.
+    let sha = commit_sha, message = 'Manual deploy';
+    if (!sha) {
+      let head;
+      try { head = await repoHeadMain(app.github_repo, app.github_access_token); }
+      catch (e) { return res.status(502).json({ error: e.message }); }
+      sha = head.sha; message = head.message || 'Manual deploy';
+    }
 
     res.json({ success: true, message: 'Staging deploy started', commit_sha: sha });
 
-    triggerStagingDeploy(app_id, sha, app.last_commit_message || 'Manual deploy').catch(err => {
+    triggerStagingDeploy(app_id, sha, message).catch(err => {
       console.error('Manual staging deploy failed:', err.message);
     });
 
