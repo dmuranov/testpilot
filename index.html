@@ -2228,8 +2228,10 @@ function freeRunsLeft() {
   return currentUser.free_run_used ? 0 : 1;
 }
 function isFreeRunAvailable() { return freeRunsLeft() > 0; }
+// One Run is a paid run on TestPilot's key: the buyer needs no API key.
+function paidRunOnUs() { return currentUser?.plan === 'onerun'; }
 function keyBadge() {
-  if (hasApiKey() || isFreeRunAvailable()) return '';
+  if (hasApiKey() || isFreeRunAvailable() || paidRunOnUs()) return '';
   return '<span title="Your free run is used up — this needs your own Claude API key" style="font-size:9px;font-weight:700;background:rgba(251,191,36,0.1);color:#f59e0b;border:1px dashed rgba(251,191,36,0.4);border-radius:2px;padding:1px 5px;margin-left:4px">🔑 needs key</span>';
 }
 function keyBox(html, margin) {
@@ -3701,7 +3703,7 @@ async function runMultiRole() {
   // first role pays.
   const mrFree = isFreeRunAvailable() && !hasApiKey();
   const mrSequenceId = 'seq_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
-  if (!mrFree && !hasApiKey()) {
+  if (!mrFree && !hasApiKey() && !paidRunOnUs()) {
     state.multiRoleError = (currentUser?.plan === 'free' || !currentUser?.plan)
       ? 'Multi-Role needs your Claude API key in the sidebar (bottom left) — your free run is used up.'
       : 'Add your Claude API key in the sidebar (bottom left) first — Multi-Role runs on your own key.';
@@ -4350,7 +4352,7 @@ async function secRunScan() {
   // FREE_DAILY_BUDGET_EXCEEDED once the free scan is spent, and the handler
   // below already turns those into the paywall.
   const freeScanEligible = (currentUser?.plan || 'free') === 'free';
-  if (!hasApiKey() && !freeScanEligible) { tpToast('Add your Claude API key first'); return; }
+  if (!hasApiKey() && !freeScanEligible && !paidRunOnUs()) { tpToast('Add your Claude API key first'); return; }
   const cfg = state.secConfig;
   if (!cfg.appId) { tpToast('Select an app'); return; }
   if ((!cfg.userA.email && !cfg.userA.sessionState) || (!cfg.userB.email && !cfg.userB.sessionState)) {
@@ -5268,7 +5270,7 @@ async function runTest() {
     if (words > 100) { tpToast('Free test run is limited to 100 words. Please shorten your scenario.'); return; }
   }
 
-  if (!isFreeRun && !hasApiKey()) { tpToast('Add your Claude API key in the sidebar first'); return; }
+  if (!isFreeRun && !hasApiKey() && !paidRunOnUs()) { tpToast('Add your Claude API key in the sidebar first'); return; }
 
   const appId = state.selectedApp?.appId;
   if (!appId) { tpToast('No app selected'); return; }
@@ -5522,7 +5524,7 @@ async function startChat() {
 
   if (!appId) { tpToast('Select an app first'); return; }
   if (!noLogin && (!email || !password)) { tpToast('Credentials required, or check "No login required"'); return; }
-  if (!hasApiKey() && !isFreeRunAvailable()) { tpToast('Add your Claude API key in the sidebar first — your free run is used up'); return; }
+  if (!hasApiKey() && !isFreeRunAvailable() && !paidRunOnUs()) { tpToast('Add your Claude API key in the sidebar first — your free run is used up'); return; }
 
   const remember = document.getElementById('chat-remember')?.checked;
   if (remember) { saveCredentials(appId, email, password); }

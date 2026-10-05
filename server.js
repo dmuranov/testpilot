@@ -141,7 +141,7 @@ const PRICE_IDS = {
   starter: 'price_1TI3Hd4PhClyPmHIOrwq9a8E',
   pro: 'price_1TI3Jr4PhClyPmHIzzMEIGQg',
   agency: 'price_1TI3L24PhClyPmHIcWQNc4jb',
-  onerun: 'price_1TI3OM4PhClyPmHIDvt0iEco',
+  onerun: 'price_1UN8fe4PhClyPmHI2pYcC7k3',   // €6 one-time (was price_1TI3OM4PhClyPmHIDvt0iEco at €5)
   // Solo €10/mo recurring. Set STRIPE_SOLO_PRICE_ID in .env to the live price id;
   // until then Solo checkout returns a clean "Invalid plan" (everything else is
   // already wired: subscription mode + generic webhook mapping).
@@ -10693,8 +10693,9 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
     return res.status(403).json({ error: 'This app belongs to another account.', code: 'APP_OWNED_BY_OTHER' });
   }
 
-  // Free run uses support key, otherwise user must provide their own
-  const effectiveApiKey = freeRun ? process.env.ANTHROPIC_SUPPORT_KEY : apiKey;
+  // Free run uses support key, otherwise user must provide their own.
+  // One Run (€6) is a paid run on TestPilot's key: no key needed from the buyer.
+  const effectiveApiKey = freeRun ? process.env.ANTHROPIC_SUPPORT_KEY : (apiKey || (userPlan === 'onerun' ? process.env.ANTHROPIC_SUPPORT_KEY : null));
   if (!effectiveApiKey) return res.status(400).json({ error: 'API key required' });
 
   // Word limit for free runs
@@ -11950,7 +11951,8 @@ app.post('/api/test/multirole', async (req, res) => {
     });
   }
 
-  const effectiveApiKey = freeRun ? process.env.ANTHROPIC_SUPPORT_KEY : apiKey;
+  // One Run (€6) is a paid run on TestPilot's key: no key needed from the buyer.
+  const effectiveApiKey = freeRun ? process.env.ANTHROPIC_SUPPORT_KEY : (apiKey || (user.plan === 'onerun' ? process.env.ANTHROPIC_SUPPORT_KEY : null));
   if (!effectiveApiKey) return res.status(400).json({ error: 'API key required' });
 
   const appKnowledge = platformMaps.get(appId);
@@ -12155,7 +12157,8 @@ app.post('/api/test/flow', async (req, res) => {
     });
   }
 
-  const effectiveApiKey = freeRun ? process.env.ANTHROPIC_SUPPORT_KEY : apiKey;
+  // One Run (€6) is a paid run on TestPilot's key: no key needed from the buyer.
+  const effectiveApiKey = freeRun ? process.env.ANTHROPIC_SUPPORT_KEY : (apiKey || (user.plan === 'onerun' ? process.env.ANTHROPIC_SUPPORT_KEY : null));
   if (!effectiveApiKey) return res.status(400).json({ error: 'API key required' });
 
   const appKnowledge = platformMaps.get(appId);
@@ -12601,7 +12604,7 @@ app.post('/api/chat/start', async (req, res) => {
   let { apiKey } = req.body;
   // Free plan without a key: the session runs on the support key — the free
   // run was taken above — capped at FREE_CHAT_COMMANDS commands.
-  const freeChat = !apiKey && user.plan === 'free';
+  const freeChat = !apiKey && (user.plan === 'free' || user.plan === 'onerun');   // One Run: a paid session on TestPilot's key
   if (freeChat) {
     if (isFreeBudgetExceeded()) return res.status(429).json({ error: 'Free runs are paused for today — add your own Claude API key, or try again tomorrow.', code: 'FREE_BUDGET_EXCEEDED' });
     apiKey = process.env.ANTHROPIC_SUPPORT_KEY;
@@ -14169,6 +14172,8 @@ app.post('/api/security/api-intercept', async (req, res) => {
     apiKey = process.env.ANTHROPIC_SUPPORT_KEY;   // free scan runs on the support key
     mode = 'read-only';                            // never destructive on a free scan
   }
+  // One Run (€6) is a paid run on TestPilot's key: no key needed from the buyer.
+  if (!apiKey && sessionUser?.plan === 'onerun') apiKey = process.env.ANTHROPIC_SUPPORT_KEY;
   if (!apiKey) return res.status(400).json({ error: 'API key required' });
   const appKnowledge = platformMaps.get(appId);
   if (!appKnowledge) return res.status(404).json({ error: 'App not found' });
