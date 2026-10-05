@@ -138,14 +138,15 @@ setInterval(() => {
 // Stripe
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const PRICE_IDS = {
+  // Current catalogue (2026-10-05), the prices the site shows:
+  solo: 'price_1UN8Q04PhClyPmHIIhrE5w7j',     // Solo   €19/mo
+  pro: 'price_1UN8VO4PhClyPmHITe6HC5fB',      // Pro    €49/mo
+  agency: 'price_1UN8ZH4PhClyPmHIOkE9eC7J',   // Agency €100/mo
+  onerun: 'price_1UN9594PhClyPmHInXyYMiMg',   // One Run €6 one-time
+  // No longer sold; kept so a webhook for an old subscription still maps to a plan.
   starter: 'price_1TI3Hd4PhClyPmHIOrwq9a8E',
-  pro: 'price_1TI3Jr4PhClyPmHIzzMEIGQg',
-  agency: 'price_1TI3L24PhClyPmHIcWQNc4jb',
-  onerun: 'price_1UN8fe4PhClyPmHI2pYcC7k3',   // €6 one-time (was price_1TI3OM4PhClyPmHIDvt0iEco at €5)
-  // Solo €10/mo recurring. Set STRIPE_SOLO_PRICE_ID in .env to the live price id;
-  // until then Solo checkout returns a clean "Invalid plan" (everything else is
-  // already wired: subscription mode + generic webhook mapping).
-  ...(process.env.STRIPE_SOLO_PRICE_ID ? { solo: process.env.STRIPE_SOLO_PRICE_ID } : {}),
+  // STRIPE_SOLO_PRICE_ID is no longer read: it pointed at the old €10 Solo
+  // price and would override the €19 one above.
 };
 const PLAN_LIMITS = {
   // Pricing v2: every PAID tier includes the whole product; the only limit is
