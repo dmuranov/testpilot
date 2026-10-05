@@ -30,8 +30,8 @@ function renderStagingSafe() {
   const phases = ['Connect', 'Learn', 'Scenarios', 'Baseline', 'Monitor'];
   const phaseIndex = ['setup', 'github', 'learn', 'scenarios', 'baseline', 'monitor'].indexOf(ss.phase);
 
-  // Phase bar
-  const phaseBar = `
+  // Phase bar (with the key note on top: Staging Safe runs on the owner's key)
+  const phaseBar = keyNote('Staging Safe', 'Your free run covers Staging Safe testing one commit. After that it runs on your own Claude API key, saved when you press Run Baseline.') + `
     <div class="ss-phase-bar">
       ${phases.map((name, i) => {
         const stepPhaseIndex = i + 1;
