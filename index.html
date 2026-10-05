@@ -3770,8 +3770,8 @@ async function runMultiRole() {
           password: role.password,
           apiKey: getApiKey(),
           freeRun: mrFree,
-          sequenceId: mrFree ? mrSequenceId : undefined,
-          sequenceRoles: mrFree ? validRoles.length : undefined,
+          sequenceId: (mrFree || paidRunOnUs()) ? mrSequenceId : undefined,   // the whole sequence is one run
+          sequenceRoles: (mrFree || paidRunOnUs()) ? validRoles.length : undefined,
           userEmail: currentUser?.email
         }),
         signal: abortCtl.signal,
@@ -4873,7 +4873,7 @@ async function startLearn() {
   const freeRunUsed = currentUser?.free_run_used === true;
   const canLearnFree = isFreeUser && !freeRunUsed;
 
-  if (!canLearnFree && !hasApiKey()) { tpToast('Add your Claude API key in the sidebar first'); return; }
+  if (!canLearnFree && !hasApiKey() && !paidRunOnUs()) { tpToast('Add your Claude API key in the sidebar first'); return; }
 
   state.loading = true;
   state.learnProgress = [];
@@ -5554,6 +5554,7 @@ async function startChat() {
       fetch('/api/auth/me').then(r => r.ok ? r.json() : null).then(j => { if (j) { Object.assign(currentUser, j); currentUser.free_run_used = j.free_run_used === true; render(); } }).catch(() => {});
     }
     state.chatMessages = [
+      ...(data.paidChat ? [{ role: 'assistant', content: 'This session is your One Run, on TestPilot\'s key.' }] : []),
       ...(data.freeChat ? [{ role: 'assistant', content: `🎁 This session is your free run: up to ${data.commandsLeft} commands on us. Add your Claude API key in the sidebar for unlimited sessions.` }] : []),
       // Field is `loggedIn` on the response — reading `loginSuccess` made this
       // undefined every time, so every session opened by claiming login failed.
@@ -6291,7 +6292,7 @@ async function captureSecSession(role) {
 
 async function secDeepScan() {
   const isFree = (currentUser?.plan === 'free');
-  if (!isFree && !hasApiKey()) { tpToast('Add your Claude API key first'); return; }
+  if (!isFree && !hasApiKey() && !paidRunOnUs()) { tpToast('Add your Claude API key first'); return; }
   const cfg = state.secConfig;
   if (!cfg.appId) { tpToast('Pick an app to scan'); return; }
   if (!cfg.userA.email && !cfg.userA.sessionState) { tpToast('Provide User A — a test login (email + password) or a captured session'); return; }
