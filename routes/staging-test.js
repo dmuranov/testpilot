@@ -65,10 +65,18 @@ export async function runStagingSafeTests(
     platformMaps,    // the existing platformMaps Map from server.js
     mailer,          // the existing mailer from server.js
     emitStep,        // the existing emitStep() from server.js
+    decryptSecret,   // reads the owner's stored Claude key
+    takeFreeRunDetached, // the owner's free run, when they have no key yet
+    isSuperAdmin,
   }
 ) {
   const commitMessage = String(commitMessageIn || 'Manual deploy');   // a baseline or manual deploy carries no push message
   console.log(`[Staging Safe] Starting auto-test for app=${appId} commit=${commitSha}`);
+
+  // The owner's free run, when it pays for this run: given back if the run
+  // ends without testing anything — including when it throws.
+  let freeHold = null, freeRefunded = false;
+  const refundFree = (why) => { if (freeHold && !freeRefunded) { freeRefunded = true; freeHold.refund(); console.log(`[Staging Safe] app=${appId} free run refunded (${why})`); } };
 
   try {
     // ── 1. Load the app ──
@@ -87,6 +95,41 @@ export async function runStagingSafeTests(
     if (!scenarios || scenarios.length === 0) {
       console.log(`[Staging Safe] No active scenarios for app ${appId} — skipping tests`);
       return { skipped: true, reason: 'no_scenarios' };
+    }
+
+    // ── Whose Claude key pays for this run ──
+    // The owner's own key (saved, encrypted, when they run Baseline). Without
+    // one, their unused free run covers this one commit on TestPilot's key.
+    // Neither: the run does not happen on TestPilot's key — monitoring pauses
+    // and the owner is told once what to do.
+    const supportKey = process.env.ANTHROPIC_SUPPORT_KEY;
+    let runKey = null, ownerPaid = false;
+    if (app.anthropic_api_key) {
+      try { runKey = String(app.anthropic_api_key).startsWith('sk-ant-') ? app.anthropic_api_key : decryptSecret(app.anthropic_api_key); }
+      catch (e) { console.warn(`[Staging Safe] stored key for app ${appId} could not be read: ${e.message}`); }
+    }
+    if (!runKey && isSuperAdmin?.(app.user_email)) runKey = supportKey;
+    if (!runKey && app.user_email && supportKey) {
+      const hold = await takeFreeRunDetached(app.user_email);
+      if (hold && !hold.paid) { freeHold = hold; runKey = supportKey; console.log(`[Staging Safe] app=${appId} runs on the owner's free run`); }
+      else if (hold?.paid) ownerPaid = true;
+    }
+    if (!runKey) {
+      console.log(`[Staging Safe] app=${appId} has no Claude key and no free run — pausing monitoring`);
+      await supabase('PATCH', 'apps', { monitoring_paused: true }, `?app_id=eq.${appId}`).catch(() => {});
+      if (app.user_email) {
+        await mailer({
+          from: 'TestPilot Staging Safe <hello@testpilotapp.dev>',
+          to: app.user_email,
+          subject: 'Staging Safe is paused: add your Claude API key',
+          html: `<div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:28px 20px;line-height:1.6">
+            <h2 style="font-size:18px;margin:0 0 12px">Staging Safe is paused</h2>
+            <p>Commit <code>${String(commitSha).slice(0, 7)}</code> was deployed to your staging site, but it was <strong>not tested</strong>: Staging Safe runs on your own Claude API key${ownerPaid ? ', and none is saved for this app yet' : ', and your free run is already used'}.</p>
+            <p>To turn it back on: open TestPilot, paste your Claude API key in the sidebar (bottom left), then open Staging Safe and press <strong>Run Baseline</strong>. That saves the key for automatic runs and resumes monitoring. You can get a key at console.anthropic.com.</p>
+            <p style="font-size:12px;color:#888">TestPilot Staging Safe · https://testpilotapp.dev/app</p></div>`,
+        }).catch((e) => console.error('Failed to send paused email:', e.message));
+      }
+      return { skipped: true, reason: 'no_key' };
     }
 
     console.log(`[Staging Safe] Running ${scenarios.length} scenarios against ${app.staging_url}`);
@@ -147,7 +190,7 @@ export async function runStagingSafeTests(
           appKnowledge,
           scenarioText,
           credentials,
-          app.anthropic_api_key || process.env.ANTHROPIC_SUPPORT_KEY
+          runKey
         );
 
         // Trust-aware classification. Only a CONFIRMED app defect is a failure.
@@ -162,7 +205,7 @@ export async function runStagingSafeTests(
           const retryId = `tst_${randomUUID().replace(/-/g, '')}`;
           testResult = await runAgentTest(
             retryId, appKnowledge, scenarioText, credentials,
-            app.anthropic_api_key || process.env.ANTHROPIC_SUPPORT_KEY
+            runKey
           );
           decision = classifyScenarioOutcome(testResult);
         }
@@ -415,6 +458,8 @@ export async function runStagingSafeTests(
       ).catch(() => {});
     }
 
+    // A free run that could not test anything is given back, like any other run without a verdict.
+    if (totalPassed === 0 && totalFailed === 0) refundFree('nothing could be tested');
     console.log(`[Staging Safe] Complete: ${totalPassed} passed, ${totalFailed} failed, ${inconclusive} inconclusive, ${regressions} regressions, ${fixes} fixes`);
 
     return {
@@ -431,6 +476,7 @@ export async function runStagingSafeTests(
 
   } catch (err) {
     console.error(`[Staging Safe] Auto-test failed for app ${appId}:`, err.message);
+    refundFree('run failed: ' + err.message);
     throw err;
   }
 }
