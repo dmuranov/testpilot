@@ -794,6 +794,32 @@ function normalizeAppUrl(raw) {
 // normalized URL. Callers must use `navigable` from here on, never the raw
 // input — checking one string and using another is how "myapp.com:8080"
 // passed signup and then failed learn.
+// A sign-in service page is not the app. An OAuth/SSO authorization request
+// (client_id + redirect_uri) even names the app, in redirect_uri — point the
+// user there. Seen 2026-10-05: a prospect pasted their company's SSO page
+// (auth2.…/portal/oauth-login.html?client_id=…&redirect_uri=https://uatarya.…),
+// it took their only free app slot and the crawl could never log in.
+function detectSignInPage(navigable) {
+  let u; try { u = new URL(navigable); } catch { return null; }
+  const p = u.searchParams;
+  if (p.get('client_id') && p.get('redirect_uri')) {
+    let suggested = null;
+    try { const r = new URL(p.get('redirect_uri')); suggested = r.origin + '/'; } catch {}
+    return {
+      suggestedUrl: suggested,
+      error: suggested
+        ? `That’s a sign-in page (single sign-on), not your app. Enter your app’s own address — for this one that looks like ${suggested} — and TestPilot will log in there with the test account you give it.`
+        : 'That’s a sign-in page (single sign-on), not your app. Enter your app’s own address — the page you land on after logging in — and TestPilot will log in there with the test account you give it.',
+    };
+  }
+  // SSO service paths that are never the app's own page. Plain /login and
+  // /signin are NOT here: many apps are entered through their login page.
+  if (/(^|\/)(oauth2?|openid(-connect)?|saml2?|sso)(\/|$|[-_.])/i.test(u.pathname)) {
+    return { suggestedUrl: null, error: 'That looks like a sign-in service page, not your app. Enter your app’s own address — the page you land on after logging in — and TestPilot will log in there with the test account you give it.' };
+  }
+  return null;
+}
+
 async function resolveUserUrl(raw) {
   const trimmed = String(raw || '').trim();
   // A real signup (2026-09-25) entered file:///C:/Users/.../pharmacy.html,
@@ -808,6 +834,8 @@ async function resolveUserUrl(raw) {
   }
   const norm = normalizeAppUrl(trimmed);
   if (!norm.ok) return { ok: false, error: norm.error === 'Invalid URL' ? 'That doesn’t look like a web address — try something like https://your-app.com' : norm.error, code: 'URL_INVALID' };
+  const signIn = detectSignInPage(norm.navigable);
+  if (signIn) return { ok: false, error: signIn.error, code: 'URL_IS_LOGIN_PAGE', suggestedUrl: signIn.suggestedUrl };
   const safe = await assertPublicUrl(norm.navigable);
   if (!safe.ok) {
     // assertPublicUrl's messages are written for operators. Users hitting
@@ -2247,6 +2275,43 @@ let onboardingLog = {};
 fs.readFile(ONBOARDING_FILE, 'utf-8').then(t => { onboardingLog = JSON.parse(t) || {}; }).catch(e => { if (e.code !== 'ENOENT') console.warn('[onboarding] load failed:', e.message); });
 const saveOnboardingLog = () => fs.writeFile(ONBOARDING_FILE, JSON.stringify(onboardingLog)).catch(() => {});
 const ADMIN_REPLY_TO = process.env.ADMIN_EMAIL || SUPER_ADMIN_EMAIL;
+
+// A claim whose learn never ended (the process restarted mid-crawl — every
+// deploy does that — or the sign-up claimed the slot and the crawl never ran)
+// keeps a free account's only app slot forever: the crawl's own release runs
+// in the request that died with it. At boot nothing is in flight, so a claim
+// with no learn outcome and no learned map behind it is an orphan. Seen
+// 2026-10-05 on a real prospect, blocked with "Free includes 1 app".
+async function releaseOrphanedClaims() {
+  if (!SUPABASE_URL || !PROD_JOBS) return;   // the DB is shared: only production decides
+  try {
+    const rows = await supabase('GET', 'app_ownership', null, '?learn_status=is.null&select=id,url_normalized,owner_email,created_at');
+    if (!Array.isArray(rows) || rows.length === 0) return;
+    const cutoff = Date.now() - 15 * 60_000;
+    const mapsByHost = new Map();
+    for (const m of platformMaps.values()) {
+      if (!m?.url) continue;
+      const n = normalizeAppUrl(m.url);
+      if (!n.ok) continue;
+      if (!mapsByHost.has(n.normalized)) mapsByHost.set(n.normalized, []);
+      mapsByHost.get(n.normalized).push(m);
+    }
+    const touched = new Set();
+    for (const r of rows) {
+      if (!r.created_at || new Date(r.created_at).getTime() > cutoff) continue;
+      const h = userHash(r.owner_email);
+      const learned = (mapsByHost.get(r.url_normalized) || []).some((m) => !m.ownerHash || m.ownerHash === h);
+      if (learned) continue;
+      await supabase('DELETE', 'app_ownership', null, `?id=eq.${encodeURIComponent(r.id)}`);
+      touched.add(r.owner_email);
+      console.log('[onboarding] released orphaned claim', r.url_normalized, 'for', r.owner_email);
+    }
+    for (const email of touched) {
+      const u = await supabase('GET', 'users', null, `?email=eq.${encodeURIComponent(email)}&select=id`);
+      if (u && u[0]) await recountUserAppSlots(email, u[0].id);
+    }
+  } catch (e) { console.warn('[onboarding] releaseOrphanedClaims failed:', e.message); }
+}
 
 async function releaseFailedClaim(urlNormalized, ownerEmail) {
   try {
@@ -16067,6 +16132,7 @@ console.log(`[freeSpend] daily ceiling: ${FREE_DAILY_TOKEN_BUDGET} weighted toke
 // Idempotent (skips rows already present). Awaited so any subsequent
 // /api/learn slot-check sees the migrated data.
 await backfillAppsFromPlatformMaps();
+await releaseOrphanedClaims();
 
 // ── STAGING SAFE ROUTES ──────────────────────────────────────
 // Expose the in-memory sessions Map so router-level paid-plan gates
