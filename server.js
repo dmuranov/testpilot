@@ -12318,6 +12318,27 @@ app.post('/api/v1/apps/:appId/baseline', async (req, res) => {
     if (!app.netlify_site_id) return res.status(400).json({ error: 'The staging site is not provisioned yet.', code: 'STAGING_NOT_PROVISIONED' });
     const scenarios = await supabase('GET', 'scenarios', null, `?app_id=eq.${encodeURIComponent(appId)}&status=eq.active&select=scenario_id`);
     if (!Array.isArray(scenarios) || scenarios.length === 0) return res.status(400).json({ error: 'Save at least one scenario first.', code: 'NO_SCENARIOS' });
+    // Staging Safe runs on the owner's Claude key. The key from the sidebar is
+    // saved here, encrypted, so runs triggered by a push (no browser open) use
+    // it too; saving it also resumes monitoring paused for lack of a key.
+    const ownerEmail = requesterEmail(req);
+    const sentKey = String(req.body?.apiKey || '').trim();
+    let hasKey = false;
+    if (/^sk-ant-/.test(sentKey)) {
+      let enc; try { enc = encryptSecret(sentKey); } catch { return res.status(500).json({ error: 'Secret store unavailable' }); }
+      await supabase('PATCH', 'apps', { anthropic_api_key: enc, monitoring_paused: false }, `?app_id=eq.${encodeURIComponent(appId)}`);
+      hasKey = true;
+    } else {
+      const k = await supabase('GET', 'apps', null, `?app_id=eq.${encodeURIComponent(appId)}&select=anthropic_api_key`);
+      hasKey = !!(Array.isArray(k) && k[0]?.anthropic_api_key);
+    }
+    if (!hasKey && !isSuperAdmin(ownerEmail)) {
+      const dbUser = await getUserByEmail(ownerEmail);
+      const plan = dbUser?.plan || 'free';
+      if (plan !== 'free' || freeRunExhausted(ownerEmail, dbUser?.free_run_used, plan)) {
+        return res.status(400).json({ error: 'Staging Safe runs on your own Claude API key. Paste it in the sidebar (bottom left), then press Run Baseline again.', code: 'KEY_REQUIRED' });
+      }
+    }
     // The baseline is the connected repository's head on main — the branch
     // the push webhook deploys — read from GitHub, never a recorded sha.
     let head;
@@ -16355,7 +16376,7 @@ export {
 // without importing this module (which would be a circular dep — server.js
 // imports the route modules at the top). routes/netlify.js reads this when
 // triggering post-deploy tests via runStagingSafeTests().
-globalThis.__tpHelpers = { supabase, runAgentTest, testResults, testStreams, platformMaps, mailer, emitStep };
+globalThis.__tpHelpers = { supabase, runAgentTest, testResults, testStreams, platformMaps, mailer, emitStep, decryptSecret, takeFreeRunDetached, isSuperAdmin };
 
 // GAUNTLET=1 imports this module as a library (hermetic local gauntlet runner)
 // and must NOT bind the port or run the SaaS server. Normal prod start is
