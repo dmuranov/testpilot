@@ -138,14 +138,15 @@ setInterval(() => {
 // Stripe
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 const PRICE_IDS = {
+  // Current catalogue (2026-10-05), the prices the site shows:
+  solo: 'price_1UN8Q04PhClyPmHIIhrE5w7j',     // Solo   €19/mo
+  pro: 'price_1UN8VO4PhClyPmHITe6HC5fB',      // Pro    €49/mo
+  agency: 'price_1UN8ZH4PhClyPmHIOkE9eC7J',   // Agency €100/mo
+  onerun: 'price_1UN9594PhClyPmHInXyYMiMg',   // One Run €6 one-time
+  // No longer sold; kept so a webhook for an old subscription still maps to a plan.
   starter: 'price_1TI3Hd4PhClyPmHIOrwq9a8E',
-  pro: 'price_1TI3Jr4PhClyPmHIzzMEIGQg',
-  agency: 'price_1TI3L24PhClyPmHIcWQNc4jb',
-  onerun: 'price_1TI3OM4PhClyPmHIDvt0iEco',
-  // Solo €10/mo recurring. Set STRIPE_SOLO_PRICE_ID in .env to the live price id;
-  // until then Solo checkout returns a clean "Invalid plan" (everything else is
-  // already wired: subscription mode + generic webhook mapping).
-  ...(process.env.STRIPE_SOLO_PRICE_ID ? { solo: process.env.STRIPE_SOLO_PRICE_ID } : {}),
+  // STRIPE_SOLO_PRICE_ID is no longer read: it pointed at the old €10 Solo
+  // price and would override the €19 one above.
 };
 const PLAN_LIMITS = {
   // Pricing v2: every PAID tier includes the whole product; the only limit is
@@ -10366,7 +10367,9 @@ app.post('/api/learn', watchOnboarding('crawl', (req) => ({ email: onboardingEma
     });
   }
 
-  const effectiveApiKey = freeLearn ? process.env.ANTHROPIC_SUPPORT_KEY : apiKey;
+  // One Run: a buyer with an unused run can learn (or re-learn) their one app on TestPilot's key.
+  const effectiveApiKey = freeLearn ? process.env.ANTHROPIC_SUPPORT_KEY
+    : (apiKey || (userPlan === 'onerun' && Number(dbUser?.credits || 0) > 0 ? paidRunKey() : null));
   if (!effectiveApiKey) return res.status(400).json({ error: 'API key required' });
 
   const uHash = userHash(ownerEmail);
@@ -10455,20 +10458,49 @@ const lastTerminalStatus = new Map();
 // unless the run produced a verdict — so €5 buys exactly one run of ANY type,
 // never charged when TestPilot itself fails. (/api/test has its own inline
 // version with the completed_with_unverified repeat guard.)
+// The key a paid One Run uses when the buyer has none. A separate key
+// (ANTHROPIC_PAID_KEY) keeps paid usage out of the free-run daily budget,
+// which tallies everything spent on ANTHROPIC_SUPPORT_KEY.
+const paidRunKey = () => process.env.ANTHROPIC_PAID_KEY || process.env.ANTHROPIC_SUPPORT_KEY;
+
+// One Run credits are read and decremented under a per-account lock, with a
+// fresh read inside it: parallel requests must not all see credits=1 and all
+// run — on TestPilot's key that is real money per run.
+const oneRunLocks = new Map();
+async function withOneRunLock(email, fn) {
+  const prev = oneRunLocks.get(email) || Promise.resolve();
+  let release; const mine = new Promise((r) => { release = r; });
+  const chain = prev.then(() => mine);
+  oneRunLocks.set(email, chain);
+  await prev;
+  try { return await fn(); }
+  finally { release(); if (oneRunLocks.get(email) === chain) oneRunLocks.delete(email); }
+}
+// Take one credit atomically. true = taken.
+async function takeOneRunCredit(ownerEmail) {
+  return withOneRunLock(ownerEmail, async () => {
+    const row = await getUserByEmail(ownerEmail);
+    const credits = Number(row?.credits || 0);
+    if (credits <= 0) return false;
+    await supabase('PATCH', 'users', { credits: credits - 1 }, `?email=eq.${encodeURIComponent(ownerEmail)}`);
+    let dirty = false;
+    for (const [, s] of sessions) { if (s.email === ownerEmail) { s.credits = credits - 1; dirty = true; } }
+    if (dirty) saveSessions();
+    return true;
+  }).catch(() => false);
+}
 async function reserveRunCreditOrDeny(res, userPlan, ownerEmail, dbUser) {
   if (userPlan !== 'onerun') return { ok: true, reserved: false };
-  const credits = Number(dbUser?.credits || 0);
-  if (credits <= 0) {
+  if (!(await takeOneRunCredit(ownerEmail))) {
     res.status(402).json({ error: 'Your one-time run has been used. Buy another run, or subscribe to keep testing.', code: 'ONERUN_EXHAUSTED' });
     return { ok: false, reserved: false };
   }
-  await supabase('PATCH', 'users', { credits: credits - 1 }, `?email=eq.${encodeURIComponent(ownerEmail)}`).catch(() => {});
-  let _reserveDirty = false;
-  for (const [, s] of sessions) { if (s.email === ownerEmail) { s.credits = credits - 1; _reserveDirty = true; } }
-  if (_reserveDirty) saveSessions();
   return { ok: true, reserved: true };
 }
 async function refundRunCredit(ownerEmail) {
+  return withOneRunLock(ownerEmail, () => refundRunCreditUnlocked(ownerEmail));
+}
+async function refundRunCreditUnlocked(ownerEmail) {
   try {
     const row = await getUserByEmail(ownerEmail);
     const cur = Number(row?.credits || 0);
@@ -10674,7 +10706,10 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
   // validation) so a used-up buyer learns immediately. The credit HOLD (reserve)
   // happens just before the run starts and is refunded unless the run reaches a
   // charged status — see below.
-  if (userPlan === 'onerun' && !freeRun && Number(dbUser?.credits || 0) <= 0) {
+  // A later role of a One Run Multi-Role sequence was paid for by its first role.
+  const oneRunFollowUp = userPlan === 'onerun' && !freeRun && !!sessionUser
+    && freeSequenceFollowUp(req.body?.sequenceId, ownerEmail, appId);
+  if (userPlan === 'onerun' && !freeRun && !oneRunFollowUp && Number(dbUser?.credits || 0) <= 0) {
     return res.status(402).json({
       error: 'Your one-time run has been used. Buy another run, or subscribe to keep testing.',
       code: 'ONERUN_EXHAUSTED',
@@ -10693,8 +10728,9 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
     return res.status(403).json({ error: 'This app belongs to another account.', code: 'APP_OWNED_BY_OTHER' });
   }
 
-  // Free run uses support key, otherwise user must provide their own
-  const effectiveApiKey = freeRun ? process.env.ANTHROPIC_SUPPORT_KEY : apiKey;
+  // Free run uses support key, otherwise user must provide their own.
+  // One Run (€6) is a paid run on TestPilot's key: no key needed from the buyer.
+  const effectiveApiKey = freeRun ? process.env.ANTHROPIC_SUPPORT_KEY : (apiKey || (userPlan === 'onerun' ? paidRunKey() : null));
   if (!effectiveApiKey) return res.status(400).json({ error: 'API key required' });
 
   // Word limit for free runs
@@ -10708,14 +10744,14 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
   // refunded in the runner's finally — so a blocked/tool/environment failure
   // never burns the customer's €5. Closes the old "one €5 = unlimited runs" hole.
   let oneRunReserved = false;
-  if (userPlan === 'onerun' && !freeRun) {
-    const credits = Number(dbUser?.credits || 0);
-    if (credits > 0) {
-      await supabase('PATCH', 'users', { credits: credits - 1 }, `?email=eq.${encodeURIComponent(ownerEmail)}`).catch(() => {});
-      for (const [, s] of sessions) { if (s.email === ownerEmail) s.credits = credits - 1; }
-      oneRunReserved = true;
-    }
+  if (userPlan === 'onerun' && !freeRun && !oneRunFollowUp) {
+    oneRunReserved = await takeOneRunCredit(ownerEmail);
+    // Lost the race to a parallel request: the gate above saw a credit that
+    // is gone now. Never run unpaid.
+    if (!oneRunReserved) return res.status(402).json({ error: 'Your one-time run has been used. Buy another run, or subscribe to keep testing.', code: 'ONERUN_EXHAUSTED' });
+    if (sessionUser && req.body?.sequenceId) openFreeSequence(req.body.sequenceId, ownerEmail, appId, req.body.sequenceRoles);
   }
+  if (oneRunFollowUp) consumeFreeSequence(req.body.sequenceId);
 
   const testId = randomUUID();
   // SCAN CONCURRENCY CAP: if all slots are busy, the scan is QUEUED (not
@@ -11950,7 +11986,8 @@ app.post('/api/test/multirole', async (req, res) => {
     });
   }
 
-  const effectiveApiKey = freeRun ? process.env.ANTHROPIC_SUPPORT_KEY : apiKey;
+  // One Run (€6) is a paid run on TestPilot's key: no key needed from the buyer.
+  const effectiveApiKey = freeRun ? process.env.ANTHROPIC_SUPPORT_KEY : (apiKey || (user.plan === 'onerun' ? paidRunKey() : null));
   if (!effectiveApiKey) return res.status(400).json({ error: 'API key required' });
 
   const appKnowledge = platformMaps.get(appId);
@@ -12155,7 +12192,8 @@ app.post('/api/test/flow', async (req, res) => {
     });
   }
 
-  const effectiveApiKey = freeRun ? process.env.ANTHROPIC_SUPPORT_KEY : apiKey;
+  // One Run (€6) is a paid run on TestPilot's key: no key needed from the buyer.
+  const effectiveApiKey = freeRun ? process.env.ANTHROPIC_SUPPORT_KEY : (apiKey || (user.plan === 'onerun' ? paidRunKey() : null));
   if (!effectiveApiKey) return res.status(400).json({ error: 'API key required' });
 
   const appKnowledge = platformMaps.get(appId);
@@ -12631,9 +12669,19 @@ app.post('/api/chat/start', async (req, res) => {
   // Free plan without a key: the session runs on the support key — the free
   // run was taken above — capped at FREE_CHAT_COMMANDS commands.
   const freeChat = !apiKey && user.plan === 'free';
+  const paidChat = !apiKey && user.plan === 'onerun';   // One Run: a paid session on TestPilot's key — no free cap, no free budget
   if (freeChat) {
     if (isFreeBudgetExceeded()) return res.status(429).json({ error: 'Free runs are paused for today — add your own Claude API key, or try again tomorrow.', code: 'FREE_BUDGET_EXCEEDED' });
     apiKey = process.env.ANTHROPIC_SUPPORT_KEY;
+  }
+  // One Run chat: the credit is taken now (atomically), not after the browser
+  // started, so parallel starts cannot share one credit; given back below if
+  // the session never starts.
+  let chatCreditTaken = false;
+  if (paidChat) {
+    if (!(await takeOneRunCredit(user.email))) return res.status(402).json({ error: 'Your one-time run has been used. Buy another run, or subscribe to keep testing.', code: 'ONERUN_EXHAUSTED' });
+    chatCreditTaken = true;
+    apiKey = paidRunKey();
   }
   if (!apiKey) return res.status(400).json({ error: 'API key required' });
   const appKnowledge = platformMaps.get(appId);
@@ -12704,7 +12752,7 @@ app.post('/api/chat/start', async (req, res) => {
 
     chatSessions.set(sessionId, {
       browser, context, page, appId, apiKey,
-      freeChat, commandsLeft: freeChat ? FREE_CHAT_COMMANDS : null,
+      freeChat, commandsLeft: freeChat ? FREE_CHAT_COMMANDS : null, paidChat,
       history: [],
       userId: user.userId,
       ownerEmail: user.email,
@@ -12723,24 +12771,19 @@ app.post('/api/chat/start', async (req, res) => {
     // refund path: see the plan-gate comment above for why.
     if (user.plan === 'free' && !extraRunHold) {   // an extra run touches only the counter
       burnBaseFreeRun(user.email);
-    } else if (user.plan === 'onerun') {
-      const dbUser = await getUserByEmail(user.email);
-      const credits = Number(dbUser?.credits || 0);
-      if (credits > 0) {
-        await supabase('PATCH', 'users', { credits: credits - 1 }, `?email=eq.${encodeURIComponent(user.email)}`).catch(() => {});
-        let _chatCreditDirty = false;
-        for (const [, s] of sessions) { if (s.email === user.email) { s.credits = credits - 1; _chatCreditDirty = true; } }
-        if (_chatCreditDirty) saveSessions();
-      }
+    } else if (user.plan === 'onerun' && !chatCreditTaken) {
+      // One Run on the buyer's own key: consume the credit now, as before.
+      await takeOneRunCredit(user.email);
     }
 
     if (extraRunHold) extraRunHold.commit();
-    res.json({ sessionId, screenshot, url: page.url(), loggedIn: loginResult.success, freeChat, commandsLeft: freeChat ? FREE_CHAT_COMMANDS : null });
+    res.json({ sessionId, screenshot, url: page.url(), loggedIn: loginResult.success, freeChat, paidChat, commandsLeft: freeChat ? FREE_CHAT_COMMANDS : null });
   } catch (e) {
     console.error('Chat start error:', e.message);
     if (browser) {
       try { await browser.close(); } catch {}
     }
+    if (chatCreditTaken) refundRunCredit(user.email);   // the paid session never started
     res.status(500).json({ error: e.message });
   }
 });
@@ -12752,7 +12795,7 @@ app.post('/api/chat/:sessionId/message', async (req, res) => {
   const { message } = req.body;
   // A free session stays on the support key for its whole life: the client's
   // key is ignored here, so a session is never half free, half BYOK.
-  const apiKey = session.freeChat ? null : req.body.apiKey;
+  const apiKey = (session.freeChat || session.paidChat) ? null : req.body.apiKey;
   if (session.freeChat) {
     if (session.commandsLeft <= 0) return res.status(402).json({ error: `Your free interactive session is at its ${FREE_CHAT_COMMANDS}-command limit. Add your Claude API key in the sidebar and start a new session to keep going.`, code: 'FREE_CHAT_LIMIT' });
     if (isFreeBudgetExceeded()) return res.status(429).json({ error: 'Free runs are paused for today — add your own Claude API key, or try again tomorrow.', code: 'FREE_BUDGET_EXCEEDED' });
@@ -14198,6 +14241,8 @@ app.post('/api/security/api-intercept', async (req, res) => {
     apiKey = process.env.ANTHROPIC_SUPPORT_KEY;   // free scan runs on the support key
     mode = 'read-only';                            // never destructive on a free scan
   }
+  // One Run (€6) is a paid run on TestPilot's key: no key needed from the buyer.
+  if (!apiKey && sessionUser?.plan === 'onerun') apiKey = paidRunKey();
   if (!apiKey) return res.status(400).json({ error: 'API key required' });
   const appKnowledge = platformMaps.get(appId);
   if (!appKnowledge) return res.status(404).json({ error: 'App not found' });
