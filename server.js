@@ -3184,8 +3184,33 @@ async function hasSignInAffordance(page) {
 // sentence and the one or two things that will actually get them through —
 // not a paragraph of error text and a help email ten minutes later.
 // Actions are ids the dashboard knows how to perform (renderNextStepCard).
+// The sentence a sign-in page shows about the rejected login. Prefers a
+// credentials sentence over the first error word; plain text only.
+function pageErrorSentence(text) {
+  const t = String(text || '').replace(/[<>]/g, ' ').replace(/\s+/g, ' ');
+  // Error word first ('Invalid username or password'), then subject first
+  // ('account is locked'), then any error word.
+  const strongA = /(invalid|incorrect|wrong|unknown|bad)[^.!?\n]{0,80}(password|username|user name|email|credentials|login|sign-?in)/i;
+  const strongB = /(password|username|email|credentials|account)[^.!?\n]{0,60}(invalid|incorrect|wrong|not (found|recognized|recognised)|locked|disabled|suspended|expired)|too many[^.!?\n]{0,60}attempts/i;
+  const weak = /invalid|incorrect|wrong|error|failed|falló|incorrecta/i;
+  const sm = strongA.exec(t) || strongB.exec(t);
+  const m = sm || weak.exec(t);
+  if (!m) return '';
+  // A credentials sentence starts at its first word; a bare error word gets a
+  // short window before it, never a whole header's worth of text.
+  const start = sm ? m.index : Math.max(t.lastIndexOf('.', m.index) + 1, m.index - 40);
+  const matchEnd = m.index + m[0].length;
+  const rest = t.slice(matchEnd).search(/[.!?]/);
+  const end = rest >= 0 ? matchEnd + rest + 1 : Math.min(t.length, matchEnd + 60);
+  return t.slice(start, end).trim().slice(0, 160);
+}
+// Appended AFTER the verdict's fixed prose and stripped before classification
+// (see nextStepFor): the page's own words must not steer which card is shown.
+const PAGE_SAID_RE = /\s*The sign-in page said: “[^”]*”\s*$/;
+function pageSaid(quote) { return quote ? ` The sign-in page said: “${quote.replace(/[“”]/g, '"')}”` : ''; }
+
 function nextStepFor({ stage, cause, error = '', handoffOffered = false, handoffAttempted = false } = {}) {
-  const e = String(error || '');
+  const e = String(error || '').replace(PAGE_SAID_RE, '');
   const ask = { id: 'ask', label: 'Ask TestPilot for help' };
   const session = { id: 'use_session', label: 'Use a signed-in session instead' };
   const takeover = { id: 'take_over_retry', label: 'Run again and sign in yourself' };
@@ -3489,6 +3514,14 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
     // covers real-world header sizes without scanning the whole page.
     const bodyText = await page.textContent('body').catch(() => '');
     const hasError = /invalid|incorrect|wrong|error|failed|falló|incorrecta/i.test(bodyText.substring(0, 3000));
+    // What the page said, so the verdict can quote it instead of only "the app
+    // showed an error". Seen 2026-10-05: two people at one company got that
+    // line on the same SSO page and nobody could tell whether it was their
+    // password or TestPilot (it was the password: "Invalid username or
+    // password."). A sentence about credentials is preferred over the first
+    // error word (which may sit in a header: "Report an error"); the quote is
+    // plain text — no angle brackets — because it ends up in HTML reports.
+    const loginErrorQuote = hasError ? pageErrorSentence(bodyText.substring(0, 3000)) : '';
 
     // Did the app hand back a FRESH form — both fields we filled now empty, no
     // error text? A rejected password does not look like that (seen live on a
@@ -3579,10 +3612,10 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
         return { success: false, cause: 'login_credentials', handoffOffered, screenshot: afterScreenshot, error: (hasError
           ? 'Login failed — the app showed an error and the sign-in form is still on screen.'
           : `Login did not take — the sign-in form is still on screen after submitting (still at ${newUrl}).`)
-          + ' This account most likely has NO PASSWORD at all: this page also offers "Sign in with Google" (or similar), and apps show the same result whether the password is wrong OR the account was only ever created through that button, which never sets a password on the backend. If so, no password will ever work here. ' + BYO_SESSION_HINT };
+          + pageSaid(loginErrorQuote) + ' This account most likely has NO PASSWORD at all: this page also offers "Sign in with Google" (or similar), and apps show the same result whether the password is wrong OR the account was only ever created through that button, which never sets a password on the backend. If so, no password will ever work here. ' + BYO_SESSION_HINT };
       }
       if (hasError) {
-        return { success: false, cause: 'login_credentials', screenshot: afterScreenshot, error: 'Login failed — the app showed an error and the sign-in form is still on screen. Check the credentials for this app.' };
+        return { success: false, cause: 'login_credentials', screenshot: afterScreenshot, error: 'Login failed — the app showed an error and the sign-in form is still on screen. Check the credentials for this app.' + pageSaid(loginErrorQuote) };
       }
       // Both fields were filled and a submit control was clicked to get here, so
       // this is a credentials/config outcome — not TestPilot failing to read the
