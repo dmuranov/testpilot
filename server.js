@@ -3391,8 +3391,20 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
     // OAuth-handoff offer below (gated on hasError) never got a chance to
     // fire even though the page clearly showed the error. 3000 comfortably
     // covers real-world header sizes without scanning the whole page.
-    const bodyText = await page.textContent('body').catch(() => '');
-    const hasError = /invalid|incorrect|wrong|error|failed|falló|incorrecta/i.test(bodyText.substring(0, 3000));
+    // Visible text only (innerText): textContent also returns hidden error
+    // containers that sign-in pages keep in the DOM at all times, which made a
+    // page that merely stayed on its form look like a rejected login.
+    const bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
+    const errorMatch = /invalid|incorrect|wrong|error|failed|falló|incorrecta/i.exec(bodyText.substring(0, 3000));
+    const hasError = !!errorMatch;
+    // The sentence the error word sits in, so the verdict says what the page
+    // said instead of only "the app showed an error". Seen 2026-10-05: two
+    // people at one company got that line on the same SSO page and nobody
+    // could tell whether it was their password or TestPilot.
+    const loginErrorText = errorMatch
+      ? bodyText.substring(Math.max(0, errorMatch.index - 80), errorMatch.index + 120).replace(/\s+/g, ' ').trim().slice(0, 160)
+      : '';
+    if (hasError) console.log('[login] sign-in page error text:', JSON.stringify(loginErrorText));
 
     // Did the app hand back a FRESH form — both fields we filled now empty, no
     // error text? A rejected password does not look like that (seen live on a
@@ -3481,12 +3493,12 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
       }
       if (oauthVisible) {
         return { success: false, cause: 'login_credentials', handoffOffered, screenshot: afterScreenshot, error: (hasError
-          ? 'Login failed — the app showed an error and the sign-in form is still on screen.'
+          ? `Login failed — the sign-in page said: "${loginErrorText}" and the form is still on screen.`
           : `Login did not take — the sign-in form is still on screen after submitting (still at ${newUrl}).`)
           + ' This account most likely has NO PASSWORD at all: this page also offers "Sign in with Google" (or similar), and apps show the same result whether the password is wrong OR the account was only ever created through that button, which never sets a password on the backend. If so, no password will ever work here. ' + BYO_SESSION_HINT };
       }
       if (hasError) {
-        return { success: false, cause: 'login_credentials', screenshot: afterScreenshot, error: 'Login failed — the app showed an error and the sign-in form is still on screen. Check the credentials for this app.' };
+        return { success: false, cause: 'login_credentials', screenshot: afterScreenshot, loginErrorText, error: `Login failed — the sign-in page said: "${loginErrorText}" and the form is still on screen. Check the credentials for this app.` };
       }
       // Both fields were filled and a submit control was clicked to get here, so
       // this is a credentials/config outcome — not TestPilot failing to read the
