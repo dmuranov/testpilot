@@ -803,8 +803,14 @@ function detectSignInPage(navigable) {
   let u; try { u = new URL(navigable); } catch { return null; }
   const p = u.searchParams;
   if (p.get('client_id') && p.get('redirect_uri')) {
+    // Suggest the app only when redirect_uri is a public web address: a
+    // native-app scheme (myapp://…) gives origin "null", and localhost would
+    // be refused on the next attempt anyway.
     let suggested = null;
-    try { const r = new URL(p.get('redirect_uri')); suggested = r.origin + '/'; } catch {}
+    try {
+      const r = new URL(p.get('redirect_uri'));
+      if (/^https?:$/.test(r.protocol) && !/^(localhost|127\.|10\.|192\.168\.|\[::1\])/.test(r.hostname)) suggested = r.origin + '/';
+    } catch {}
     return {
       suggestedUrl: suggested,
       error: suggested
@@ -812,15 +818,18 @@ function detectSignInPage(navigable) {
         : 'That’s a sign-in page (single sign-on), not your app. Enter your app’s own address — the page you land on after logging in — and TestPilot will log in there with the test account you give it.',
     };
   }
-  // SSO service paths that are never the app's own page. Plain /login and
-  // /signin are NOT here: many apps are entered through their login page.
-  if (/(^|\/)(oauth2?|openid(-connect)?|saml2?|sso)(\/|$|[-_.])/i.test(u.pathname)) {
+  // An SSO service path (/oauth…, /openid…, /saml…, /sso…) that is also a
+  // sign-in page (login / signin / authorize in the path). Plain /login and
+  // /signin are NOT refused: many apps are entered through their login page.
+  // Nor is an app's own /sso-settings or /oauth-apps page — that is the
+  // customer's app, not a sign-in service.
+  if (/(^|\/)(oauth2?|openid(-connect)?|saml2?|sso)(\/|$|[-_.])/i.test(u.pathname) && /(log-?in|sign-?in|authori[sz]e)/i.test(u.pathname)) {
     return { suggestedUrl: null, error: 'That looks like a sign-in service page, not your app. Enter your app’s own address — the page you land on after logging in — and TestPilot will log in there with the test account you give it.' };
   }
   return null;
 }
 
-async function resolveUserUrl(raw) {
+async function resolveUserUrl(raw, { allowSignInPage = false } = {}) {
   const trimmed = String(raw || '').trim();
   // A real signup (2026-09-25) entered file:///C:/Users/.../pharmacy.html,
   // a page on their own PC. Say exactly that instead of a generic error.
@@ -834,7 +843,7 @@ async function resolveUserUrl(raw) {
   }
   const norm = normalizeAppUrl(trimmed);
   if (!norm.ok) return { ok: false, error: norm.error === 'Invalid URL' ? 'That doesn’t look like a web address — try something like https://your-app.com' : norm.error, code: 'URL_INVALID' };
-  const signIn = detectSignInPage(norm.navigable);
+  const signIn = allowSignInPage ? null : detectSignInPage(norm.navigable);
   if (signIn) return { ok: false, error: signIn.error, code: 'URL_IS_LOGIN_PAGE', suggestedUrl: signIn.suggestedUrl };
   const safe = await assertPublicUrl(norm.navigable);
   if (!safe.ok) {
@@ -2282,25 +2291,35 @@ const ADMIN_REPLY_TO = process.env.ADMIN_EMAIL || SUPER_ADMIN_EMAIL;
 // in the request that died with it. At boot nothing is in flight, so a claim
 // with no learn outcome and no learned map behind it is an orphan. Seen
 // 2026-10-05 on a real prospect, blocked with "Free includes 1 app".
-async function releaseOrphanedClaims() {
+// A claim counts as learned when the owner has a map on that host, or on a
+// host under it: the map keeps the URL the crawl landed on, and an entry URL
+// often redirects to a subdomain (foo.com → app.foo.com). Two different
+// subdomains are NOT the same app (auth2.x.com is not uatarya.x.com), so a
+// sign-in-page claim next to a learned app is still released.
+function claimCoveredBy(mapHost, claimHost) {
+  if (!mapHost || !claimHost) return false;
+  return mapHost === claimHost || mapHost.endsWith('.' + claimHost);
+}
+async function releaseOrphanedClaims(maxAgeMs) {
   if (!SUPABASE_URL || !PROD_JOBS) return;   // the DB is shared: only production decides
   try {
     const rows = await supabase('GET', 'app_ownership', null, '?learn_status=is.null&select=id,url_normalized,owner_email,created_at');
     if (!Array.isArray(rows) || rows.length === 0) return;
-    const cutoff = Date.now() - 15 * 60_000;
-    const mapsByHost = new Map();
+    const cutoff = Date.now() - maxAgeMs;
+    const mapsByOwner = new Map();
     for (const m of platformMaps.values()) {
       if (!m?.url) continue;
       const n = normalizeAppUrl(m.url);
       if (!n.ok) continue;
-      if (!mapsByHost.has(n.normalized)) mapsByHost.set(n.normalized, []);
-      mapsByHost.get(n.normalized).push(m);
+      const key = m.ownerHash || '*';
+      if (!mapsByOwner.has(key)) mapsByOwner.set(key, []);
+      mapsByOwner.get(key).push(n.normalized);
     }
     const touched = new Set();
     for (const r of rows) {
       if (!r.created_at || new Date(r.created_at).getTime() > cutoff) continue;
-      const h = userHash(r.owner_email);
-      const learned = (mapsByHost.get(r.url_normalized) || []).some((m) => !m.ownerHash || m.ownerHash === h);
+      const hosts = [...(mapsByOwner.get(userHash(r.owner_email)) || []), ...(mapsByOwner.get('*') || [])];
+      const learned = hosts.some((h) => claimCoveredBy(h, r.url_normalized));
       if (learned) continue;
       await supabase('DELETE', 'app_ownership', null, `?id=eq.${encodeURIComponent(r.id)}`);
       touched.add(r.owner_email);
@@ -2347,6 +2366,15 @@ async function sendUserEmail(to, subject, paragraphs, cta) {
 function helpMessageFor({ stage, code, url, error }) {
   const where = url ? `<b>${escHtml(String(url).slice(0, 120))}</b>` : 'your app';
   if (['FREE_RUN_USED', 'APP_SLOT_LIMIT', 'OWNERSHIP_MISMATCH'].includes(code)) return null;
+  if (code === 'URL_IS_LOGIN_PAGE') {
+    let suggested = null;
+    try { const n = normalizeAppUrl(String(url || '')); suggested = n.ok ? detectSignInPage(n.navigable)?.suggestedUrl : null; } catch {}
+    return { subject: 'TestPilot needs your app’s address, not its sign-in page', p: [
+      `You gave TestPilot ${where}. That is the sign-in service your app uses, not the app itself — TestPilot logs in there on its own, with the test account you give it.`,
+      suggested
+        ? `Enter your app’s own address instead — from what you pasted, that looks like <b>${escHtml(suggested)}</b>. Your free test run is still waiting.`
+        : 'Enter your app’s own address instead: the page you land on after logging in. Your free test run is still waiting.'], cta: 'Enter my app’s address →' };
+  }
   if (code === 'URL_LOCAL_FILE') return { subject: 'Your TestPilot link points to a file on your computer', p: [
     `You tried to test ${where}. That's a file on your own computer, and TestPilot runs in the cloud, so it can only test apps that are live on the web.`,
     'If your app is hosted anywhere (Vercel, Netlify, Lovable, Bolt, Replit, your own domain), paste that <b>https://</b> link instead. Your free test run is still waiting for you.'], cta: 'Test my live app →' };
@@ -2429,6 +2457,9 @@ async function onboardingStallSweep() {
 if (PROD_JOBS) {
   setTimeout(onboardingStallSweep, 2 * 60_000);
   setInterval(onboardingStallSweep, 30 * 60_000);
+  // Between deploys too: a slot claimed at sign-up whose crawl never ran must
+  // not stay blocked until the next restart. Two hours: no crawl runs that long.
+  setInterval(() => releaseOrphanedClaims(2 * 3600_000), 30 * 60_000);
 }
 
 // Daily funnel digest to the admin (~07:00 UTC). Production only.
@@ -10148,7 +10179,7 @@ app.post('/api/debug/inspect', async (req, res) => {
   // clients and the public internet (was unauthenticated → SSRF/abuse vector).
   if (!requireAdmin(req, res)) return;
   const { url: rawDbgUrl, email, password, buttonLabel, apiKey } = req.body || {};
-  const dbgNorm = await resolveUserUrl(rawDbgUrl);
+  const dbgNorm = await resolveUserUrl(rawDbgUrl, { allowSignInPage: true });   // inspecting a sign-in page is the point
   if (!dbgNorm.ok) return res.status(400).json({ error: dbgNorm.error, code: dbgNorm.code });
   const url = dbgNorm.navigable;
   const browser = await launchBrowser();
@@ -10630,7 +10661,7 @@ app.post('/api/apps/:appId/cleanup', async (req, res) => {
   if (!ownsApp(appId, user.email) && !isSuperAdmin(me)) return res.status(403).json({ error: 'This app belongs to another account.', code: 'OWNERSHIP_MISMATCH' });
   const { cleanupUrl, cleanupToken, active } = req.body || {};
   if (!cleanupUrl) return res.status(400).json({ error: 'cleanupUrl required' });
-  const cleanupNorm = await resolveUserUrl(cleanupUrl);
+  const cleanupNorm = await resolveUserUrl(cleanupUrl, { allowSignInPage: true });   // a webhook endpoint, not "the app"
   if (!cleanupNorm.ok) return res.status(400).json({ error: cleanupNorm.error, code: cleanupNorm.code });
   const prev = cleanupConfigs.get(appId) || {};
   let tokenEnc = prev.cleanupTokenEnc || null;
@@ -14227,7 +14258,7 @@ app.post('/api/capture-session', async (req, res) => {
   // Operator-only browser-driver — gated behind admin auth (was unauthenticated).
   if (!requireAdmin(req, res)) return;
   const { url: rawCapUrl, email, password } = req.body || {};
-  const capNorm = await resolveUserUrl(rawCapUrl);
+  const capNorm = await resolveUserUrl(rawCapUrl, { allowSignInPage: true });   // capturing a session on an SSO page is the point
   if (!capNorm.ok) return res.status(400).json({ error: capNorm.error, code: capNorm.code });
   const url = capNorm.navigable;
 
@@ -16132,7 +16163,7 @@ console.log(`[freeSpend] daily ceiling: ${FREE_DAILY_TOKEN_BUDGET} weighted toke
 // Idempotent (skips rows already present). Awaited so any subsequent
 // /api/learn slot-check sees the migrated data.
 await backfillAppsFromPlatformMaps();
-await releaseOrphanedClaims();
+await releaseOrphanedClaims(15 * 60_000);   // at boot nothing is in flight
 
 // ── STAGING SAFE ROUTES ──────────────────────────────────────
 // Expose the in-memory sessions Map so router-level paid-plan gates
