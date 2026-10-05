@@ -291,6 +291,12 @@ async function startFunnel() {
         showErr('step-start-err', data.error + ' Sign in to choose a plan.');
         return;
       }
+      if (data.code === 'URL_IS_LOGIN_PAGE' && data.suggestedUrl) {
+        // The real app's address, read from the sign-in URL: put it in the
+        // field so the user only has to press Continue again.
+        document.getElementById('f-url').value = data.suggestedUrl;
+        try { updateAppLoginSiteLabel(); } catch (e) {}
+      }
       return showErr('step-start-err', data.error || 'Could not start');
     }
     // Begin Learn stream — pass app credentials so the crawl can log in.
