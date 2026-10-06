@@ -6,6 +6,16 @@
 
 import { randomUUID } from 'crypto';
 
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// The staging row's name is often the internal app id (the dashboard used to
+// send it); the learned map's app name, else the live URL's host, reads better.
+function displayName(app, knowledge) {
+  const learned = knowledge?.summary?.appName;
+  if (learned && !/^(unknown|untitled)$/i.test(String(learned).trim())) return String(learned);
+  if (app?.name && app.name !== app.app_id) return String(app.name);
+  try { return new URL(app?.live_url || app?.staging_url).host; } catch { return String(app?.name || app?.app_id || 'Your app'); }
+}
+
 // Decide a scenario's TRUSTWORTHY outcome from a runAgentTest result.
 // The whole point of Staging Safe is to tell the user "your commit broke
 // something". It must NEVER cry regression because TestPilot itself couldn't
@@ -46,7 +56,7 @@ export function classifyScenarioOutcome(testResult) {
 export async function runStagingSafeTests(
   appId,
   commitSha,
-  commitMessage,
+  commitMessageIn,
   {
     supabase,        // the supabase() helper from server.js
     runAgentTest,    // the existing runAgentTest() from server.js
@@ -55,9 +65,18 @@ export async function runStagingSafeTests(
     platformMaps,    // the existing platformMaps Map from server.js
     mailer,          // the existing mailer from server.js
     emitStep,        // the existing emitStep() from server.js
+    decryptSecret,   // reads the owner's stored Claude key
+    takeFreeRunDetached, // the owner's free run, when they have no key yet
+    isSuperAdmin,
   }
 ) {
+  const commitMessage = String(commitMessageIn || 'Manual deploy');   // a baseline or manual deploy carries no push message
   console.log(`[Staging Safe] Starting auto-test for app=${appId} commit=${commitSha}`);
+
+  // The owner's free run, when it pays for this run: given back if the run
+  // ends without testing anything — including when it throws.
+  let freeHold = null, freeRefunded = false;
+  const refundFree = (why) => { if (freeHold && !freeRefunded) { freeRefunded = true; freeHold.refund(); console.log(`[Staging Safe] app=${appId} free run refunded (${why})`); } };
 
   try {
     // ── 1. Load the app ──
@@ -78,10 +97,46 @@ export async function runStagingSafeTests(
       return { skipped: true, reason: 'no_scenarios' };
     }
 
+    // ── Whose Claude key pays for this run ──
+    // The owner's own key (saved, encrypted, when they run Baseline). Without
+    // one, their unused free run covers this one commit on TestPilot's key.
+    // Neither: the run does not happen on TestPilot's key — monitoring pauses
+    // and the owner is told once what to do.
+    const supportKey = process.env.ANTHROPIC_SUPPORT_KEY;
+    let runKey = null, ownerPaid = false;
+    if (app.anthropic_api_key) {
+      try { runKey = String(app.anthropic_api_key).startsWith('sk-ant-') ? app.anthropic_api_key : decryptSecret(app.anthropic_api_key); }
+      catch (e) { console.warn(`[Staging Safe] stored key for app ${appId} could not be read: ${e.message}`); }
+    }
+    if (!runKey && isSuperAdmin?.(app.user_email)) runKey = supportKey;
+    if (!runKey && app.user_email && supportKey) {
+      const hold = await takeFreeRunDetached(app.user_email);
+      if (hold && !hold.paid) { freeHold = hold; runKey = supportKey; console.log(`[Staging Safe] app=${appId} runs on the owner's free run`); }
+      else if (hold?.paid) ownerPaid = true;
+    }
+    if (!runKey) {
+      console.log(`[Staging Safe] app=${appId} has no Claude key and no free run — pausing monitoring`);
+      await supabase('PATCH', 'apps', { monitoring_paused: true }, `?app_id=eq.${appId}`).catch(() => {});
+      if (app.user_email) {
+        await mailer({
+          from: 'TestPilot Staging Safe <hello@testpilotapp.dev>',
+          to: app.user_email,
+          subject: 'Staging Safe is paused: add your Claude API key',
+          html: `<div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:28px 20px;line-height:1.6">
+            <h2 style="font-size:18px;margin:0 0 12px">Staging Safe is paused</h2>
+            <p>Commit <code>${String(commitSha).slice(0, 7)}</code> was deployed to your staging site, but it was <strong>not tested</strong>: Staging Safe runs on your own Claude API key${ownerPaid ? ', and none is saved for this app yet' : ', and your free run is already used'}.</p>
+            <p>To turn it back on: open TestPilot, paste your Claude API key in the sidebar (bottom left), then open Staging Safe and press <strong>Run Baseline</strong>. That saves the key for automatic runs and resumes monitoring. You can get a key at console.anthropic.com.</p>
+            <p style="font-size:12px;color:#888">TestPilot Staging Safe · https://testpilotapp.dev/app</p></div>`,
+        }).catch((e) => console.error('Failed to send paused email:', e.message));
+      }
+      return { skipped: true, reason: 'no_key' };
+    }
+
     console.log(`[Staging Safe] Running ${scenarios.length} scenarios against ${app.staging_url}`);
 
     // ── 3. Get the app knowledge map (from crawl/Learn step) ──
     let appKnowledge = platformMaps.get(appId);
+    const appName = displayName(app, appKnowledge);
     if (!appKnowledge) {
       console.warn(`[Staging Safe] No platform map for app ${appId} — tests may be less accurate`);
       // Create a minimal knowledge object so runAgentTest can still attempt
@@ -135,7 +190,7 @@ export async function runStagingSafeTests(
           appKnowledge,
           scenarioText,
           credentials,
-          app.anthropic_api_key || process.env.ANTHROPIC_SUPPORT_KEY
+          runKey
         );
 
         // Trust-aware classification. Only a CONFIRMED app defect is a failure.
@@ -150,7 +205,7 @@ export async function runStagingSafeTests(
           const retryId = `tst_${randomUUID().replace(/-/g, '')}`;
           testResult = await runAgentTest(
             retryId, appKnowledge, scenarioText, credentials,
-            app.anthropic_api_key || process.env.ANTHROPIC_SUPPORT_KEY
+            runKey
           );
           decision = classifyScenarioOutcome(testResult);
         }
@@ -182,7 +237,9 @@ export async function runStagingSafeTests(
         // Failure detail, tagged with WHY so the user can tell an app defect
         // from a "couldn't test" condition at a glance.
         const failedStep = testResult.steps?.find(s => s.status === 'fail');
-        let failureReason = failedStep?.outcome || testResult.error || testResult.blockedReason?.description || null;
+        const firstBug = Array.isArray(testResult.bugs) ? testResult.bugs[0] : null;
+        let failureReason = (result === 'failed' && (firstBug?.description || firstBug?.what))
+          || failedStep?.outcome || testResult.error || testResult.blockedReason?.description || null;
         if (result === 'inconclusive') {
           failureReason = `Could not test (${decision.reason})${failureReason ? `: ${failureReason}` : ''}`;
         }
@@ -209,7 +266,13 @@ export async function runStagingSafeTests(
         // Update scenario last_result — but NOT on inconclusive: we don't want
         // a flaky "couldn't test" to clobber the last meaningful baseline.
         if (result !== 'inconclusive') {
-          await supabase('PATCH', 'scenarios', { last_result: result },
+          // The baseline is the last known state: set by the first real result
+          // and moved on every fix or regression, so a fixed scenario is not
+          // "fixed" again on every commit and breaking it again is a regression.
+          const patch = { last_result: result };
+          const nowState = result === 'passed' ? 'passing' : 'failing';
+          if (baselineResult !== nowState) patch.baseline_result = nowState;
+          await supabase('PATCH', 'scenarios', patch,
             `?scenario_id=eq.${scenario.scenario_id}`
           ).catch(() => {});
         }
@@ -286,14 +349,22 @@ export async function runStagingSafeTests(
 
     // ── 7. Send email notification to user ──
     if (app.user_email) {
-      const statusEmoji = regressions > 0 ? '⚠️' : '✅';
+      // A failed scenario is a confirmed app defect: never "safe to publish",
+      // even when it is not a regression (first run, or already failing).
+      const blocked = regressions > 0 || totalFailed > 0;
+      const nothingTested = totalPassed === 0 && totalFailed === 0;   // every scenario was inconclusive
+      const statusEmoji = blocked ? '⚠️' : nothingTested ? '⏳' : '✅';
       const statusLine = regressions > 0
         ? `${regressions} regression${regressions > 1 ? 's' : ''} detected`
-        : fixes > 0
-          ? `${fixes} issue${fixes > 1 ? 's' : ''} fixed`
-          : inconclusive > 0
-            ? `No regressions${inconclusive > 0 ? ` (${inconclusive} couldn't be tested)` : ''}`
-            : 'All scenarios unchanged';
+        : totalFailed > 0
+          ? `${totalFailed} scenario${totalFailed > 1 ? 's' : ''} failing`
+          : fixes > 0
+            ? `${fixes} issue${fixes > 1 ? 's' : ''} fixed`
+            : nothingTested
+              ? `No scenario could be tested (${inconclusive})`
+              : inconclusive > 0
+                ? `All tested scenarios passed (${inconclusive} couldn't be tested)`
+                : 'All scenarios passed';
 
       const scenarioRows = testRunResults.map(r => {
         const icon = r.result === 'passed' ? '✅' : r.result === 'inconclusive' ? '⏳' : '❌';
@@ -308,15 +379,15 @@ export async function runStagingSafeTests(
           ? 'color:#999;font-size:13px;font-style:italic'
           : 'color:#666;font-size:13px';
         return `<tr>
-          <td style="padding:8px 12px;border-bottom:1px solid #eee">${icon} ${r.name}${badge}</td>
-          <td style="padding:8px 12px;border-bottom:1px solid #eee;${reasonStyle}">${r.failure_reason || '—'}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #eee">${icon} ${esc(r.name)}${badge}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #eee;${reasonStyle}">${r.failure_reason ? esc(String(r.failure_reason).slice(0, 400)) : '—'}</td>
         </tr>`;
       }).join('');
 
       await mailer({
         from: 'TestPilot Staging Safe <hello@testpilotapp.dev>',
         to: app.user_email,
-        subject: `${statusEmoji} ${app.name}: ${statusLine} — ${commitMessage.slice(0, 50)}`.replace(/\s+/g, " ").trim(),
+        subject: `${statusEmoji} ${appName}: ${statusLine} — ${commitMessage.slice(0, 50)}`.replace(/\s+/g, " ").trim(),
         html: `
           <div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:32px 20px">
             <h2 style="font-size:20px;font-weight:800;margin-bottom:4px">
@@ -324,9 +395,9 @@ export async function runStagingSafeTests(
               <span style="font-weight:400;font-size:14px;color:#888;margin-left:8px">Staging Safe</span>
             </h2>
 
-            <div style="background:#f9f9f9;border-left:4px solid ${regressions > 0 ? '#ef4444' : '#22c55e'};padding:16px;margin:20px 0;border-radius:0 4px 4px 0">
+            <div style="background:#f9f9f9;border-left:4px solid ${blocked ? '#ef4444' : '#22c55e'};padding:16px;margin:20px 0;border-radius:0 4px 4px 0">
               <p style="margin:0;font-size:15px;font-weight:700;color:#080808">${statusEmoji} ${statusLine}</p>
-              <p style="margin:4px 0 0;font-size:13px;color:#666">Commit: <code>${commitSha.slice(0, 7)}</code> — ${commitMessage.slice(0, 80)}</p>
+              <p style="margin:4px 0 0;font-size:13px;color:#666">${esc(appName)} · Commit: <code>${commitSha.slice(0, 7)}</code> — ${esc(commitMessage.slice(0, 80))}</p>
             </div>
 
             <div style="display:flex;gap:16px;margin:20px 0">
@@ -366,7 +437,10 @@ export async function runStagingSafeTests(
 
             <div style="background:#080808;color:#f4f2ee;padding:16px;border-radius:4px;margin:20px 0">
               <p style="margin:0;font-size:14px;font-weight:700">
-                ${regressions > 0 ? '⚠️ Do not publish yet — review regressions first.' : '✅ Safe to publish.'}
+                ${regressions > 0 ? '⚠️ Do not publish yet — review regressions first.'
+                  : totalFailed > 0 ? '⚠️ Review before publishing — a scenario found a defect in this build.'
+                  : nothingTested ? '⏳ Nothing could be tested on this build — no verdict. Check the test login or try again.'
+                  : '✅ Safe to publish.'}
               </p>
               ${inconclusive > 0 ? `<p style="margin:8px 0 0;font-size:12px;color:#cbd5e1">⏳ ${inconclusive} scenario${inconclusive > 1 ? 's' : ''} couldn’t be tested (login/tool/API issue, not your app) — already auto-retried once. These do <strong>not</strong> count as regressions.</p>` : ''}
             </div>
@@ -384,6 +458,8 @@ export async function runStagingSafeTests(
       ).catch(() => {});
     }
 
+    // A free run that could not test anything is given back, like any other run without a verdict.
+    if (totalPassed === 0 && totalFailed === 0) refundFree('nothing could be tested');
     console.log(`[Staging Safe] Complete: ${totalPassed} passed, ${totalFailed} failed, ${inconclusive} inconclusive, ${regressions} regressions, ${fixes} fixes`);
 
     return {
@@ -400,6 +476,7 @@ export async function runStagingSafeTests(
 
   } catch (err) {
     console.error(`[Staging Safe] Auto-test failed for app ${appId}:`, err.message);
+    refundFree('run failed: ' + err.message);
     throw err;
   }
 }

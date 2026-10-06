@@ -150,4 +150,7 @@
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape') hide(); });
   window.addEventListener('scroll', place, true);
   window.addEventListener('resize', place);
+  // The dashboard re-renders whole views; a hint for a field that is gone
+  // would otherwise sit on the next page until its 15s timer.
+  window.tpFieldHints = { hide: hide };
 })();
