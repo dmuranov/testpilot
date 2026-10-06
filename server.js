@@ -142,7 +142,7 @@ const PRICE_IDS = {
   solo: 'price_1UN8Q04PhClyPmHIIhrE5w7j',     // Solo   €19/mo
   pro: 'price_1UN8VO4PhClyPmHITe6HC5fB',      // Pro    €49/mo
   agency: 'price_1UN8ZH4PhClyPmHIOkE9eC7J',   // Agency €100/mo
-  onerun: 'price_1UN9594PhClyPmHInXyYMiMg',   // One Run €6 one-time
+  onerun: 'price_1UNCxV4PhClyPmHI1ykzWJfz',   // One Run €6 one-time (product recreated 2026-10-05)
   // No longer sold; kept so a webhook for an old subscription still maps to a plan.
   starter: 'price_1TI3Hd4PhClyPmHIOrwq9a8E',
   // STRIPE_SOLO_PRICE_ID is no longer read: it pointed at the old €10 Solo
@@ -13647,6 +13647,9 @@ app.post('/api/billing/checkout', async (req, res) => {
       // Spanish facturas (business customers can deduct IVA). customer_update lets
       // Stripe persist these onto the existing customer object.
       billing_address_collection: 'required',
+      // Prices are VAT-exclusive: Stripe Tax adds VAT on top, from the billing
+      // address (and reverse-charges a business with a valid EU VAT number).
+      automatic_tax: { enabled: true },
       tax_id_collection: { enabled: true },
       customer_update: { name: 'auto', address: 'auto' },
       // Subscriptions auto-generate an invoice each cycle; a one-time payment

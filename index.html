@@ -2086,17 +2086,17 @@ function showFunnelPaywall(reason) {
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:20px">
           <div onclick="funnelCheckout('solo')" style="background:#080808;border:1px solid rgba(200,240,64,0.5);border-radius:5px;padding:18px 16px;cursor:pointer">
             <div style="font-size:11px;font-family:monospace;color:#c8f040;letter-spacing:1px;margin-bottom:6px">SOLO</div>
-            <div style="font-size:24px;font-weight:800">€19<span style="font-size:11px;color:#d8d8d8;font-weight:400">/mo</span></div>
+            <div style="font-size:24px;font-weight:800">€19<span style="font-size:11px;color:#d8d8d8;font-weight:400">/mo + VAT</span></div>
             <div style="font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace">Up to 3 apps · full self-healing loops</div>
           </div>
           <div onclick="funnelCheckout('pro')" style="background:#080808;border:1px solid #2a2a2a;border-radius:5px;padding:18px 16px;cursor:pointer">
             <div style="font-size:11px;font-family:monospace;color:#c8f040;letter-spacing:1px;margin-bottom:6px">PRO</div>
-            <div style="font-size:24px;font-weight:800">€49<span style="font-size:11px;color:#d8d8d8;font-weight:400">/mo</span></div>
+            <div style="font-size:24px;font-weight:800">€49<span style="font-size:11px;color:#d8d8d8;font-weight:400">/mo + VAT</span></div>
             <div style="font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace">Up to 10 apps · team collaboration · priority queues</div>
           </div>
           <div onclick="funnelCheckout('agency')" style="background:#080808;border:1px solid #2a2a2a;border-radius:5px;padding:18px 16px;cursor:pointer">
             <div style="font-size:11px;font-family:monospace;color:#c8f040;letter-spacing:1px;margin-bottom:6px">AGENCY</div>
-            <div style="font-size:24px;font-weight:800">€100<span style="font-size:11px;color:#d8d8d8;font-weight:400">/mo</span></div>
+            <div style="font-size:24px;font-weight:800">€100<span style="font-size:11px;color:#d8d8d8;font-weight:400">/mo + VAT</span></div>
             <div style="font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace">Unlimited apps · white-label reporting · custom webhooks</div>
           </div>
         </div>
@@ -4554,9 +4554,9 @@ function renderModal() {
         </div>
         <div style="padding:24px;display:grid;grid-template-columns:repeat(3,1fr);gap:12px">
           ${[
-            { plan:'solo', name:'Solo', price:'€19/mo', desc:'Up to 3 apps', features:['Unlimited runs','Full self-healing loops','Full test history'] },
-            { plan:'pro', name:'Pro', price:'€49/mo', desc:'Up to 10 apps', features:['Unlimited runs','Full self-healing loops','Team collaboration','Priority queues'] },
-            { plan:'agency', name:'Agency', price:'€100/mo', desc:'Unlimited apps', features:['Unlimited runs','Full self-healing loops','White-label reporting','Custom webhooks'] }
+            { plan:'solo', name:'Solo', price:'€19/mo + VAT', desc:'Up to 3 apps', features:['Unlimited runs','Full self-healing loops','Full test history'] },
+            { plan:'pro', name:'Pro', price:'€49/mo + VAT', desc:'Up to 10 apps', features:['Unlimited runs','Full self-healing loops','Team collaboration','Priority queues'] },
+            { plan:'agency', name:'Agency', price:'€100/mo + VAT', desc:'Unlimited apps', features:['Unlimited runs','Full self-healing loops','White-label reporting','Custom webhooks'] }
           ].map(p => `
             <div style="background:var(--bg-hover);border:1px solid var(--border);padding:20px;border-radius:2px;display:flex;flex-direction:column;gap:10px">
               <div>
