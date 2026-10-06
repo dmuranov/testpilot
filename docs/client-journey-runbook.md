@@ -24,15 +24,18 @@ click for you:
   server refuses to create a users row for anyone who is not a test identity.
   Nothing you do locally can reach a real person.
 - The test identity is a fresh address at example.com (e2e-<something>@example.com).
-  That is a throwaway test account on my own local app, not an account on a
-  third-party service.
+  That is a throwaway test account on my own app, not an account on a
+  third-party service. The local server uses the PRODUCTION database, so this
+  account is a real row in it: delete it at the end (step 4).
 - The demo app is https://www.saucedemo.com with its PUBLISHED demo login
   standard_user / secret_sauce (and visual_user / secret_sauce as a second
   user). These are public documentation values, not anyone's credentials.
 - Typing those values into my app's forms on localhost is testing my own
   application with test data. Do it yourself; do not hand the clicks to me.
-- Do not sign up on https://testpilotapp.dev (production). Do not use my real
+- Do not sign up on https://testpilotapp.dev (production) yourself; for a run
+  on production I create the account (runbook step 5). Do not use my real
   email or any real person's address. Do not turn mail on.
+- Delete the test account from the database at the end (runbook step 4).
 
 Drive the dashboard in Chrome if the extension is connected (it shows what a
 client sees), otherwise run node scripts/e2e-free-journey.mjs. Report every
@@ -47,8 +50,10 @@ and clean up as the runbook says. Keep it to one run unless I ask for more.
 - `.env` in the repo root, copied from the production box (it is gitignored):
   `scp -i ~/.ssh/testpilot_vm azureuser@51.145.161.85:testpilot/.env ./.env`
   It contains the Supabase and Anthropic keys the server needs. The local
-  server talks to the production database — that is expected and safe because
-  of local mode, but it is why test identities must be example.com addresses.
+  server talks to the production database. Local mode blocks mail and
+  background jobs, but every account and app a local run creates is a real
+  row in that database and shows up in the signup numbers. That is why test
+  identities must be example.com addresses, and why step 4 deletes them.
 - Playwright browsers installed (`npx playwright install chromium` if needed).
 - Port 3001 free.
 
@@ -122,12 +127,43 @@ text a client saw.
   free-sweep-used.json sessions.json sweep-decisions.json traffic-log.json`
   and the test app's map in `platform-maps/` (the saucedemo one created by the
   run). Never commit them.
-- The test identity leaves one row in the production `users` table; tell the
-  owner its address so they can delete it.
+- Delete the test identity from the production database. Its user row and its
+  app claim are real rows (see step 0). From the repo root:
 
-### 5. Rules of engagement
+  ```
+  node -e "import('dotenv').then(async d=>{d.config({quiet:true});const u=process.env.SUPABASE_URL,k=process.env.SUPABASE_SERVICE_KEY||process.env.SUPABASE_SECRET||process.env.SUPABASE_KEY,H={apikey:k,Authorization:'Bearer '+k,Prefer:'return=representation'};for(const p of ['app_ownership?owner_email=like.e2e-*%40example.com','users?email=like.e2e-*%40example.com']){const r=await fetch(u+'/rest/v1/'+p,{method:'DELETE',headers:H});console.log(p.split('?')[0],r.status,(await r.json()).length,'deleted')}})"
+  ```
+
+### 5. Running it on production instead
+
+The local run proves the code; a production run proves the live site
+(its database, settings and server). It is the same journey over HTTP against
+https://testpilotapp.dev. The difference is who creates the account:
+
+- The agent does not sign up on testpilotapp.dev. The owner creates the
+  throwaway account with one command (it prints `{"ok":true,...`):
+
+  ```
+  curl -s -X POST https://testpilotapp.dev/api/funnel/start -H 'Content-Type: application/json' -d '{"userEmail":"e2e-prod-<timestamp>@example.com","url":"https://www.saucedemo.com/"}' | head -c 120; echo
+  ```
+
+- After that the same call from the agent, with the same email and URL, is a
+  sign-in: it returns a session cookie (`tpsession`) and creates nothing.
+- With that cookie: `POST /api/learn` (stream, about 4 minutes), `POST /api/test`
+  with `freeRun: true` (poll `GET /api/test/:id`), `POST /api/security/api-intercept`
+  (one long request), `POST /api/sweep` (poll `GET /api/sweep/:id`).
+- Check Everything pauses before risky clicks such as "Remove" and "Checkout":
+  the question appears in the sweep's `log` as `awaiting_confirm` while
+  `status` stays `running`. Answer each one with
+  `POST /api/sweep/:id/confirm` and `{ "allow": false }`, as a cautious client would.
+- Last result (2026-10-06): learn 4 min, 5 pages and 3 forms; flow 7 steps, no
+  bugs; security 25 checks, both users logged in; Check Everything 41 controls,
+  33 working, none broken. About €1 on the support key.
+- Delete the account afterwards with the command in step 4.
+
+### 6. Rules of engagement
 
 - One run unless asked. Each run costs model calls on the support key.
-- Never create accounts on testpilotapp.dev; never use a real person's address;
-  never set TESTPILOT_OUTBOUND_MAIL.
+- The agent never signs up on testpilotapp.dev (the owner does, step 5); never
+  use a real person's address; never set TESTPILOT_OUTBOUND_MAIL.
 - Code changes go on a branch as a small PR with one review pass, then merge.
