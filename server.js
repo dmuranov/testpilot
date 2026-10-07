@@ -2860,12 +2860,16 @@ async function tryOAuthHandoff(page, ctx) {
     runId: ctx.runId,
     offerId,
     hostname,
-    message: `${ctx.loginFormReset ? `${hostname || 'This app'} accepted the sign-in but sent TestPilot back to its sign-in page` : ctx.loginOurMiss ? `TestPilot could not finish the sign-in on ${hostname || 'this app'} (${ctx.loginOurMiss})` : ctx.loginHasError ? `Login failed on ${hostname || 'this app'}` : `The sign-in form on ${hostname || 'this app'} is still on screen after submitting`}${ctx.loginFormReset ? '. Take over and sign in yourself once — TestPilot carries your session along for the rest of the run. This page also offers' : ' and this page also offers'} a "Sign in with Google" (or similar) button — this account may only work that way. Want to take over and log in yourself? TestPilot picks back up right after.`,
+    message: ctx.offerMessage || `${ctx.loginFormReset ? `${hostname || 'This app'} accepted the sign-in but sent TestPilot back to its sign-in page` : ctx.loginOurMiss ? `TestPilot could not finish the sign-in on ${hostname || 'this app'} (${ctx.loginOurMiss})` : ctx.loginHasError ? `Login failed on ${hostname || 'this app'}` : `The sign-in form on ${hostname || 'this app'} is still on screen after submitting`}${ctx.loginFormReset ? '. Take over and sign in yourself once — TestPilot carries your session along for the rest of the run. This page also offers' : ' and this page also offers'} a "Sign in with Google" (or similar) button — this account may only work that way. Want to take over and log in yourself? TestPilot picks back up right after.`,
   });
-  try {
-    const decision = await awaitLiveViewSignal(ctx.runId, { timeoutMs: 60 * 1000, offerId });
-    if (decision?.action !== 'accept') return null;
-  } catch { return null; } // declined, superseded, or nobody responded within 60s
+  // skipOffer: the user already asked to sign in themselves (Learn → "Sign in
+  // myself"), so there is nothing to accept — go straight to the live view.
+  if (!ctx.skipOffer) {
+    try {
+      const decision = await awaitLiveViewSignal(ctx.runId, { timeoutMs: 60 * 1000, offerId });
+      if (decision?.action !== 'accept') return null;
+    } catch { return null; } // declined, superseded, or nobody responded within 60s
+  }
 
   // From here on the human accepted and had their turn. Whatever goes wrong
   // next is reported as a manual login that did not complete — the caller
@@ -10434,7 +10438,27 @@ app.post('/api/learn', watchOnboarding('crawl', (req) => ({ email: onboardingEma
   // `userEmail` is the TestPilot account email (the "owner"). The funnel
   // rework introduced this distinction so the landing-modal flow can
   // submit just userEmail+url with no app credentials.
-  const { url, email, password, description, apiKey, freeLearn, userEmail, sessionState: rawSessionState } = req.body || {};
+  const { url, email, password, description, apiKey, freeLearn, userEmail, sessionState: rawSessionStateBody, liveSigninId } = req.body || {};
+  // A session from "Sign in myself" (see /api/learn/live-signin): used once,
+  // only by the account that signed in, and only within its 15 minutes.
+  let rawSessionState = rawSessionStateBody;
+  let liveLandedUrl = null;
+  if (liveSigninId) {
+    const ls = liveSignins.get(String(liveSigninId));
+    const caller = req.cookies?.tpsession ? sessions.get(req.cookies.tpsession) : null;
+    if (!ls || ls.expires < Date.now() || !caller || canonicalEmail(caller.email) !== ls.owner) {
+      return res.status(400).json({ error: 'That live sign-in has expired. Press "Sign in myself" again.', code: 'LIVE_SIGNIN_EXPIRED' });
+    }
+    try {
+      if (normalizeAppUrl(String(url || '')).normalized !== ls.appHost) {
+        return res.status(400).json({ error: `That live sign-in was for ${ls.appHost}. Learn that address, or sign in again for this one.`, code: 'LIVE_SIGNIN_OTHER_APP' });
+      }
+    } catch {}
+    // Not deleted here: a refusal below (app slots, free budget, key) must not
+    // cost the user the sign-in they just did by hand. Consumed when the crawl starts.
+    rawSessionState = ls.sessionState;
+    liveLandedUrl = ls.landedUrl || null;
+  }
   // "Bring your own session" for crawl — same purpose as on /api/test.
   const ssParsed = parseSessionState(rawSessionState);
   if (!ssParsed.ok) return res.status(400).json({ error: ssParsed.error, code: 'SESSION_STATE_INVALID' });
@@ -10523,11 +10547,15 @@ app.post('/api/learn', watchOnboarding('crawl', (req) => ({ email: onboardingEma
     await recountUserAppSlots(ownerEmail, dbUser.id);
   }
 
+  if (liveSigninId) liveSignins.delete(String(liveSigninId));   // the crawl starts: the live sign-in is used
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
   res.write(`data: ${JSON.stringify({ phase: 'starting', message: 'Starting deep crawl...', appId })}\n\n`);
 
   try {
-    await crawlApp(appId, norm.navigable, { email, password, sessionState: learnSessionState }, description, effectiveApiKey, (progress) => {
+    // After a live sign-in, start where the user landed when it is the same app
+    // (same host): the entry address may be a login page even for a signed-in user.
+    const crawlStart = (() => { try { return liveLandedUrl && normalizeAppUrl(liveLandedUrl).normalized === norm.normalized ? liveLandedUrl : norm.navigable; } catch { return norm.navigable; } })();
+    await crawlApp(appId, crawlStart, { email, password, sessionState: learnSessionState }, description, effectiveApiKey, (progress) => {
       res.write(`data: ${JSON.stringify(progress)}\n\n`);
     }, ownerEmail, { explicitScheme: norm.explicitScheme }, norm.normalized);
     res.write(`data: ${JSON.stringify({ phase: 'done', appId })}\n\n`);
@@ -14057,6 +14085,69 @@ function emitCapture(captureId, event) {
   const payload = `data: ${JSON.stringify(event)}\n\n`;
   for (const r of rs) { try { r.write(payload); } catch {} }
 }
+
+// ── Learn: "Sign in myself in a live window" ──
+// For apps TestPilot cannot log into with a password (SSO, phone codes, a
+// "prove you're human" check, or a login it fills and the app still rejects):
+// open the app in a live browser, the user signs in with their own hands, and
+// the session is kept here for 15 minutes for the Learn that follows. The
+// session never goes to the browser; Learn picks it up by id. Events reuse the
+// saved-session capture stream (/api/saved-sessions/learn/stream/:id).
+const liveSignins = new Map();   // signinId -> { owner, sessionState, expires }
+const liveSigninBusy = new Set();   // owners with a live sign-in browser open
+app.post('/api/learn/live-signin', async (req, res) => {
+  const sessionUser = requireUser(req, res);
+  if (!sessionUser) return;
+  const owner = canonicalEmail(sessionUser.email);
+  const norm = await resolveUserUrl(req.body?.url);
+  if (!norm.ok) return res.status(400).json({ error: norm.error, code: norm.code, suggestedUrl: norm.suggestedUrl });
+  if (liveSigninBusy.has(owner)) return res.status(409).json({ error: 'A live sign-in window is already open for your account. Finish or close it first.' });
+  liveSigninBusy.add(owner);
+  const signinId = randomUUID();
+  res.json({ signinId });
+
+  (async () => {
+    let browser;
+    try {
+      await new Promise((r) => setTimeout(r, 800));   // let the dashboard subscribe to the stream
+      browser = await launchBrowser();
+      const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+      const page = await ctx.newPage();
+      await gotoWithSchemeFallback(page, norm.navigable, { waitUntil: 'domcontentloaded', timeout: 30000 }, { explicitScheme: norm.explicitScheme }).catch(() => {});
+      await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+      // The user closed the tab or left: nobody is listening any more, so end
+      // the wait instead of holding a browser (and the account's one live
+      // sign-in) for 10 minutes.
+      let unheardSince = null;
+      const abandonWatch = setInterval(() => {
+        if (captureStreams.has(signinId)) { unheardSince = null; return; }
+        unheardSince = unheardSince || Date.now();
+        if (Date.now() - unheardSince > 45_000) settleLiveView(signinId, null, (p) => p.reject(new Error('declined')));
+      }, 5000);
+      const result = await tryOAuthHandoff(page, {
+        runId: signinId,
+        emit: (event) => emitCapture(signinId, event),
+        offerMessage: 'Sign in to your app in the live window, then press Done.',
+      });
+      clearInterval(abandonWatch);
+      if (!result || !result.success) {
+        emitCapture(signinId, { type: 'error', runId: signinId, message: result?.handoffAttempted === false || !result ? 'The live sign-in was cancelled.' : result.error });
+        return;
+      }
+      for (const [id, v] of liveSignins) { if (v.expires < Date.now()) liveSignins.delete(id); }
+      // Where the user landed after signing in: many apps' entry address IS their
+      // login page (it shows the form even when signed in), so the crawl starts
+      // here instead — see /api/learn.
+      liveSignins.set(signinId, { owner, appHost: norm.normalized, sessionState: await ctx.storageState(), landedUrl: page.url(), expires: Date.now() + 15 * 60_000 });
+      emitCapture(signinId, { type: 'done', runId: signinId, signinId, message: 'Signed in. Learning your app with this session…' });
+    } catch (e) {
+      emitCapture(signinId, { type: 'error', runId: signinId, message: `The live sign-in failed: ${e.message}` });
+    } finally {
+      liveSigninBusy.delete(owner);
+      try { await browser?.close(); } catch {}
+    }
+  })();
+});
 
 app.get('/api/saved-sessions/:appId/stream/:captureId', (req, res) => {
   const sessionUser = requireUser(req, res);
