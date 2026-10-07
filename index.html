@@ -4944,7 +4944,7 @@ async function startLearn(opts = {}) {
     const res = await fetch(`${API}/api/learn`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, email, password, description: desc, apiKey: getApiKey(), freeLearn: canLearnFree, userEmail: currentUser?.email, ...(liveSigninId ? { liveSigninId } : {}), ...(learnSessionRaw && !liveSigninId ? { sessionState: learnSessionRaw } : {}) })
+      body: JSON.stringify({ url, email, password, description: desc, apiKey: getApiKey(), freeLearn: canLearnFree, userEmail: currentUser?.email, liveOffers: true, ...(liveSigninId ? { liveSigninId } : {}), ...(learnSessionRaw && !liveSigninId ? { sessionState: learnSessionRaw } : {}) })
     });
 
     // Any non-OK response is a JSON error, not an SSE stream. This guard used
@@ -5355,7 +5355,7 @@ async function runTest() {
     const res = await fetch(`${API}${isFlowTest ? '/api/test/flow' : '/api/test'}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ appId, scenario: scenarioToRun, email, password, apiKey: getApiKey(), freeRun: isFreeRun, userEmail: currentUser?.email, ...(hasSession ? { sessionState: sessionStateRaw } : {}), ...(savedSessionRole ? { savedSessionRole } : {}), ...(isFlowTest ? { paymentMode: 'stop-before-pay' } : {}) })
+      body: JSON.stringify({ appId, scenario: scenarioToRun, email, password, apiKey: getApiKey(), liveOffers: true, freeRun: isFreeRun, userEmail: currentUser?.email, ...(hasSession ? { sessionState: sessionStateRaw } : {}), ...(savedSessionRole ? { savedSessionRole } : {}), ...(isFlowTest ? { paymentMode: 'stop-before-pay' } : {}) })
     });
 
     if (!res.ok) {
