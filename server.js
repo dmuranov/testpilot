@@ -840,7 +840,11 @@ function appEntryUrl(entered, landed) {
   try {
     const e = new URL(entered), l = new URL(landed);
     const host = (h) => h.toLowerCase().replace(/^www\./, '');
-    return host(e.hostname) === host(l.hostname) ? l.href : e.href;
+    // Only a SIGN-IN SERVICE page is replaced. An app's own cross-host move
+    // (mycompany.com → app.mycompany.com, *.vercel.app → custom domain) is
+    // the real app and is kept, as before.
+    if (host(e.hostname) === host(l.hostname) || !detectSignInPage(l.href)) return l.href;
+    return e.href;   //  is the URL actually attempted, so its scheme is the one that worked
   } catch { return landed || entered; }
 }
 // A map saved before appEntryUrl existed may point at a sign-in service URL.
@@ -849,6 +853,13 @@ function repairMapEntryUrl(map) {
   if (!map?.url) return false;
   const s = detectSignInPage(map.url);
   if (!s || !s.suggestedUrl) return false;
+  // Only when redirect_uri is the app itself: the appId starts with the host
+  // the app was learned from (dots → dashes). A callback on another host
+  // (api.app.com/auth/callback) would send runs to the wrong place.
+  const h = new URL(s.suggestedUrl).hostname.toLowerCase();
+  const slug = (x) => x.replace(/[^a-z0-9]/gi, '-').toLowerCase();
+  const id = String(map.appId || '').toLowerCase();
+  if (!id.startsWith(slug(h)) && !id.startsWith(slug(h.replace(/^www./, '')))) return false;
   map.url = s.suggestedUrl;
   return true;
 }
@@ -5003,7 +5014,7 @@ async function gotoWithSchemeFallback(page, navigableUrl, gotoOpts, { explicitSc
       // both send every later run through a needless redirect hop and trip
       // the plaintext-credentials warning below on a site that's encrypted.
       const landedUrl = page.url() || candidate.href;
-      return { response, urlUsed: landedUrl };
+      return { response, urlUsed: landedUrl, attemptedUrl: candidate.href };
     } catch (e) {
       lastErr = e;
       const canRetry = i < schemes.length - 1 && SCHEME_RETRYABLE_RE.test(e.message || '');
@@ -5147,7 +5158,7 @@ async function crawlApp(appId, url, credentials, description, apiKey, onProgress
     // Rebind to whatever scheme actually worked so every downstream use
     // (baseUrl, appKnowledge.url, future test runs against this app) reuses
     // the proven URL instead of re-guessing the scheme every time.
-    url = appEntryUrl(url, nav.urlUsed);
+    url = appEntryUrl(nav.attemptedUrl || url, nav.urlUsed);
     appKnowledge.url = url;
     learnAppOrigin = new URL(url).origin;
     // Gated on where we actually LANDED, not which scheme we attempted — a
