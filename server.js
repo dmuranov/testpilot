@@ -3645,9 +3645,20 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
       // spot, so it is offered for every OAuth-page outcome — including our own
       // misses. Offered once per run: the retry does not ask again.
       let handoffOffered = false;
-      if (oauthVisible && ctx.runId && typeof ctx.emit === 'function' && !ctx.skipHandoff) {
+      // A rejected login on a page WITHOUT a Google-style button: the person
+      // watching can still sign in themselves (their own login may work where
+      // the one typed into TestPilot did not, or it needs a step TestPilot
+      // cannot do). Only for callers whose page shows the offer
+      // (ctx.offerOnRejection): elsewhere it would wait 60s for a click
+      // nobody can see.
+      const offerOnRejection = hasError && !oauthVisible && ctx.offerOnRejection === true;
+      if ((oauthVisible || offerOnRejection) && ctx.runId && typeof ctx.emit === 'function' && !ctx.skipHandoff) {
         handoffOffered = true;
-        const handoffResult = await tryOAuthHandoff(page, { ...ctx, loginHasError: hasError, loginOurMiss: ourMiss, loginFormReset: formReset });
+        const host = (() => { try { return new URL(page.url()).hostname; } catch { return 'this app'; } })();
+        const handoffResult = await tryOAuthHandoff(page, {
+          ...ctx, loginHasError: hasError, loginOurMiss: ourMiss, loginFormReset: formReset,
+          ...(offerOnRejection ? { offerMessage: `${host} did not accept the login${loginErrorQuote ? ` (it said: “${loginErrorQuote.replace(/[“”]/g, '"')}”)` : ''}. Want to sign in yourself in a live window? TestPilot then continues the run with your session.` } : {}),
+        });
         if (handoffResult) return handoffResult;
       }
       if (ourMiss) {
@@ -3663,7 +3674,7 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
           + pageSaid(loginErrorQuote) + ' This account most likely has NO PASSWORD at all: this page also offers "Sign in with Google" (or similar), and apps show the same result whether the password is wrong OR the account was only ever created through that button, which never sets a password on the backend. If so, no password will ever work here. ' + BYO_SESSION_HINT };
       }
       if (hasError) {
-        return { success: false, cause: 'login_credentials', screenshot: afterScreenshot, error: 'Login failed — the app showed an error and the sign-in form is still on screen. Check the credentials for this app.' + pageSaid(loginErrorQuote) };
+        return { success: false, cause: 'login_credentials', handoffOffered, screenshot: afterScreenshot, error: 'Login failed — the app showed an error and the sign-in form is still on screen. Check the credentials for this app.' + pageSaid(loginErrorQuote) };
       }
       // Both fields were filled and a submit control was clicked to get here, so
       // this is a credentials/config outcome — not TestPilot failing to read the
@@ -5192,7 +5203,7 @@ async function crawlApp(appId, url, credentials, description, apiKey, onProgress
       // announcing "Logging in…" for an app the user declared public reads
       // like the crawler ignored them.
       if (credentials?.email) onProgress?.({ phase: 'login', message: 'Logging in...' });
-      loginResult = await visionLogin(page, credentials, apiKey, { runId: appId, emit: onProgress });
+      loginResult = await visionLogin(page, credentials, apiKey, { runId: appId, emit: onProgress, offerOnRejection: navOpts.offerOnRejection === true });
     }
     appKnowledge.loginFlow = loginResult;
     if (!loginResult.success) {
@@ -7621,7 +7632,7 @@ async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey)
         ? { success: false, error: 'Provided session is expired or invalid — paste a fresh sessionState.' }
         : { success: true, method: 'sessionState' };
     } else {
-      loginResult = await visionLogin(page, credentials, apiKey, { runId: testId, emit: (e) => emitStep(testId, e) });
+      loginResult = await visionLogin(page, credentials, apiKey, { runId: testId, emit: (e) => emitStep(testId, e), offerOnRejection: true });
       // No reload-and-retry after a handoff the user accepted and tried: a
       // second automatic attempt would overwrite "your manual login did not
       // complete" with a no-password verdict that contradicts what they did.
@@ -7631,7 +7642,7 @@ async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey)
           await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
           await page.waitForTimeout(2500);
         } catch {}
-        loginResult = await visionLogin(page, credentials, apiKey, { runId: testId, emit: (e) => emitStep(testId, e), skipHandoff: loginResult.handoffOffered === true });
+        loginResult = await visionLogin(page, credentials, apiKey, { runId: testId, emit: (e) => emitStep(testId, e), skipHandoff: loginResult.handoffOffered === true, offerOnRejection: true });
       }
     }
     if (!loginResult.success) {
@@ -10606,7 +10617,7 @@ app.post('/api/learn', watchOnboarding('crawl', (req) => ({ email: onboardingEma
     const crawlStart = (() => { try { return liveLandedUrl && normalizeAppUrl(liveLandedUrl).normalized === norm.normalized ? liveLandedUrl : norm.navigable; } catch { return norm.navigable; } })();
     await crawlApp(appId, crawlStart, { email, password, sessionState: learnSessionState }, description, effectiveApiKey, (progress) => {
       res.write(`data: ${JSON.stringify(progress)}\n\n`);
-    }, ownerEmail, { explicitScheme: norm.explicitScheme }, norm.normalized);
+    }, ownerEmail, { explicitScheme: norm.explicitScheme, offerOnRejection: req.body?.liveOffers === true }, norm.normalized);
     res.write(`data: ${JSON.stringify({ phase: 'done', appId })}\n\n`);
   } catch (e) {
     // Carry the classification so the UI can show "couldn't log in / tool
@@ -11562,7 +11573,7 @@ async function runSweep(sweepId, appKnowledge, credentials, { ownerEmail = '', a
       // so neither prompt ever appeared, and the wait for a response that
       // could never arrive just burned the full timeout before failing.
       // Routing through emitSweep actually reaches the sweep-stream frontend.
-      const li = await visionLogin(page, credentials, apiKey, { runId: sweepId, emit: (event) => emitSweep(sweepId, event) }).catch(e => ({ success: false, error: e.message }));
+      const li = await visionLogin(page, credentials, apiKey, { runId: sweepId, emit: (event) => emitSweep(sweepId, event), offerOnRejection: true }).catch(e => ({ success: false, error: e.message }));
       emitSweep(sweepId, { type: li.success ? 'pass' : 'fail', message: li.success ? 'Login successful' : `Could not log in: ${li.error || 'unknown'}` });
       if (!li.success) {
         report.status = 'blocked';
@@ -14271,6 +14282,7 @@ app.post('/api/saved-sessions/:appId/capture', async (req, res) => {
       emitCapture(captureId, { type: 'info', message: 'Logging in…' });
       const result = await visionLogin(page, { email, password }, apiKey || process.env.ANTHROPIC_SUPPORT_KEY, {
         runId: captureId,
+        offerOnRejection: true,
         emit: (event) => emitCapture(captureId, event),
       });
       if (!result.success) {
