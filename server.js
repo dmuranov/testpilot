@@ -10444,7 +10444,13 @@ app.post('/api/learn', watchOnboarding('crawl', (req) => ({ email: onboardingEma
     if (!ls || ls.expires < Date.now() || !caller || canonicalEmail(caller.email) !== ls.owner) {
       return res.status(400).json({ error: 'That live sign-in has expired. Press "Sign in myself" again.', code: 'LIVE_SIGNIN_EXPIRED' });
     }
-    liveSignins.delete(String(liveSigninId));
+    try {
+      if (normalizeAppUrl(String(url || '')).normalized !== ls.appHost) {
+        return res.status(400).json({ error: `That live sign-in was for ${ls.appHost}. Learn that address, or sign in again for this one.`, code: 'LIVE_SIGNIN_OTHER_APP' });
+      }
+    } catch {}
+    // Not deleted here: a refusal below (app slots, free budget, key) must not
+    // cost the user the sign-in they just did by hand. Consumed when the crawl starts.
     rawSessionState = ls.sessionState;
     liveLandedUrl = ls.landedUrl || null;
   }
@@ -10536,6 +10542,7 @@ app.post('/api/learn', watchOnboarding('crawl', (req) => ({ email: onboardingEma
     await recountUserAppSlots(ownerEmail, dbUser.id);
   }
 
+  if (liveSigninId) liveSignins.delete(String(liveSigninId));   // the crawl starts: the live sign-in is used
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
   res.write(`data: ${JSON.stringify({ phase: 'starting', message: 'Starting deep crawl...', appId })}\n\n`);
 
@@ -14103,21 +14110,30 @@ app.post('/api/learn/live-signin', async (req, res) => {
       const page = await ctx.newPage();
       await gotoWithSchemeFallback(page, norm.navigable, { waitUntil: 'domcontentloaded', timeout: 30000 }, { explicitScheme: norm.explicitScheme }).catch(() => {});
       await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+      // The user closed the tab or left: nobody is listening any more, so end
+      // the wait instead of holding a browser (and the account's one live
+      // sign-in) for 10 minutes.
+      let unheardSince = null;
+      const abandonWatch = setInterval(() => {
+        if (captureStreams.has(signinId)) { unheardSince = null; return; }
+        unheardSince = unheardSince || Date.now();
+        if (Date.now() - unheardSince > 45_000) settleLiveView(signinId, null, (p) => p.reject(new Error('declined')));
+      }, 5000);
       const result = await tryOAuthHandoff(page, {
         runId: signinId,
         emit: (event) => emitCapture(signinId, event),
-        skipOffer: true,
         offerMessage: 'Sign in to your app in the live window, then press Done.',
       });
+      clearInterval(abandonWatch);
       if (!result || !result.success) {
-        emitCapture(signinId, { type: 'error', runId: signinId, message: result?.error || 'The live sign-in was cancelled.' });
+        emitCapture(signinId, { type: 'error', runId: signinId, message: result?.handoffAttempted === false || !result ? 'The live sign-in was cancelled.' : result.error });
         return;
       }
       for (const [id, v] of liveSignins) { if (v.expires < Date.now()) liveSignins.delete(id); }
       // Where the user landed after signing in: many apps' entry address IS their
       // login page (it shows the form even when signed in), so the crawl starts
       // here instead — see /api/learn.
-      liveSignins.set(signinId, { owner, sessionState: await ctx.storageState(), landedUrl: page.url(), expires: Date.now() + 15 * 60_000 });
+      liveSignins.set(signinId, { owner, appHost: norm.normalized, sessionState: await ctx.storageState(), landedUrl: page.url(), expires: Date.now() + 15 * 60_000 });
       emitCapture(signinId, { type: 'done', runId: signinId, signinId, message: 'Signed in. Learning your app with this session…' });
     } catch (e) {
       emitCapture(signinId, { type: 'error', runId: signinId, message: `The live sign-in failed: ${e.message}` });

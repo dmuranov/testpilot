@@ -4868,6 +4868,10 @@ function toggleChatLoginFields() {
 async function learnLiveSignin() {
   const url = document.getElementById('learn-url')?.value?.trim();
   if (!url) { tpToast('Enter your app’s URL first'); return; }
+  // The same key rule startLearn applies — checked before the user spends
+  // minutes signing in by hand, not after.
+  const canLearnFreeNow = currentUser?.plan === 'free' && currentUser?.free_run_used !== true;
+  if (!canLearnFreeNow && !hasApiKey() && !paidRunOnUs()) { tpToast('Add your Claude API key in the sidebar first'); return; }
   const r = await fetch(`${API}/api/learn/live-signin`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }) })
     .then(async (res) => ({ ok: res.ok, d: await res.json().catch(() => ({})) })).catch(() => ({ ok: false, d: {} }));
   if (!r.ok || !r.d.signinId) {
@@ -4881,9 +4885,34 @@ async function learnLiveSignin() {
     let d; try { d = JSON.parse(ev.data); } catch { return; }
     const runId = d.runId || signinId;
     if (d.type === 'awaiting_2fa') { show2faPrompt(runId, d.message); return; }
-    if (d.type === 'live_view_ready') { openLiveView(runId, d.hostname, d.offerId); return; }
+    if (d.type === 'awaiting_oauth_handoff') {
+      // The same prompt box every takeover uses; the user already asked to
+      // sign in themselves, so it is accepted for them straight away.
+      showOAuthHandoffPrompt(runId, d.message, d.hostname, d.offerId);
+      document.getElementById('oauth-take-' + runId)?.click();
+      return;
+    }
+    if (d.type === 'live_view_ready') {
+      openLiveView(runId, d.hostname, d.offerId);
+      const box = document.getElementById('oauth-handoff-' + runId);
+      const row = box && box.querySelector('#oauth-done-' + runId)?.parentElement;
+      if (row && !row.querySelector('.tp-live-cancel')) {
+        const cancel = document.createElement('button');
+        cancel.className = 'btn btn-ghost tp-live-cancel'; cancel.textContent = 'Cancel';
+        cancel.onclick = () => postLiveViewSignal(runId, 'decline', box).catch(() => {});
+        row.appendChild(cancel);
+      }
+      return;
+    }
     if (d.type === 'live_frame') { renderLiveFrame(runId, d.data); return; }
-    if (d.type === 'done') { es.close(); closeLiveOverlay(runId); tpToast(d.message || 'Signed in.'); startLearn({ liveSigninId: d.signinId || signinId }); return; }
+    if (d.type === 'done') {
+      es.close(); closeLiveOverlay(runId); tpToast(d.message || 'Signed in.');
+      // The session belongs to the address it was made for: learn exactly that,
+      // even if the user wandered off the Learn page meanwhile.
+      if (state.view !== 'learn') navigate('learn');
+      setTimeout(() => startLearn({ liveSigninId: d.signinId || signinId, url }), 50);
+      return;
+    }
     if (d.type === 'error') { es.close(); closeLiveOverlay(runId); tpToast(d.message || 'The live sign-in did not complete.', 'error'); }
   };
   es.onerror = () => {};   // EventSource reconnects on its own; the server ends the stream
@@ -4891,7 +4920,7 @@ async function learnLiveSignin() {
 
 async function startLearn(opts = {}) {
   const liveSigninId = opts && opts.liveSigninId;
-  const url = document.getElementById('learn-url')?.value?.trim();
+  const url = (liveSigninId && opts.url) || document.getElementById('learn-url')?.value?.trim();
   const noLogin = document.getElementById('learn-no-login')?.checked;
   const email = (noLogin || liveSigninId) ? '' : document.getElementById('learn-email')?.value?.trim();
   const password = (noLogin || liveSigninId) ? '' : document.getElementById('learn-password')?.value;
