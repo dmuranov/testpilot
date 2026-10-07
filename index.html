@@ -5355,7 +5355,7 @@ async function runTest() {
     const res = await fetch(`${API}${isFlowTest ? '/api/test/flow' : '/api/test'}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ appId, scenario: scenarioToRun, email, password, apiKey: getApiKey(), freeRun: isFreeRun, userEmail: currentUser?.email, ...(hasSession ? { sessionState: sessionStateRaw } : {}), ...(savedSessionRole ? { savedSessionRole } : {}), ...(isFlowTest ? { paymentMode: 'stop-before-pay' } : {}) })
+      body: JSON.stringify({ appId, scenario: scenarioToRun, email, password, apiKey: getApiKey(), liveOffers: true, freeRun: isFreeRun, userEmail: currentUser?.email, ...(hasSession ? { sessionState: sessionStateRaw } : {}), ...(savedSessionRole ? { savedSessionRole } : {}), ...(isFlowTest ? { paymentMode: 'stop-before-pay' } : {}) })
     });
 
     if (!res.ok) {

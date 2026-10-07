@@ -7632,7 +7632,7 @@ async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey)
         ? { success: false, error: 'Provided session is expired or invalid — paste a fresh sessionState.' }
         : { success: true, method: 'sessionState' };
     } else {
-      loginResult = await visionLogin(page, credentials, apiKey, { runId: testId, emit: (e) => emitStep(testId, e), offerOnRejection: true });
+      loginResult = await visionLogin(page, credentials, apiKey, { runId: testId, emit: (e) => emitStep(testId, e), offerOnRejection: credentials?.liveOffers === true });
       // No reload-and-retry after a handoff the user accepted and tried: a
       // second automatic attempt would overwrite "your manual login did not
       // complete" with a no-password verdict that contradicts what they did.
@@ -7642,7 +7642,7 @@ async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey)
           await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 });
           await page.waitForTimeout(2500);
         } catch {}
-        loginResult = await visionLogin(page, credentials, apiKey, { runId: testId, emit: (e) => emitStep(testId, e), skipHandoff: loginResult.handoffOffered === true, offerOnRejection: true });
+        loginResult = await visionLogin(page, credentials, apiKey, { runId: testId, emit: (e) => emitStep(testId, e), skipHandoff: loginResult.handoffOffered === true, offerOnRejection: credentials?.liveOffers === true });
       }
     }
     if (!loginResult.success) {
@@ -11005,7 +11005,7 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
     { const _r = testResults.get(testId); if (_r && _r.status === 'queued') _r.status = 'starting'; }
     if (willQueue) emitStep(testId, { type: 'info', message: '▶ A runner just freed up — starting your scan now…' });
     try {
-      await runAgentTest(testId, appKnowledge, scenario, { email, password, allowReplay: true, ownerEmail, ownerUserId, sessionState, indexedDB: savedIndexedDB }, effectiveApiKey);
+      await runAgentTest(testId, appKnowledge, scenario, { email, password, allowReplay: true, ownerEmail, ownerUserId, sessionState, indexedDB: savedIndexedDB, liveOffers: req.body?.liveOffers === true }, effectiveApiKey);
     } catch (e) {
       const result = testResults.get(testId);
       const cfg = classifyConfigError(e.message);
@@ -12445,7 +12445,7 @@ app.post('/api/test/flow', async (req, res) => {
     if (willQueue) emitStep(testId, { type: 'info', message: '▶ A runner just freed up — starting your flow test now…' });
     try {
       await runAgentTest(testId, appKnowledge, scenario,
-        { email, password, allowReplay: true, ownerEmail: user.email, ownerUserId: user.userId, sessionState, indexedDB: flowIndexedDB, testType: 'flow_e2e', paymentMode },
+        { email, password, allowReplay: true, ownerEmail: user.email, ownerUserId: user.userId, sessionState, indexedDB: flowIndexedDB, liveOffers: req.body?.liveOffers === true, testType: 'flow_e2e', paymentMode },
         effectiveApiKey);
       const _r = testResults.get(testId);
       const _flowCharged = _r && ['completed', 'completed_with_bugs', 'completed_with_unverified'].includes(_r.status);
