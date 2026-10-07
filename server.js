@@ -829,6 +829,41 @@ function detectSignInPage(navigable) {
   return null;
 }
 
+// The address later runs start from. A redirect that stays on the app's own
+// host (http→https, / → /dashboard) is followed: it is the proven address. A
+// redirect to ANOTHER host is the app sending a logged-out visitor to its
+// sign-in service; that page carries one-time OAuth state that expires within
+// minutes, so saving it made every later test start on a dead sign-in link
+// (seen 2026-10-06: a Formidium test ended "blocked" on auth2.…/oauth-login.html).
+// Keep the entered address then, with the scheme that worked.
+function appEntryUrl(entered, landed) {
+  try {
+    const e = new URL(entered), l = new URL(landed);
+    const host = (h) => h.toLowerCase().replace(/^www\./, '');
+    // Only a SIGN-IN SERVICE page is replaced. An app's own cross-host move
+    // (mycompany.com → app.mycompany.com, *.vercel.app → custom domain) is
+    // the real app and is kept, as before.
+    if (host(e.hostname) === host(l.hostname) || !detectSignInPage(l.href)) return l.href;
+    return e.href;   //  is the URL actually attempted, so its scheme is the one that worked
+  } catch { return landed || entered; }
+}
+// A map saved before appEntryUrl existed may point at a sign-in service URL.
+// Its redirect_uri names the app: start there instead.
+function repairMapEntryUrl(map) {
+  if (!map?.url) return false;
+  const s = detectSignInPage(map.url);
+  if (!s || !s.suggestedUrl) return false;
+  // Only when redirect_uri is the app itself: the appId starts with the host
+  // the app was learned from (dots → dashes). A callback on another host
+  // (api.app.com/auth/callback) would send runs to the wrong place.
+  const h = new URL(s.suggestedUrl).hostname.toLowerCase();
+  const slug = (x) => x.replace(/[^a-z0-9]/gi, '-').toLowerCase();
+  const id = String(map.appId || '').toLowerCase();
+  if (!id.startsWith(slug(h)) && !id.startsWith(slug(h.replace(/^www./, '')))) return false;
+  map.url = s.suggestedUrl;
+  return true;
+}
+
 async function resolveUserUrl(raw, { allowSignInPage = false } = {}) {
   const trimmed = String(raw || '').trim();
   // A real signup (2026-09-25) entered file:///C:/Users/.../pharmacy.html,
@@ -2577,6 +2612,10 @@ async function loadPlatformMaps() {
     for (const file of files) {
       if (file.endsWith('.json')) {
         const data = JSON.parse(await fs.readFile(path.join(MAPS_DIR, file), 'utf-8'));
+        if (repairMapEntryUrl(data)) {
+          console.log('[maps] repaired entry URL (was a sign-in service page) for', data.appId, '→', data.url);
+          fs.writeFile(path.join(MAPS_DIR, file), JSON.stringify(data, null, 2)).catch(() => {});
+        }
         platformMaps.set(data.appId, data);
       }
     }
@@ -4975,7 +5014,7 @@ async function gotoWithSchemeFallback(page, navigableUrl, gotoOpts, { explicitSc
       // both send every later run through a needless redirect hop and trip
       // the plaintext-credentials warning below on a site that's encrypted.
       const landedUrl = page.url() || candidate.href;
-      return { response, urlUsed: landedUrl };
+      return { response, urlUsed: landedUrl, attemptedUrl: candidate.href };
     } catch (e) {
       lastErr = e;
       const canRetry = i < schemes.length - 1 && SCHEME_RETRYABLE_RE.test(e.message || '');
@@ -5119,7 +5158,7 @@ async function crawlApp(appId, url, credentials, description, apiKey, onProgress
     // Rebind to whatever scheme actually worked so every downstream use
     // (baseUrl, appKnowledge.url, future test runs against this app) reuses
     // the proven URL instead of re-guessing the scheme every time.
-    url = nav.urlUsed;
+    url = appEntryUrl(nav.attemptedUrl || url, nav.urlUsed);
     appKnowledge.url = url;
     learnAppOrigin = new URL(url).origin;
     // Gated on where we actually LANDED, not which scheme we attempted — a
