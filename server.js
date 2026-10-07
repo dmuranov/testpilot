@@ -3243,7 +3243,12 @@ function nextStepFor({ stage, cause, error = '', handoffOffered = false, handoff
     return { title: 'We could not reach the app', text: 'The address did not answer. Check the URL (it must be reachable from the internet, not localhost), then try again.', actions: [{ id: 'check_url', label: 'Check the URL' }, ask] };
   }
   if (cause === 'login_credentials') {
-    return { title: 'Check the test login', text: 'The app did not let these credentials in. Check that the same username (or email) and password sign in to this exact app by hand — some apps ask for a username, not an email — then run again. Repeated wrong attempts can lock the account. If it signs in another way, use a signed-in session.', actions: [{ id: 'fix_credentials', label: 'Fix the login and run again' }, session, ask] };
+    // The by-hand check and the lock warning only when the sign-in page itself
+    // showed an error: this cause also covers cases where the password is fine.
+    const pageRejected = /the app showed an error and the sign-in form is still on screen/.test(e);
+    return { title: 'Check the test login', text: pageRejected
+      ? 'The app did not let these credentials in. Check that the same username (or email) and password sign in to this exact app by hand — some apps ask for a username, not an email — then run again. Repeated wrong attempts can lock the account. If it signs in another way, use a signed-in session.'
+      : 'The app did not let these credentials in. Use a test account that signs in with email and password on this exact app (not your TestPilot account), then run again. If it signs in another way, use a signed-in session.', actions: [{ id: 'fix_credentials', label: 'Fix the login and run again' }, session, ask] };
   }
   return { title: 'This run did not get through', text: 'Tell us what you expected and TestPilot will look at the run with you.', actions: [ask] };
 }
@@ -5162,7 +5167,12 @@ async function crawlApp(appId, url, credentials, description, apiKey, onProgress
       // Say whose side it is: a rejected password is the login data, not a
       // TestPilot fault (a client was told "this is a TestPilot/login issue"
       // for a page that said "Invalid username or password").
-      const err = new Error(loginCause === 'login_credentials'
+      // Only a sign-in page that showed an error is a rejected password. The
+      // login_credentials cause also covers 2FA with no code channel, magic
+      // links, deployment protection and an accepted-then-bounced login, where
+      // the password is fine.
+      const passwordRejected = /the app showed an error and the sign-in form is still on screen/.test(String(loginResult.error || ''));
+      const err = new Error(passwordRejected
         ? `Could not log in to start the crawl — the app did not accept the username and password given (not an app defect): ${loginResult.error}`
         : `Could not log in to start the crawl — TestPilot could not get through this sign-in (not an app defect): ${loginResult.error}`);
       err.category = cls.category;
