@@ -2932,6 +2932,11 @@ function renderLearn() {
         <label>App Description (optional)</label>
         <textarea class="form-textarea" id="learn-desc" placeholder="Brief description: e.g. 'Property management tool for contractors in Spanish'"></textarea>
       </div>
+      <div style="margin:0 0 12px;padding:10px 12px;border:1px solid var(--border);border-radius:4px;font-size:12px;line-height:1.6;color:var(--text-dim)">
+        <strong style="color:var(--text)">Login not working, or uses single sign-on or a phone code?</strong>
+        Sign in yourself in a live window instead — TestPilot then learns the app with your session. No password needed here.
+        <div style="margin-top:8px"><button class="btn btn-ghost btn-sm" onclick="learnLiveSignin()" ${state.loading ? 'disabled' : ''}>🔑 Sign in myself in a live window</button></div>
+      </div>
       <details style="margin-bottom:12px">
         <summary style="cursor:pointer;font-size:12px;color:var(--text-dim);user-select:none">
           Advanced — bring your own session <span style="color:var(--text-muted)">(for SSO / OAuth / MFA / CAPTCHA apps)</span>
@@ -4858,16 +4863,72 @@ function toggleChatLoginFields() {
   if (fields) fields.style.display = noLogin ? 'none' : 'block';
 }
 
-async function startLearn() {
+// "Sign in myself in a live window": the user signs in to their app in a live
+// browser; Learn then runs with that session instead of a password.
+async function learnLiveSignin() {
   const url = document.getElementById('learn-url')?.value?.trim();
+  if (!url) { tpToast('Enter your app’s URL first'); return; }
+  // The same key rule startLearn applies — checked before the user spends
+  // minutes signing in by hand, not after.
+  const canLearnFreeNow = currentUser?.plan === 'free' && currentUser?.free_run_used !== true;
+  if (!canLearnFreeNow && !hasApiKey() && !paidRunOnUs()) { tpToast('Add your Claude API key in the sidebar first'); return; }
+  const r = await fetch(`${API}/api/learn/live-signin`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }) })
+    .then(async (res) => ({ ok: res.ok, d: await res.json().catch(() => ({})) })).catch(() => ({ ok: false, d: {} }));
+  if (!r.ok || !r.d.signinId) {
+    if (r.d.code === 'URL_IS_LOGIN_PAGE' && r.d.suggestedUrl) { const u = document.getElementById('learn-url'); if (u) u.value = r.d.suggestedUrl; }
+    tpToast(r.d.error || 'Could not open the live sign-in window.', 'error'); return;
+  }
+  const signinId = r.d.signinId;
+  tpToast('Opening your app in a live window…');
+  const es = new EventSource(`${API}/api/saved-sessions/learn/stream/${signinId}`);
+  es.onmessage = (ev) => {
+    let d; try { d = JSON.parse(ev.data); } catch { return; }
+    const runId = d.runId || signinId;
+    if (d.type === 'awaiting_2fa') { show2faPrompt(runId, d.message); return; }
+    if (d.type === 'awaiting_oauth_handoff') {
+      // The same prompt box every takeover uses; the user already asked to
+      // sign in themselves, so it is accepted for them straight away.
+      showOAuthHandoffPrompt(runId, d.message, d.hostname, d.offerId);
+      document.getElementById('oauth-take-' + runId)?.click();
+      return;
+    }
+    if (d.type === 'live_view_ready') {
+      openLiveView(runId, d.hostname, d.offerId);
+      const box = document.getElementById('oauth-handoff-' + runId);
+      const row = box && box.querySelector('#oauth-done-' + runId)?.parentElement;
+      if (row && !row.querySelector('.tp-live-cancel')) {
+        const cancel = document.createElement('button');
+        cancel.className = 'btn btn-ghost tp-live-cancel'; cancel.textContent = 'Cancel';
+        cancel.onclick = () => postLiveViewSignal(runId, 'decline', box).catch(() => {});
+        row.appendChild(cancel);
+      }
+      return;
+    }
+    if (d.type === 'live_frame') { renderLiveFrame(runId, d.data); return; }
+    if (d.type === 'done') {
+      es.close(); closeLiveOverlay(runId); tpToast(d.message || 'Signed in.');
+      // The session belongs to the address it was made for: learn exactly that,
+      // even if the user wandered off the Learn page meanwhile.
+      if (state.view !== 'learn') navigate('learn');
+      setTimeout(() => startLearn({ liveSigninId: d.signinId || signinId, url }), 50);
+      return;
+    }
+    if (d.type === 'error') { es.close(); closeLiveOverlay(runId); tpToast(d.message || 'The live sign-in did not complete.', 'error'); }
+  };
+  es.onerror = () => {};   // EventSource reconnects on its own; the server ends the stream
+}
+
+async function startLearn(opts = {}) {
+  const liveSigninId = opts && opts.liveSigninId;
+  const url = (liveSigninId && opts.url) || document.getElementById('learn-url')?.value?.trim();
   const noLogin = document.getElementById('learn-no-login')?.checked;
-  const email = noLogin ? '' : document.getElementById('learn-email')?.value?.trim();
-  const password = noLogin ? '' : document.getElementById('learn-password')?.value;
+  const email = (noLogin || liveSigninId) ? '' : document.getElementById('learn-email')?.value?.trim();
+  const password = (noLogin || liveSigninId) ? '' : document.getElementById('learn-password')?.value;
   const desc = document.getElementById('learn-desc')?.value?.trim();
   const learnSessionRaw = document.getElementById('learn-session-state')?.value?.trim();
 
   if (!url) { tpToast('App URL is required'); return; }
-  if (!noLogin && !learnSessionRaw && (!email || !password)) { tpToast('Login email and password are required — or check "No login required", or paste a session under Advanced'); return; }
+  if (!noLogin && !liveSigninId && !learnSessionRaw && (!email || !password)) { tpToast('Login email and password are required — or check "No login required", or paste a session under Advanced'); return; }
 
   const isFreeUser = currentUser?.plan === 'free';
   const freeRunUsed = currentUser?.free_run_used === true;
@@ -4883,7 +4944,7 @@ async function startLearn() {
     const res = await fetch(`${API}/api/learn`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, email, password, description: desc, apiKey: getApiKey(), freeLearn: canLearnFree, userEmail: currentUser?.email, ...(learnSessionRaw ? { sessionState: learnSessionRaw } : {}) })
+      body: JSON.stringify({ url, email, password, description: desc, apiKey: getApiKey(), freeLearn: canLearnFree, userEmail: currentUser?.email, ...(liveSigninId ? { liveSigninId } : {}), ...(learnSessionRaw && !liveSigninId ? { sessionState: learnSessionRaw } : {}) })
     });
 
     // Any non-OK response is a JSON error, not an SSE stream. This guard used
