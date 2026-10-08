@@ -11,6 +11,7 @@ import { loadRecipe, saveRecipe, shouldCaptureRun, isReplayableAction, replaySte
 import { assertPublicUrl } from './routes/ssrf.js';
 import { alertOnboardingIssue, watchOnboarding, onOnboardingFailure, isInternal as isInternalEmail } from './lib/onboarding-alert.js';
 import { RUN_MODE, isInternalAddress } from './lib/local-run.js';
+import { userScenarioWords, FREE_RUN_WORD_LIMIT } from './lib/scenario-words.js';
 import { sendResend, canSend } from './lib/resend.js';
 import { createFreeRunAllowance } from './lib/free-runs.js';
 import { auditLinks } from './routes/link-audit.js';
@@ -10953,12 +10954,19 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
   // Free run uses support key, otherwise user must provide their own.
   // One Run (€6) is a paid run on TestPilot's key: no key needed from the buyer.
   const effectiveApiKey = freeRun ? process.env.ANTHROPIC_SUPPORT_KEY : (apiKey || (userPlan === 'onerun' ? paidRunKey() : null));
-  if (!effectiveApiKey) return res.status(400).json({ error: 'API key required' });
+  if (!effectiveApiKey) return res.status(400).json({ error: 'This test needs your Claude API key. Add it in the sidebar (bottom left) and start again, or choose a plan that runs on ours.', code: 'API_KEY_REQUIRED' });
 
-  // Word limit for free runs
+  // Word limit for free runs - counted on what the client wrote. The dashboard appends its own
+  // "(Repeatable run: ...)" / "(Read-only run: ...)" instruction (~70 words) to every scenario;
+  // counting that too refused an 80-word description as "over 100" (Formidium, 2026-10-08).
   if (freeRun) {
-    const words = (scenario || '').trim().split(/\s+/).filter(w => w).length;
-    if (words > 100) return res.status(400).json({ error: 'Free run limited to 100 words' });
+    const words = userScenarioWords(scenario);
+    if (words > FREE_RUN_WORD_LIMIT) {
+      return res.status(400).json({
+        error: `Free test runs are limited to ${FREE_RUN_WORD_LIMIT} words, and your description has ${words}. Shorten it and start again, or add your Claude API key in the sidebar to run longer tests.`,
+        code: 'FREE_WORD_LIMIT', words, limit: FREE_RUN_WORD_LIMIT,
+      });
+    }
   }
 
   // OneRun reserve: hold 1 credit now (the gate above already guaranteed > 0).
@@ -12197,7 +12205,7 @@ app.post('/api/test/multirole', async (req, res) => {
     return res.status(400).json({ error: 'multirole requires at least 2 roles' });
   }
   if (roles.length > 5) {
-    return res.status(400).json({ error: 'multirole capped at 5 concurrent roles' });
+    return res.status(400).json({ error: `A multi-role test can run at most 5 roles at once, and this one has ${roles.length}. Remove some roles and start again.`, code: 'MULTIROLE_ROLE_LIMIT' });
   }
 
   if (freeRun && isFreeBudgetExceeded()) {

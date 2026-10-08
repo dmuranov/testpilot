@@ -5374,6 +5374,7 @@ async function runTest() {
       // run, or starter+ tried a feature their plan doesn't include.
       // Pop the unified paywall instead of just printing the error.
       if (res.status === 402) {
+        state.currentTest = null;   // not running: the button must not stay on "Running..."
         state.testStream.push({ type: 'error', message: err.error || 'Paid plan required' });
         render();
         const reason = err.code === 'FREE_RUN_USED' ? 'free_run'
@@ -5381,6 +5382,15 @@ async function runTest() {
                      : err.code === 'ONERUN_EXHAUSTED' ? 'onerun_exhausted'
                      : 'feature';
         showFunnelPaywall(reason);
+        return;
+      }
+      state.currentTest = null;   // not running: give them the form back
+      if (res.status < 500 && err.error) {
+        // A limit or a fix on their side (word limit, no key, daily pause, ownership...): the
+        // server's message already says what to do, so show it as is, never as a "server error".
+        state.testStream = [{ type: 'error', message: err.error }];
+        render();
+        tpToast(err.error, 'error');
         return;
       }
       state.testStream.push({ type: 'error', message: `Server error: ${err.error || res.statusText}` });
