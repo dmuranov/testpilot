@@ -4357,7 +4357,7 @@ function renderSecVerify() {
   return `
     <div style="margin-top:16px;padding:16px;border:1px solid #f59e0b;border-radius:10px;max-width:660px">
       <div style="font-size:14px;font-weight:700;margin-bottom:6px">First, show that ${escapeHtml(v.origin)} is yours</div>
-      <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px;line-height:1.6">A security scan lists where an app is weak, so TestPilot only scans apps their owner has verified. One-time step: add this line inside the <code>&lt;head&gt;</code> of your app (in Lovable, Bolt or Base44 you can ask the editor to "add this meta tag to the head of index.html"), publish the app, then press Verify.</p>
+      <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px;line-height:1.6">A security scan lists where an app is weak, so TestPilot only scans apps their owner has verified. One-time step: add this line inside the <code>&lt;head&gt;</code> of your app (Lovable or Bolt: ask the editor to "add this meta tag to the head of index.html". Base44: dashboard → Code tab → index.html, paste it inside <code>&lt;head&gt;</code>), publish the app, then press Verify.</p>
       <code style="${box}">${escapeHtml(v.metaTag)}</code>
       <button class="btn btn-ghost btn-sm" onclick="secCopyVerifyTag()">Copy the tag</button>
       <p style="font-size:12px;color:var(--text-muted);margin:12px 0 4px">Or publish a file at <code>${escapeHtml(v.filePath)}</code> containing only:</p>
