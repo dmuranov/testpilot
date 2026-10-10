@@ -3251,6 +3251,15 @@ function pageErrorSentence(text) {
 // Appended AFTER the verdict's fixed prose and stripped before classification
 // (see nextStepFor): the page's own words must not steer which card is shown.
 const PAGE_SAID_RE = /\s*The sign-in page said: “[^”]*”\s*$/;
+// The login TestPilot typed, and a plain hint when its domain looks misspelt
+// ("gmai.com"): clients read the error, not the screenshot.
+const EMAIL_DOMAIN_TYPOS = { 'gmai.com': 'gmail.com', 'gmial.com': 'gmail.com', 'gamil.com': 'gmail.com', 'gmail.co': 'gmail.com', 'gmal.com': 'gmail.com', 'gnail.com': 'gmail.com', 'hotmial.com': 'hotmail.com', 'hotmai.com': 'hotmail.com', 'outlok.com': 'outlook.com', 'yaho.com': 'yahoo.com', 'icloud.co': 'icloud.com' };
+function loginTyped(email) {
+  if (!email) return '';
+  const domain = String(email).split('@')[1]?.toLowerCase();
+  const fix = domain && EMAIL_DOMAIN_TYPOS[domain];
+  return ` TestPilot signed in as “${email}”${fix ? ` — check the spelling: did you mean @${fix}?` : ''}.`;
+}
 function pageSaid(quote) { return quote ? ` The sign-in page said: “${quote.replace(/[“”]/g, '"')}”` : ''; }
 
 function nextStepFor({ stage, cause, error = '', handoffOffered = false, handoffAttempted = false } = {}) {
@@ -3287,7 +3296,7 @@ function nextStepFor({ stage, cause, error = '', handoffOffered = false, handoff
     // showed an error: this cause also covers cases where the password is fine.
     const pageRejected = /the app showed an error and the sign-in form is still on screen/.test(e);
     return { title: 'Check the test login', text: pageRejected
-      ? 'The app did not let these credentials in. Check that the same username (or email) and password sign in to this exact app by hand — some apps ask for a username, not an email — then run again. Repeated wrong attempts can lock the account. If it signs in another way, use a signed-in session.'
+      ? 'Your app rejected this email and password. The account has to exist in your app already: sign in to your app by hand with exactly these details, and if that fails, create the account on the sign-up page of your app first, then run again. Repeated wrong attempts can lock the account.'
       : 'The app did not let these credentials in. Use a test account that signs in with email and password on this exact app (not your TestPilot account), then run again. If it signs in another way, use a signed-in session.', actions: [{ id: 'fix_credentials', label: 'Fix the login and run again' }, session, ask] };
   }
   return { title: 'This run did not get through', text: 'Tell us what you expected and TestPilot will look at the run with you.', actions: [ask] };
@@ -3672,10 +3681,11 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
         return { success: false, cause: 'login_credentials', handoffOffered, screenshot: afterScreenshot, error: (hasError
           ? 'Login failed — the app showed an error and the sign-in form is still on screen.'
           : `Login did not take — the sign-in form is still on screen after submitting (still at ${newUrl}).`)
-          + pageSaid(loginErrorQuote) + ' This account most likely has NO PASSWORD at all: this page also offers "Sign in with Google" (or similar), and apps show the same result whether the password is wrong OR the account was only ever created through that button, which never sets a password on the backend. If so, no password will ever work here. ' + BYO_SESSION_HINT };
+          + pageSaid(loginErrorQuote) + loginTyped(credentials.email)
+          + ' Your app does not know this email and password together. Sign in to your app by hand with exactly these details: if that fails too, create this account in your app first (its sign-up page), or give TestPilot a test account that already exists. If the account was made with "Sign in with Google", it has no password at all; then ' + BYO_SESSION_HINT_INLINE + '.' };
       }
       if (hasError) {
-        return { success: false, cause: 'login_credentials', handoffOffered, screenshot: afterScreenshot, error: 'Login failed — the app showed an error and the sign-in form is still on screen. Check the credentials for this app.' + pageSaid(loginErrorQuote) };
+        return { success: false, cause: 'login_credentials', handoffOffered, screenshot: afterScreenshot, error: 'Login failed — the app showed an error and the sign-in form is still on screen.' + pageSaid(loginErrorQuote) + loginTyped(credentials.email) + ' Your app does not know this email and password together. Sign in to your app by hand with exactly these details: if that fails too, create this account in your app first (its sign-up page), or give TestPilot a test account that already exists.' };
       }
       // Both fields were filled and a submit control was clicked to get here, so
       // this is a credentials/config outcome — not TestPilot failing to read the
