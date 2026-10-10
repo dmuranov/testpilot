@@ -14526,6 +14526,19 @@ app.post('/api/security/api-intercept', async (req, res) => {
   const sessionUser = requireUser(req, res);
   if (!sessionUser) return;
   let { appId, userA, userB, apiKey, mode } = req.body;
+  // Proof of control before any security scan: its findings are a map of
+  // where the app is weak, and anyone can sign up as a normal user of someone
+  // else's app. Same meta-tag / file proof as the leak check (siteVerifyToken).
+  // Checked before any free scan or credit is taken.
+  const scanOrigin = originForApp(appId);
+  if (scanOrigin && ownsApp(appId, sessionUser.email) && !isSuperAdmin(sessionUser.email)
+      && !(await isSiteVerified(sessionUser.email, scanOrigin))) {
+    return res.status(403).json({
+      error: `Before a security scan, prove that ${scanOrigin} is yours: add the TestPilot tag to your app, publish it, then press Verify.`,
+      code: 'SITE_NOT_VERIFIED',
+      verification: { origin: scanOrigin, ...siteVerificationInstructions(sessionUser.email, scanOrigin) },
+    });
+  }
   // Free tier gets ONE security scan on the house — support-key funded, owner-scoped,
   // forced read-only (destructive probes stay paid). Shows off the differentiator.
   let freeScan = false;

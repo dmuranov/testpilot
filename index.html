@@ -4325,6 +4325,7 @@ function renderSecSetup() {
       </label>
     </div>
 
+    ${renderSecVerify()}
     <button class="btn btn-primary" style="margin-top:16px;font-size:14px;padding:10px 24px" onclick="secRunScan()" ${state.secDeepLoading ? 'disabled' : ''}>
       ${state.secDeepLoading ? '<span class="loader"></span> Scanning...' : '▶ Run Security Scan'}
     </button>
@@ -4345,6 +4346,43 @@ function renderSecSetup() {
         <strong style="color:#f59e0b">This is not a penetration test.</strong> It's an automated, scoped scan — it does <em>not</em> do manual exploit-chaining, business-logic abuse beyond its probe set, social engineering, network/infrastructure testing, or source-code (SAST) review. XSS coverage is server-reflected only (not DOM or stored). It reliably catches the authorization and data-exposure bugs that leak customer data and that pentests are expensive to find — run it on every change; use a real pentest for depth. Read-only by default; enabling destructive tests fires real write/delete probes (staging only).
       </p>
     </div>`;
+}
+
+// Shown when the server refuses a scan with SITE_NOT_VERIFIED: the client
+// proves the app is theirs with a meta tag (or a file), then presses Verify.
+function renderSecVerify() {
+  const v = state.secVerify;
+  if (!v || v.appId !== state.secConfig?.appId) return '';
+  const box = 'display:block;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-family:"DM Mono",monospace;font-size:12px;word-break:break-all;margin:6px 0';
+  return `
+    <div style="margin-top:16px;padding:16px;border:1px solid #f59e0b;border-radius:10px;max-width:660px">
+      <div style="font-size:14px;font-weight:700;margin-bottom:6px">First, show that ${escapeHtml(v.origin)} is yours</div>
+      <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px;line-height:1.6">A security scan lists where an app is weak, so TestPilot only scans apps their owner has verified. One-time step: add this line inside the <code>&lt;head&gt;</code> of your app (in Lovable, Bolt or Base44 you can ask the editor to "add this meta tag to the head of index.html"), publish the app, then press Verify.</p>
+      <code style="${box}">${escapeHtml(v.metaTag)}</code>
+      <button class="btn btn-ghost btn-sm" onclick="secCopyVerifyTag()">Copy the tag</button>
+      <p style="font-size:12px;color:var(--text-muted);margin:12px 0 4px">Or publish a file at <code>${escapeHtml(v.filePath)}</code> containing only:</p>
+      <code style="${box}">${escapeHtml(v.fileBody)}</code>
+      <button class="btn btn-primary btn-sm" style="margin-top:8px" onclick="secVerifySite()" ${state.secVerifying ? 'disabled' : ''}>${state.secVerifying ? '<span class="loader"></span> Checking…' : 'Verify'}</button>
+    </div>`;
+}
+function secCopyVerifyTag() {
+  navigator.clipboard?.writeText(state.secVerify?.metaTag || '').then(() => tpToast('Tag copied — paste it inside <head> and publish your app.')).catch(() => {});
+}
+async function secVerifySite() {
+  const v = state.secVerify;
+  if (!v) return;
+  state.secVerifying = true; render();
+  try {
+    const res = await fetch(`${API}/api/security/verify-site`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appId: v.appId }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { tpToast(data.error || `Could not verify (HTTP ${res.status})`); return; }
+    if (data.verified) { state.secVerify = null; tpToast('Verified — you can run the security scan now.'); }
+    else tpToast(`The tag is not on ${v.origin} yet. Publish the app after adding it, wait a minute, then press Verify again.`);
+  } catch (e) { tpToast('Could not verify: ' + e.message); }
+  finally { state.secVerifying = false; render(); }
 }
 
 async function secRunScan() {
@@ -6410,6 +6448,12 @@ async function secDeepScan() {
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: 'Unknown error' }));
+      if (err.code === 'SITE_NOT_VERIFIED') {
+        state.secDeepLoading = false; state.secStream = [];
+        state.secVerify = { ...err.verification, appId: cfg.appId };
+        render();
+        return;
+      }
       if (err.code === 'FREE_SECURITY_USED' || err.code === 'FREE_DAILY_BUDGET_EXCEEDED') {
         state.secDeepLoading = false; state.secStream.push({ type: 'error', message: err.error }); render();
         if (typeof showFunnelPaywall === 'function') showFunnelPaywall('feature');
