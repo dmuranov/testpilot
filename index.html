@@ -4354,34 +4354,55 @@ function renderSecVerify() {
   const v = state.secVerify;
   if (!v || v.appId !== state.secConfig?.appId) return '';
   const box = 'display:block;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-family:"DM Mono",monospace;font-size:12px;word-break:break-all;margin:6px 0';
+  const muted = 'font-size:12px;color:var(--text-muted);line-height:1.6';
   return `
     <div style="margin-top:16px;padding:16px;border:1px solid #f59e0b;border-radius:10px;max-width:660px">
       <div style="font-size:14px;font-weight:700;margin-bottom:6px">First, show that ${escapeHtml(v.origin)} is yours</div>
-      <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px;line-height:1.6">A security scan lists where an app is weak, so TestPilot only scans apps their owner has verified. One-time step: add this line inside the <code>&lt;head&gt;</code> of your app (in Lovable, Bolt or Base44 you can ask the editor to "add this meta tag to the head of index.html"), publish the app, then press Verify.</p>
-      <code style="${box}">${escapeHtml(v.metaTag)}</code>
-      <button class="btn btn-ghost btn-sm" onclick="secCopyVerifyTag()">Copy the tag</button>
-      <p style="font-size:12px;color:var(--text-muted);margin:12px 0 4px">Or publish a file at <code>${escapeHtml(v.filePath)}</code> containing only:</p>
-      <code style="${box}">${escapeHtml(v.fileBody)}</code>
-      <button class="btn btn-primary btn-sm" style="margin-top:8px" onclick="secVerifySite()" ${state.secVerifying ? 'disabled' : ''}>${state.secVerifying ? '<span class="loader"></span> Checking…' : 'Verify'}</button>
+      <p style="${muted};margin:0 0 12px">A security scan lists where an app is weak, so TestPilot only scans apps their owner has verified. It is a one-time step.</p>
+      <div style="font-size:13px;font-weight:700;margin-bottom:4px">1. Paste this into your app's AI chat (Lovable, Bolt, Base44…)</div>
+      <code style="${box}">${escapeHtml(secVerifyInstruction(v))}</code>
+      <button class="btn btn-primary btn-sm" onclick="secCopyVerify('ai')">Copy the message</button>
+      <div style="font-size:13px;font-weight:700;margin:14px 0 4px">2. When your app is published again, press Verify</div>
+      <button class="btn btn-primary btn-sm" onclick="secVerifySite()" ${state.secVerifying ? 'disabled' : ''}>${state.secVerifying ? '<span class="loader"></span> Checking…' : 'Verify'}</button>
+      ${state.secVerifyMsg ? `<p style="font-size:12px;color:#f59e0b;margin:8px 0 0;line-height:1.6">${escapeHtml(state.secVerifyMsg)}</p>` : ''}
+      <details style="margin-top:16px">
+        <summary style="cursor:pointer;${muted}">Prefer to do it by hand?</summary>
+        <p style="${muted};margin:8px 0 4px">Add this line inside the <code>&lt;head&gt;</code> of your app's <code>index.html</code>, then publish. In Base44: dashboard → Code tab → index.html.</p>
+        <code style="${box}">${escapeHtml(v.metaTag)}</code>
+        <button class="btn btn-ghost btn-sm" onclick="secCopyVerify('tag')">Copy the tag</button>
+        <p style="${muted};margin:12px 0 4px">Or publish a file at <code>${escapeHtml(v.filePath)}</code> containing only:</p>
+        <code style="${box}">${escapeHtml(v.fileBody)}</code>
+      </details>
     </div>`;
 }
-function secCopyVerifyTag() {
-  navigator.clipboard?.writeText(state.secVerify?.metaTag || '').then(() => tpToast('Tag copied — paste it inside <head> and publish your app.')).catch(() => {});
+function secVerifyInstruction(v) {
+  return `Add exactly this line inside the <head> of index.html, change nothing else, then publish the app: ${v.metaTag}`;
+}
+function secCopyVerify(what) {
+  const v = state.secVerify; if (!v) return;
+  const text = what === 'ai' ? secVerifyInstruction(v) : v.metaTag;
+  navigator.clipboard?.writeText(text).then(() => tpToast(what === 'ai'
+    ? 'Copied — paste it into the AI chat of your app, publish, then press Verify.'
+    : 'Tag copied — paste it inside <head> and publish your app.')).catch(() => {});
 }
 async function secVerifySite() {
   const v = state.secVerify;
   if (!v) return;
-  state.secVerifying = true; render();
+  state.secVerifying = true; state.secVerifyMsg = ''; render();
   try {
     const res = await fetch(`${API}/api/security/verify-site`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ appId: v.appId }),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) { tpToast(data.error || `Could not verify (HTTP ${res.status})`); return; }
-    if (data.verified) { state.secVerify = null; tpToast('Verified — you can run the security scan now.'); }
-    else tpToast(`The tag is not on ${v.origin} yet. Publish the app after adding it, wait a minute, then press Verify again.`);
-  } catch (e) { tpToast('Could not verify: ' + e.message); }
+    if (!res.ok) { state.secVerifyMsg = data.error || `Could not verify (HTTP ${res.status}).`; return; }
+    if (data.verified) { state.secVerify = null; tpToast('Verified — you can run the security scan now.'); return; }
+    state.secVerifyMsg = data.reason === 'other_token'
+      ? 'Your app has a TestPilot tag, but with a different code. Copy the message again and ask the AI chat to replace the old tag, then publish.'
+      : data.reason === 'unreachable'
+        ? `TestPilot could not open ${v.origin}. Check the app is published and public, then press Verify again.`
+        : `The tag is not on ${v.origin} yet. Make sure the app was published after the change, wait a minute, then press Verify again.`;
+  } catch (e) { state.secVerifyMsg = 'Could not verify: ' + e.message; }
   finally { state.secVerifying = false; render(); }
 }
 
