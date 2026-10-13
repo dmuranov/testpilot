@@ -13624,16 +13624,22 @@ app.post('/api/security/verify-site', async (req, res) => {
     if (r.status === 200 && tokenFileMatches(await r.text(), token)) method = 'file';
   } catch {}
 
+  // Why a check failed, so the client is told what to do next: the home page
+  // did not load, it carries a TestPilot tag with another token, or no tag.
+  let reason = 'not_found';
   if (!method) {
     try {
       const r = await fetch(origin + '/', { redirect: 'follow', signal: AbortSignal.timeout(8000) });
       const html = (await r.text()).slice(0, 512 * 1024);
       if (metaTagMatches(html, token)) method = 'meta';
-    } catch {}
+      else if (/name=["']testpilot-site-verification["']/i.test(html)) reason = 'other_token';
+      else if (!r.ok) reason = 'unreachable';
+    } catch { reason = 'unreachable'; }
   }
 
   if (!method) {
-    return res.json({ verified: false, origin, ...siteVerificationInstructions(sessionUser.email, origin) });
+    console.log('[verify-site] not verified', canonicalEmail(sessionUser.email), origin, reason);
+    return res.json({ verified: false, reason, origin, ...siteVerificationInstructions(sessionUser.email, origin) });
   }
 
   const store = await loadVerifiedSites();
