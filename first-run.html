@@ -10,48 +10,45 @@
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
   body{background:#080808;color:#f4f2ee;font-family:-apple-system,BlinkMacSystemFont,sans-serif;min-height:100vh;display:flex;flex-direction:column}
-  .wrap{max-width:720px;margin:0 auto;padding:32px 20px;width:100%;flex:1}
-  .topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:32px}
+  .wrap{max-width:720px;margin:0 auto;padding:24px 16px 200px;width:100%;flex:1}
+  .topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:24px}
   .brand{font-size:20px;font-weight:800}
   .brand span{color:#c8f040}
   .signin{font-size:13px;color:#d8d8d8;text-decoration:none}
   .signin:hover{color:#c8f040}
-
-  .card{background:#0f0f0f;border:1px solid rgba(200,240,64,0.12);border-radius:6px;padding:36px 32px}
-  h1{font-size:28px;font-weight:800;margin-bottom:8px}
-  h1 span{color:#c8f040}
-  .sub{font-size:13px;color:#d8d8d8;margin-bottom:28px;font-family:'SF Mono','Monaco',monospace}
-  label{display:block;font-size:11px;color:#d8d8d8;font-family:monospace;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:6px;margin-top:18px}
-  label:first-of-type{margin-top:0}
-  input,textarea{width:100%;background:#080808;border:1px solid rgba(200,240,64,0.25);color:#fff;padding:13px 16px;font-size:14px;font-family:inherit;outline:none;border-radius:3px;-webkit-appearance:none;resize:vertical}
+  .chat{display:flex;flex-direction:column;gap:14px}
+  .msg{max-width:88%;padding:13px 16px;border-radius:12px;font-size:14px;line-height:1.6;word-wrap:break-word;scroll-margin-bottom:180px}
+  .msg.tp{background:#0f0f0f;border:1px solid rgba(200,240,64,0.15);align-self:flex-start;border-top-left-radius:3px}
+  .msg.me{background:#c8f040;color:#080808;align-self:flex-end;border-top-right-radius:3px;font-weight:600}
+  .msg.err{border-color:#f59e0b}
+  .msg .who{font-size:11px;color:#c8f040;font-family:monospace;letter-spacing:.5px;margin-bottom:4px}
+  .msg p+p{margin-top:8px}
+  .msg a{color:#c8f040}
+  .muted{color:#a8a8a8;font-size:12px}
+  code.box{display:block;background:#080808;border:1px solid #2a2a2a;border-radius:6px;padding:10px 12px;font-family:'SF Mono',Monaco,monospace;font-size:12px;word-break:break-word;white-space:pre-wrap;margin:8px 0;color:#e8e8e8}
+  .live{font-family:'SF Mono',Monaco,monospace;font-size:12px;color:#a8a8a8}
+  .reply{position:fixed;left:0;right:0;bottom:0;background:#080808;border-top:1px solid #1d1d1d;padding:12px 16px}
+  .reply-in{max-width:720px;margin:0 auto;display:flex;flex-direction:column;gap:8px}
+  .row{display:flex;gap:8px;flex-wrap:wrap}
+  input,textarea{flex:1;min-width:0;background:#0f0f0f;border:1px solid rgba(200,240,64,0.25);color:#fff;padding:12px 14px;font-size:15px;font-family:inherit;outline:none;border-radius:8px;-webkit-appearance:none;resize:vertical}
   input:focus,textarea:focus{border-color:#c8f040}
-  button{width:100%;background:#c8f040;color:#080808;font-weight:800;font-size:14px;padding:14px;border:none;cursor:pointer;border-radius:3px;font-family:inherit;margin-top:24px;touch-action:manipulation}
-  button:hover{opacity:0.9}
-  button:disabled{opacity:0.4;cursor:not-allowed}
-  .hint{font-size:11px;color:#d8d8d8;margin-top:16px;text-align:center;font-family:monospace}
-  .err{background:#2a0000;border:1px solid #ef4444;color:#ff8888;padding:11px 14px;font-size:13px;border-radius:3px;margin-top:16px;font-family:monospace}
-  .stream{background:#080808;border:1px solid #222;border-radius:3px;padding:16px;font-family:'SF Mono','Monaco',monospace;font-size:12px;color:#a8a8a8;max-height:340px;overflow-y:auto;line-height:1.7}
-  .stream .line{padding:2px 0}
-  .stream .ok{color:#c8f040}
-  .stream .info{color:#9090ff}
-  .stream .err{color:#ff8888;background:transparent;border:none;padding:0;margin:0}
-
-  /* Paywall */
-  .modal{position:fixed;inset:0;background:rgba(0,0,0,0.8);display:none;align-items:center;justify-content:center;z-index:50;padding:20px}
-  .modal.open{display:flex}
-  .modal-card{background:#0f0f0f;border:1px solid rgba(200,240,64,0.2);border-radius:6px;padding:32px;max-width:780px;width:100%;max-height:90vh;overflow-y:auto}
-  .modal-h{font-size:22px;font-weight:800;margin-bottom:6px}
-  .modal-sub{font-size:13px;color:#d8d8d8;margin-bottom:24px;font-family:monospace}
-  .plans{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:20px}
-  .plan{background:#080808;border:1px solid #2a2a2a;border-radius:5px;padding:18px 16px;cursor:pointer;transition:all 0.15s;text-align:left}
-  .plan:hover{border-color:#c8f040;transform:translateY(-1px)}
-  .plan.featured{border-color:rgba(200,240,64,0.5)}
-  .plan-name{font-size:11px;font-family:monospace;color:#c8f040;letter-spacing:1px;margin-bottom:6px}
-  .plan-price{font-size:24px;font-weight:800;margin-bottom:4px}
-  .plan-price small{font-size:11px;color:#d8d8d8;font-weight:400}
-  .plan-line{font-size:11px;color:#a8a8a8;margin-top:6px;font-family:monospace}
-  .later{background:transparent;color:#d8d8d8;border:1px solid #333;font-weight:400;font-size:13px;padding:10px;margin-top:0}
-  .later:hover{color:#fff;border-color:#666;opacity:1}
+  button{background:#c8f040;color:#080808;font-weight:800;font-size:14px;padding:12px 16px;border:none;cursor:pointer;border-radius:8px;font-family:inherit;touch-action:manipulation}
+  button:hover{opacity:.9}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  button.ghost{background:transparent;color:#e8e8e8;border:1px solid #333;font-weight:600}
+  button.ghost:hover{border-color:#c8f040;opacity:1}
+  .choices{display:flex;flex-direction:column;gap:8px;margin-top:10px}
+  .choice{display:flex;gap:10px;align-items:flex-start;background:#080808;border:1px solid #2a2a2a;border-radius:8px;padding:11px 12px;cursor:pointer;text-align:left;color:#f4f2ee;font-weight:400;font-size:13px;width:100%}
+  .choice:hover,.choice.on{border-color:#c8f040;opacity:1}
+  .choice b{display:block;font-size:14px;margin-bottom:2px}
+  .choice .tag{font-size:11px;color:#f59e0b;font-family:monospace}
+  .choice.locked{opacity:.55;cursor:default}
+  .divider{font-size:11px;color:#777;font-family:monospace;text-align:center;margin:12px 0 2px}
+  .problem{border:1px solid #3a2a00;background:#120d00;border-radius:8px;padding:10px 12px;margin-top:8px;font-size:13px}
+  .problem.locked{border-color:#2a2a2a;background:#0b0b0b;color:#a8a8a8}
+  .plan{margin-top:10px;border:1px solid rgba(200,240,64,0.5);border-radius:8px;padding:12px}
+  .plan b{font-size:20px}
+  @media (max-width:520px){.msg{max-width:96%}}
 </style>
 <script type="text/javascript">
 /* Cookie consent — gates Microsoft Clarity (GDPR/ePrivacy: no analytics before opt-in; choice remembered). */
@@ -65,446 +62,343 @@
     <div class="brand">Test<span>Pilot</span></div>
     <a href="/app" class="signin">Sign in →</a>
   </div>
-
-  <!-- STEP 1: Email + URL modal (inline as first card) -->
-  <div class="card" id="step-start">
-    <h1>Run your first <span>test</span></h1>
-    <div class="sub">// free: 1 app, 1 test. no card required.</div>
-    <label for="f-email">Your email</label>
-    <input id="f-email" type="email" placeholder="you@company.com" autocomplete="email" inputmode="email" />
-    <label for="f-url">App URL</label>
-    <input id="f-url" type="url" placeholder="https://your-app.com" autocomplete="url" inputmode="url" oninput="updateAppLoginSiteLabel()" />
-
-    <div style="margin-top:18px;padding:14px;background:#080808;border:1px solid #222;border-radius:3px">
-      <div style="font-size:11px;color:#d8d8d8;font-family:monospace;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:10px">Login<span id="f-app-login-site"> for the app above</span> — not your TestPilot account</div>
-      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:0;font-size:12px;color:#a8a8a8">
-        <input id="f-no-login" type="checkbox" onchange="toggleStartLogin()" style="width:15px;height:15px;accent-color:#c8f040;cursor:pointer;margin:0" />
-        No login needed — my app is publicly accessible
-      </label>
-      <div id="f-login-fields" style="margin-top:12px">
-        <label for="f-start-app-email" style="margin-top:0">App login email</label>
-        <input id="f-start-app-email" type="email" placeholder="testuser@your-app.com" autocomplete="off" />
-        <label for="f-start-app-pw">App login password</label>
-        <input id="f-start-app-pw" type="password" placeholder="••••••••" autocomplete="off" />
-        <div style="font-size:11px;color:#d8d8d8;margin-top:8px;font-family:monospace">// use a TEST account — we log in with these to crawl past the sign-in wall</div>
-      </div>
-    </div>
-
-    <div id="step-start-err" style="display:none" class="err"></div>
-    <button id="step-start-btn" onclick="startFunnel()">Continue →</button>
-    <div class="hint">we'll start crawling your app to learn what's there</div>
-  </div>
-
-  <!-- STEP 2: Learn streaming -->
-  <div class="card" id="step-learn" style="display:none">
-    <h1>Learning your <span>app</span></h1>
-    <div class="sub" id="step-learn-sub">// crawling pages and forms…</div>
-    <div class="stream" id="step-learn-stream"></div>
-  </div>
-
-  <!-- STEP 3: Scenario description -->
-  <div class="card" id="step-scenario" style="display:none">
-    <h1>Describe your <span>test</span></h1>
-    <div class="sub">// in plain english. example: "log in, create a new project called Test, verify it appears in the list"</div>
-    <label for="f-scenario">Scenario</label>
-    <textarea id="f-scenario" rows="5" placeholder="Log in, then…" maxlength="600"></textarea>
-    <label for="f-app-email">App login email <span style="color:#d8d8d8;text-transform:none;font-weight:400">(if your app needs login — leave blank if public)</span></label>
-    <input id="f-app-email" type="email" placeholder="optional" autocomplete="off" />
-    <label for="f-app-pw">App login password</label>
-    <input id="f-app-pw" type="password" placeholder="optional" autocomplete="off" />
-    <div id="step-scenario-err" style="display:none" class="err"></div>
-    <button id="step-scenario-btn" onclick="runFunnelTest()">Run test →</button>
-  </div>
-
-  <!-- STEP 4: Test streaming -->
-  <div class="card" id="step-test" style="display:none">
-    <h1>Running your <span>test</span></h1>
-    <div class="sub">// the agent is acting on your app step-by-step</div>
-    <div class="stream" id="step-test-stream"></div>
-  </div>
-
-  <!-- STEP 5: Report -->
-  <div class="card" id="step-report" style="display:none">
-    <h1>Test <span id="report-status">complete</span></h1>
-    <div class="sub" id="report-sub">// review the steps below</div>
-    <div class="stream" id="step-report-stream" style="max-height:none"></div>
-    <div class="hint" style="margin-top:24px"><a href="/app" style="color:#c8f040">Open the dashboard →</a></div>
-  </div>
+  <div class="chat" id="chat" aria-live="polite"></div>
 </div>
-
-<!-- Paywall popup (shown over report) -->
-<!-- APP READY — the funnel used to slide silently from the crawl log to the
-     scenario form. Users read that as "nothing happened" and restarted. -->
-<div class="modal" id="ready-pop">
-  <div class="modal-card" style="max-width:460px;padding:28px">
-    <div class="modal-h">Your app is <span style="color:#c8f040">ready to test</span></div>
-    <div class="modal-sub" id="ready-pop-sub">// deep crawl complete</div>
-    <p style="font-size:13px;color:#aaa;line-height:1.7;margin:0 0 22px">TestPilot has mapped your app&rsquo;s pages, forms and buttons. Next: tell it what to test &mdash; one sentence in plain english is enough.</p>
-    <button onclick="closeReadyPop()" style="width:100%">Choose your test &rarr;</button>
-  </div>
-</div>
-<div class="modal" id="paywall">
-  <div class="modal-card">
-    <div class="modal-h">That was your free run.</div>
-    <div class="modal-sub">// unlimited apps and runs for €15/mo + VAT, with your own Claude key</div>
-    <div class="plans">
-      <div class="plan featured" onclick="checkout('monthly')">
-        <div class="plan-name">TESTPILOT</div>
-        <div class="plan-price">€15<small>/mo + VAT</small></div>
-        <div class="plan-line">unlimited apps · unlimited runs · a fix prompt for every problem</div>
-      </div>
-    </div>
-    <button class="later" onclick="closePaywall()">Maybe later — show me the report</button>
-  </div>
-</div>
+<div class="reply"><div class="reply-in" id="reply"></div></div>
 
 <script src="/attrib.js"></script>
-<script src="/field-hints.js" defer></script>
-<!-- data-stall-ms: this page's test view watches /api/test/:id/stream, where
-     a single legitimate step can take ~100s (server.js, runAgentTest timeout
-     comment) — anything near the 90s script default would false-positive on
-     a normal run. -->
+<!-- data-stall-ms: the test stream can legitimately go ~100s between events
+     (runAgentTest step timeout), well past signal.js's 90s default. -->
 <script src="/signal.js" defer data-stall-ms="180000"></script>
 <script src="/support-widget.js" defer></script>
 <script>
-const state = { appId: null, testId: null, userEmail: null, appEmail: '', appPw: '', learnSummary: '' };
+// Chat first-run (2026-10-30): one question at a time, in this order —
+// email, app link, builder, ownership proof, login, crawl, pick a test, run,
+// plain-words report, the first problem's fix prompt. Every step calls the
+// same endpoints the dashboard uses; nothing here is a separate engine.
+const TERMS_VERSION = '1.0';
+const st = { email: '', url: '', origin: '', platform: 'other', platformName: '', appId: null, appEmail: '', appPw: '', testId: null, verification: null };
+const PLATFORMS = [['base44', 'Base44'], ['lovable', 'Lovable'], ['bolt', 'Bolt'], ['replit', 'Replit'], ['v0', 'v0'], ['other', 'Something else / my own code']];
 
-function showReadyPop() {
-  const sub = document.getElementById('ready-pop-sub');
-  if (sub) sub.textContent = '// ' + (state.learnSummary || 'deep crawl complete');
-  document.getElementById('ready-pop').classList.add('open');
-}
+const $chat = document.getElementById('chat');
+const $reply = document.getElementById('reply');
+const esc = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-function closeReadyPop() {
-  document.getElementById('ready-pop').classList.remove('open');
-  const ta = document.getElementById('f-scenario');
-  if (ta) ta.focus();
-}
-
-function show(id) {
-  document.querySelectorAll('.card').forEach(c => c.style.display = 'none');
-  document.getElementById(id).style.display = 'block';
-  window.scrollTo({ top: 0, behavior: 'smooth' });
-}
-
-function appendStream(streamId, line, kind) {
-  const el = document.getElementById(streamId);
+function say(html, cls) {
   const d = document.createElement('div');
-  d.className = 'line ' + (kind || '');
-  d.textContent = line;
-  el.appendChild(d);
-  el.scrollTop = el.scrollHeight;
+  d.className = 'msg tp' + (cls ? ' ' + cls : '');
+  d.innerHTML = '<div class="who">TESTPILOT</div>' + html;
+  $chat.appendChild(d);
+  d.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  return d;
+}
+function me(text) {
+  const d = document.createElement('div');
+  d.className = 'msg me';
+  d.textContent = text;
+  $chat.appendChild(d);
+}
+function setReply(html) { $reply.innerHTML = html; const f = $reply.querySelector('input,textarea'); if (f) f.focus(); }
+function step(name, detail) {
+  fetch('/api/funnel/step', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ step: name, detail: detail || '' }) }).catch(() => {});
+}
+async function postJson(url, body) {
+  const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+  const data = await res.json().catch(() => ({}));
+  return { res, data };
+}
+function netErr(e) {
+  return (e && e.name === 'TypeError') ? 'I could not reach TestPilot. Check your connection and try again.' : 'Something went wrong on our side, not in your app. Please try again.';
+}
+function copy(text, btn) {
+  navigator.clipboard?.writeText(text).then(() => { if (btn) { const t = btn.textContent; btn.textContent = 'Copied ✓'; setTimeout(() => btn.textContent = t, 1600); } }).catch(() => {});
 }
 
-function showErr(boxId, msg) {
-  const el = document.getElementById(boxId);
-  el.textContent = msg;
-  el.style.display = 'block';
+// ── 1. email ──────────────────────────────────────────────
+function askEmail() {
+  say('<p>Hi! I\'m TestPilot. I test your app the way a customer would use it, then tell you in plain words what\'s broken and how to fix it.</p><p>First, what\'s your email?</p>');
+  setReply(`<div class="row"><input id="in" type="email" inputmode="email" autocomplete="email" placeholder="you@company.com" onkeydown="if(event.key==='Enter')gotEmail()"><button onclick="gotEmail()">Send</button></div>
+    <div class="muted">By continuing you accept the <a href="/terms.html" target="_blank" style="color:#c8f040">Terms</a> and <a href="/privacy.html" target="_blank" style="color:#c8f040">Privacy Policy</a>.</div>`);
 }
-function clearErr(boxId) {
-  document.getElementById(boxId).style.display = 'none';
-}
-function toggleStartLogin() {
-  const noLogin = document.getElementById('f-no-login').checked;
-  const f = document.getElementById('f-login-fields');
-  if (f) f.style.display = noLogin ? 'none' : 'block';
-}
-
-// "App login" alone reads ambiguous next to "Your email" above it — easy to
-// mistake for a TestPilot field. Naming the actual site as it's typed makes
-// the distinction concrete instead of relying on wording alone.
-function updateAppLoginSiteLabel() {
-  const el = document.getElementById('f-app-login-site');
-  if (!el) return;
-  const raw = (document.getElementById('f-url') || {}).value || '';
-  let host = '';
-  try { host = new URL(raw.includes('://') ? raw : 'https://' + raw).hostname; } catch (e) {}
-  el.textContent = host ? ' for ' + host : ' for the app above';
+function gotEmail() {
+  const v = document.getElementById('in').value.trim().toLowerCase();
+  if (!v || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) return say('<p>That doesn\'t look like an email address. Try again?</p>', 'err');
+  st.email = v; me(v); step('email');
+  askUrl();
 }
 
-// The form's first step is retried once when the browser got no response at
-// all (fetch threw: stale socket, a blip, a restart). Only that step: starting
-// a test or a checkout must not be sent twice, because the first request may
-// have been processed and only its answer lost. A gateway error is a
-// response, so it is not retried either — the server may have done the work.
-async function postJsonRetryOnNoResponse(url, body) {
-  const once = () => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  try { return await once(); }
-  catch (e) {
-    if (e && e.name === 'AbortError') throw e;          // the page is going away
-    if (navigator.onLine === false) throw e;             // a retry cannot succeed
-    await new Promise((r) => setTimeout(r, 1200));
-    return once();
-  }
+// ── 2. app link ───────────────────────────────────────────
+// Editor / preview links are the most common wrong answer: the crawler can't
+// use them, and the ownership proof has to sit on the live site.
+function editorLink(u) {
+  return /(^|\.)base44\.com\/apps\/|lovable\.dev\/projects|bolt\.new\/~|stackblitz\.com|replit\.com\/@|v0\.dev\/chat|v0\.app\/chat/i.test(u);
 }
-// "No response" and "an answer we could not read" are different problems;
-// say which one it was.
-function requestFailureText(e, action) {
-  return (e && e.name === 'TypeError')
-    ? 'Could not reach TestPilot — check your connection and ' + action + ' again'
-    : 'TestPilot answered unexpectedly — ' + action + ' again, and if it repeats use Support';
+function askUrl() {
+  say('<p>Paste the link to your app: the one your customers open.</p>');
+  setReply(`<div class="row"><input id="in" type="url" inputmode="url" autocomplete="url" placeholder="https://your-app.com" onkeydown="if(event.key==='Enter')gotUrl()"><button onclick="gotUrl()">Send</button></div>`);
 }
-
-async function startFunnel() {
-  clearErr('step-start-err');
-  const email = document.getElementById('f-email').value.trim().toLowerCase();
-  const url = document.getElementById('f-url').value.trim();
-  const noLogin = document.getElementById('f-no-login').checked;
-  const appEmail = noLogin ? '' : document.getElementById('f-start-app-email').value.trim();
-  const appPw = noLogin ? '' : document.getElementById('f-start-app-pw').value;
-  if (!email || !email.includes('@')) return showErr('step-start-err', 'Enter a valid email');
-  if (!url) return showErr('step-start-err', 'Enter the URL of the app you want to test');
-  if (!noLogin && (!appEmail || !appPw)) return showErr('step-start-err', 'Enter a test login for your app so we can crawl past the sign-in wall — or check "No login needed" if it\'s public');
-
-  const btn = document.getElementById('step-start-btn');
-  btn.disabled = true; btn.textContent = 'Starting…';
-  state.userEmail = email;
-  state.appEmail = appEmail;
-  state.appPw = appPw;
-
-  // First touch captured by /attrib.js on this page (or stored earlier by the
-  // landing page). The server sanitizes with cleanAttrib; absent means direct.
+async function gotUrl() {
+  const input = document.getElementById('in');
+  const v = input.value.trim();
+  if (!v) return;
+  if (editorLink(v)) return say('<p>That looks like your <b>editor</b> link. I need the link your customers open, the published one. In your builder, look for <b>Publish</b> or <b>Share</b> and copy the live address.</p>', 'err');
+  me(v); setReply('<div class="muted">Checking…</div>');
   let attrib = (window.tpAttribution && window.tpAttribution.first) || null;
   if (!attrib) { try { attrib = JSON.parse(localStorage.getItem('tp_attrib') || 'null'); } catch (e) {} }
-
   try {
-    const res = await postJsonRetryOnNoResponse('/api/funnel/start', { userEmail: email, url, source: attrib?.source || '', medium: attrib?.medium || '', campaign: attrib?.campaign || '' });
-    const data = await res.json();
+    const { res, data } = await postJson('/api/funnel/start', { userEmail: st.email, url: v, source: attrib?.source || '', medium: attrib?.medium || '', campaign: attrib?.campaign || '' });
     if (!res.ok || !data.ok) {
-      btn.disabled = false; btn.textContent = 'Continue →';
       if (data.code === 'FREE_RUN_USED' || data.code === 'APP_SLOT_LIMIT') {
-        showErr('step-start-err', data.error + ' Sign in to choose a plan.');
-        return;
+        say(`<p>${esc(data.error)}</p><p>The free test covers your first app. <a href="/app">Sign in</a> to see your report, or get the €15/month plan for unlimited apps.</p>`, 'err');
+        return setReply(`<div class="row"><button onclick="location.href='/app'">Sign in</button></div>`);
       }
       if (data.code === 'URL_IS_LOGIN_PAGE' && data.suggestedUrl) {
-        // The real app's address, read from the sign-in URL: put it in the
-        // field so the user only has to press Continue again.
-        document.getElementById('f-url').value = data.suggestedUrl;
-        try { updateAppLoginSiteLabel(); } catch (e) {}
+        say(`<p>That's your app's sign-in page. I'll start from <b>${esc(data.suggestedUrl)}</b> instead. Press Send.</p>`);
+        setReply(`<div class="row"><input id="in" type="url" value="${esc(data.suggestedUrl)}" onkeydown="if(event.key==='Enter')gotUrl()"><button onclick="gotUrl()">Send</button></div>`);
+        return;
       }
-      return showErr('step-start-err', data.error || 'Could not start');
+      say(`<p>${esc(data.error || 'I could not open that link.')} Check it opens in a private browser window, then paste it again.</p>`, 'err');
+      return askUrlAgain();
     }
-    // Begin Learn stream — pass app credentials so the crawl can log in.
-    show('step-learn');
-    document.getElementById('step-learn-sub').textContent = `// crawling ${data.app.url}…`;
-    runLearnStream({ url: data.app.url, userEmail: email, appEmail, appPw });
-
-    // Pre-fill the scenario step's app login fields so the user doesn't
-    // have to retype. They can still edit them before running the test.
-    const sEmail = document.getElementById('f-app-email');
-    const sPw = document.getElementById('f-app-pw');
-    if (sEmail && appEmail) sEmail.value = appEmail;
-    if (sPw && appPw) sPw.value = appPw;
-  } catch (e) {
-    btn.disabled = false; btn.textContent = 'Continue →';
-    showErr('step-start-err', requestFailureText(e, 'press Continue'));
-  }
+    st.url = data.app.url; step('url', st.url);
+    postJson('/api/auth/accept-terms', { version: TERMS_VERSION }).catch(() => {});
+    askPlatform();
+  } catch (e) { say('<p>' + esc(netErr(e)) + '</p>', 'err'); askUrlAgain(); }
+}
+function askUrlAgain() {
+  setReply(`<div class="row"><input id="in" type="url" inputmode="url" placeholder="https://your-app.com" onkeydown="if(event.key==='Enter')gotUrl()"><button onclick="gotUrl()">Send</button></div>`);
 }
 
-async function runLearnStream({ url, userEmail, appEmail, appPw }) {
-  appendStream('step-learn-stream', '⏳ Starting deep crawl...', 'info');
+// ── 3. builder ────────────────────────────────────────────
+function askPlatform() {
+  say('<p>What did you build it with? I\'ll word my instructions and fixes for that tool.</p>');
+  setReply(`<div class="row">${PLATFORMS.map(([k, n]) => `<button class="ghost" onclick="gotPlatform('${k}')">${esc(n)}</button>`).join('')}</div>`);
+}
+function gotPlatform(k) {
+  st.platform = k; st.platformName = (PLATFORMS.find((p) => p[0] === k) || [])[1] || '';
+  me(st.platformName); step('platform', k);
+  askVerify();
+}
+
+// ── 4. ownership proof ────────────────────────────────────
+function verifyMessage(v) {
+  return `Add exactly this line inside the <head> of index.html, change nothing else, then publish the app: ${v.metaTag}`;
+}
+async function askVerify() {
+  setReply('<div class="muted">One moment…</div>');
   try {
-    const res = await fetch('/api/learn', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        url,
-        userEmail,
-        // App login creds for the crawl (empty strings = public app).
-        email: appEmail || '',
-        password: appPw || '',
-        freeLearn: true,
-      }),
-    });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      appendStream('step-learn-stream', '❌ ' + (data.error || 'Crawl failed to start'), 'err');
-      return;
-    }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
+    const { res, data } = await postJson('/api/verify/url', { url: st.url });
+    if (!res.ok) { say(`<p>${esc(data.error || 'I could not prepare the check.')}</p>`, 'err'); return askUrlAgain(); }
+    st.origin = data.origin; st.verification = data;
+    if (data.verified) { say(`<p>${esc(data.origin)} is already verified as yours. 👍</p>`); step('verified', 'already'); return askLogin(); }
+    step('verify_shown');
+    const own = st.platform === 'other';
+    say(`<p>Before I test, I need to know <b>${esc(data.origin)}</b> is yours. I only test apps their owner has verified. It's a one-time step.</p>
+      ${own
+        ? `<p>Add this line inside the <code>&lt;head&gt;</code> of your <code>index.html</code>, then publish:</p><code class="box">${esc(data.metaTag)}</code>
+           <button class="ghost" onclick="copy(st.verification.metaTag,this)">Copy the tag</button>
+           <p class="muted">Or publish a file at <code>${esc(data.filePath)}</code> containing only <code>${esc(data.fileBody)}</code>.</p>`
+        : `<p>Paste this message into ${esc(st.platformName)}'s AI chat:</p><code class="box">${esc(verifyMessage(data))}</code>
+           <button class="ghost" onclick="copy(verifyMessage(st.verification),this)">Copy the message</button>
+           ${st.platform === 'base44' ? '<p class="muted">Or by hand in Base44: dashboard → Code tab → index.html, paste the tag inside &lt;head&gt;.</p>' : ''}`}
+      <p>When your app is published again, press <b>Check</b>.</p>`);
+    setReply(`<div class="row"><button onclick="checkVerify()">Check</button></div>`);
+  } catch (e) { say('<p>' + esc(netErr(e)) + '</p>', 'err'); setReply(`<div class="row"><button onclick="askVerify()">Try again</button></div>`); }
+}
+async function checkVerify() {
+  me("Check"); setReply('<div class="muted">Looking for the tag…</div>');
+  try {
+    const { res, data } = await postJson('/api/verify/url', { url: st.url, check: true });
+    if (res.ok && data.verified) { say('<p>Verified, thanks! ✅</p>'); step('verified'); return askLogin(); }
+    const why = !res.ok ? (data.error || 'The check did not work.')
+      : data.reason === 'other_token' ? 'Your app has a TestPilot tag, but with a different code (maybe from another email). Ask the AI chat to replace the old tag with the one above, then publish.'
+      : data.reason === 'unreachable' ? `I couldn't open ${data.origin}. Check the app is published and public.`
+      : `I don't see the tag on ${data.origin} yet. Did your builder publish the change? It can take a minute after publishing.`;
+    say(`<p>${esc(why)}</p>`, 'err');
+    setReply(`<div class="row"><button onclick="checkVerify()">Check again</button></div>`);
+  } catch (e) { say('<p>' + esc(netErr(e)) + '</p>', 'err'); setReply(`<div class="row"><button onclick="checkVerify()">Check again</button></div>`); }
+}
+
+// ── 5. login ──────────────────────────────────────────────
+function askLogin() {
+  say('<p>Does someone need to log in to use your app?</p>');
+  setReply(`<div class="row"><button class="ghost" onclick="gotNoLogin()">No, it's public</button><button class="ghost" onclick="askCreds()">Yes, it has a login</button></div>`);
+}
+function gotNoLogin() { me('No, it\'s public'); step('login', 'none'); learn(); }
+function askCreds() {
+  me('Yes, it has a login');
+  say('<p>Give me a login I can use. Please use a <b>test account</b>, not your real one: I\'ll click around like a customer would.</p>');
+  setReply(`<div class="row"><input id="ae" type="email" autocomplete="off" placeholder="test login email"><input id="ap" type="password" autocomplete="off" placeholder="password" onkeydown="if(event.key==='Enter')gotCreds()"></div>
+    <div class="row"><button onclick="gotCreds()">Send</button></div>
+    <div class="muted">Not your TestPilot account: the login for ${esc(st.origin || 'your app')}.</div>`);
+}
+function gotCreds() {
+  const e = document.getElementById('ae').value.trim(), p = document.getElementById('ap').value;
+  if (!e || !p) return say('<p>I need both the email and the password.</p>', 'err');
+  st.appEmail = e; st.appPw = p; me(e + ' · ••••••'); step('login', 'creds');
+  learn();
+}
+
+// ── 6. crawl ──────────────────────────────────────────────
+async function learn() {
+  setReply('<div class="muted">Looking around your app… this takes about two minutes.</div>');
+  const bubble = say('<p>Looking around your app to see what\'s there…</p><p class="live" id="learn-live">starting</p>');
+  const live = bubble.querySelector('#learn-live');
+  try {
+    const res = await fetch('/api/learn', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: st.url, userEmail: st.email, email: st.appEmail || '', password: st.appPw || '', freeLearn: true }) });
+    if (!res.ok) { const d = await res.json().catch(() => ({})); return learnFailed(d.error || 'The crawl did not start.', null); }
+    const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = '';
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop();
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split('\n'); buf = lines.pop();
       for (const line of lines) {
         if (!line.startsWith('data: ')) continue;
-        try {
-          const ev = JSON.parse(line.substring(6));
-          if (ev.appId) state.appId = ev.appId;
-          if (ev.phase === 'complete' && ev.message) state.learnSummary = ev.message;
-          const kind = ev.phase === 'error' ? 'err' : ev.phase === 'done' ? 'ok' : '';
-          if (ev.message) appendStream('step-learn-stream', ev.message, kind);
-          if (ev.phase === 'done') {
-            // Hand off to the dashboard. The funnel exists to get an app
-            // learned; everything after that (choosing a test type, running
-            // it, reading the report) belongs inside the product, where the
-            // nav is. Asking for a scenario on this bare page is where cold
-            // visitors stalled out.
-            appendStream('step-learn-stream', '\u2705 App learned \u2014 opening your dashboard\u2026', 'ok');
-            const _lid = state.appId || ev.appId || '';
-            setTimeout(() => {
-              window.location.href = '/app?learned=' + encodeURIComponent(_lid);
-            }, 1300);
-            return;
-          }
-          if (ev.phase === 'error' && ev.next && ev.next.title) {
-            // Tier 1 on the first-run page: the same "what to do next" the
-            // dashboard shows, with the dashboard as the place to act on it.
-            appendStream('step-learn-stream', '🧭 ' + ev.next.title + ' — ' + (ev.next.text || ''), 'info');
-            appendStream('step-learn-stream', 'Open your dashboard to fix it and run again: ' + window.location.origin + '/app', 'info');
-          }
-          if (ev.phase === 'error') {
-            // A 200 response with an in-band error line is invisible to
-            // signal.js's fetch wrapper — it already marked this call
-            // "pending" the moment headers arrived. Report it explicitly.
-            // ev.category (server.js emits it on this same event, defaulting
-            // to 'tool_limitation') is the real discriminator between
-            // distinct causes — without it every learn failure hashes the
-            // same and only the first one ever gets looked at.
-            try {
-              window.tpReportSignal && window.tpReportSignal({
-                type: 'stream_error',
-                name: ev.category || 'unknown',
-                message: ev.message,
-                path: '/api/learn'
-              });
-            } catch (e) {}
-            return;
-          }
-        } catch {}
+        let ev; try { ev = JSON.parse(line.slice(6)); } catch { continue; }
+        if (ev.appId) st.appId = ev.appId;
+        if (ev.message && live) live.textContent = String(ev.message).slice(0, 140);
+        if (ev.phase === 'error') {
+          try { window.tpReportSignal && window.tpReportSignal({ type: 'stream_error', name: ev.category || 'unknown', message: ev.message, path: '/api/learn' }); } catch (e) {}
+          return learnFailed(ev.message, ev.next);
+        }
+        if (ev.phase === 'done') { if (live) live.textContent = 'done'; step('learned'); return suggest(); }
       }
     }
-  } catch (e) {
-    appendStream('step-learn-stream', '❌ ' + e.message, 'err');
-  }
+    if (st.appId) return suggest();
+    learnFailed('The crawl stopped without finishing.', null);
+  } catch (e) { learnFailed(netErr(e), null); }
+}
+function learnFailed(msg, next) {
+  say(`<p>${esc(msg || 'I could not finish looking around your app.')}</p>${next && next.title ? `<p><b>${esc(next.title)}</b>: ${esc(next.text || '')}</p>` : ''}<p class="muted">If this was on our side, your free test is still waiting.</p>`, 'err');
+  setReply(`<div class="row"><button onclick="learn()">Try again</button><button class="ghost" onclick="askLogin()">Change the login</button></div>`);
 }
 
-async function runFunnelTest() {
-  clearErr('step-scenario-err');
-  const scenario = document.getElementById('f-scenario').value.trim();
-  const appEmail = document.getElementById('f-app-email').value.trim();
-  const appPw = document.getElementById('f-app-pw').value;
-  if (!scenario) return showErr('step-scenario-err', 'Describe what you want to test');
-  if (scenario.split(/\s+/).filter(Boolean).length > 100) return showErr('step-scenario-err', 'Free run limited to 100 words. Trim it.');
-  if (!state.appId) return showErr('step-scenario-err', 'App not learned yet — please retry');
+// ── 7. pick a test ────────────────────────────────────────
+let picks = [];
+async function suggest() {
+  setReply('<div class="muted">Thinking of what to test…</div>');
+  picks = [];
+  try {
+    const { res, data } = await postJson(`/api/v1/apps/${encodeURIComponent(st.appId)}/scenarios/suggest`, {});
+    if (res.ok && Array.isArray(data.scenarios)) {
+      const rank = { ai_suggested: 0, crawl_recipe: 1 };
+      picks = data.scenarios.filter(Boolean).sort((a, b) => (rank[a.source] ?? 2) - (rank[b.source] ?? 2)).slice(0, 3);
+    }
+  } catch (e) {}
+  showChoices();
+}
+function showChoices() {
+  const sug = picks.length
+    ? `<p>I looked at your app. Here's what I'd test. Your free test covers <b>one</b> of these:</p>
+       <div class="choices">${picks.map((p, i) => `<button class="choice" onclick="pick(${i})"><span>✅</span><span><b>${esc(p.name)}</b>${esc(p.description || '')}</span></button>`).join('')}</div>`
+    : `<p>I couldn't see much to suggest${st.appEmail ? '' : ' without logging in'}. Pick a test below${st.appEmail ? '' : ', or give me a test login and I\'ll look again'}.</p>`;
+  say(`${sug}
+    <div class="divider">─── or pick a test yourself ───</div>
+    <div class="choices">
+      <button class="choice" onclick="ownTest()"><span>🧭</span><span><b>Journey test</b>Describe any flow in your own words, e.g. "a customer books a table for Saturday".</span></button>
+      <button class="choice" onclick="toDashboard('security')"><span>🔒</span><span><b>Security check</b>Can users see each other's data? <span class="tag">needs 2 test accounts · opens in your dashboard</span></span></button>
+      <button class="choice" onclick="toDashboard('sweep')"><span>🖱️</span><span><b>Click-everything check</b>Find buttons and links that are broken. <span class="tag">opens in your dashboard</span></span></button>
+      <div class="choice locked"><span>👀</span><span><b>Keep watching</b>Rerun daily and tell me when something breaks. <span class="tag">€15/month plan</span></span></div>
+    </div>`);
+  setReply(st.appEmail ? '' : `<div class="row"><button class="ghost" onclick="askCreds()">Give a test login and look again</button></div>`);
+}
+function pick(i) {
+  const p = picks[i]; if (!p) return;
+  me(p.name); step('test_chosen', 'suggested');
+  run(`${p.name}: ${p.description || ''}`.trim());
+}
+function ownTest() {
+  me('Journey test');
+  say('<p>What should a customer be able to do? One or two sentences, and say what should be true at the end.</p><p class="muted">Example: "Sign up, add an item called Test, and check it appears in the list."</p>');
+  setReply(`<div class="row"><textarea id="sc" rows="2" maxlength="600" placeholder="A customer can…"></textarea><button onclick="gotOwn()">Run</button></div>`);
+}
+function gotOwn() {
+  const v = document.getElementById('sc').value.trim();
+  if (!v) return;
+  if (v.split(/\s+/).filter(Boolean).length > 100) return say('<p>The free test takes up to 100 words. Can you make it shorter?</p>', 'err');
+  me(v); step('test_chosen', 'own');
+  run(v);
+}
+function toDashboard(kind) {
+  me(kind === 'security' ? 'Security check' : 'Click-everything check'); step('test_chosen', kind);
+  say('<p>That one runs in your dashboard. Taking you there now…</p>');
+  setTimeout(() => { location.href = '/app?learned=' + encodeURIComponent(st.appId || ''); }, 1200);
+}
 
-  const btn = document.getElementById('step-scenario-btn');
-  btn.disabled = true; btn.textContent = 'Starting…';
-
+// ── 8. run ────────────────────────────────────────────────
+async function run(scenario) {
+  setReply('<div class="muted">Testing… usually two to four minutes. You can leave this tab open.</div>');
   try {
     // Not retried on purpose: a second POST could spend the free run twice.
-    const res = await fetch('/api/test', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        appId: state.appId,
-        scenario,
-        email: appEmail,
-        password: appPw,
-        freeRun: true,
-        userEmail: state.userEmail,
-      }),
-    });
-    const data = await res.json();
+    const { res, data } = await postJson('/api/test', { appId: st.appId, scenario, email: st.appEmail, password: st.appPw, freeRun: true, userEmail: st.email });
     if (!res.ok || !data.testId) {
-      btn.disabled = false; btn.textContent = 'Run test →';
-      return showErr('step-scenario-err', data.error || 'Could not start test');
+      if (data.code === 'SITE_NOT_VERIFIED') { say('<p>I need the ownership check again for this address.</p>', 'err'); return askVerify(); }
+      say(`<p>${esc(data.error || 'The test did not start.')}</p>`, 'err');
+      return setReply(`<div class="row"><button onclick="showChoices()">Pick again</button></div>`);
     }
-    state.testId = data.testId;
-    show('step-test');
-    streamTest(data.testId);
-  } catch (e) {
-    btn.disabled = false; btn.textContent = 'Run test →';
-    showErr('step-scenario-err', requestFailureText(e, 'press Run test'));
-  }
+    st.testId = data.testId; step('run_started');
+    const bubble = say('<p>Testing your app now, step by step…</p><p class="live" id="run-live">starting</p>');
+    stream(data.testId, bubble.querySelector('#run-live'));
+  } catch (e) { say('<p>' + esc(netErr(e)) + '</p>', 'err'); setReply(`<div class="row"><button onclick="showChoices()">Pick again</button></div>`); }
 }
-
-function streamTest(testId) {
-  appendStream('step-test-stream', '⏳ Connecting to test runner…', 'info');
+function stream(testId, live) {
+  let finished = false;
+  const finish = () => { if (finished) return; finished = true; setTimeout(() => report(testId), 700); };
   const es = new EventSource('/api/test/' + testId + '/stream');
   es.onmessage = (e) => {
-    try {
-      const ev = JSON.parse(e.data);
-      // Heartbeats keep the SSE alive during slow steps; don't stack them as
-      // repeated lines here.
-      if (ev.type === 'heartbeat') return;
-      const kind = ev.type === 'pass' ? 'ok' : ev.type === 'error' ? 'err' : ev.type === 'info' ? 'info' : '';
-      if (ev.message) appendStream('step-test-stream', ev.message, kind);
-      if (ev.type === 'summary' || ev.type === 'done' || ev.type === 'complete') {
-        es.close();
-        // Wait a beat for last events to render, then show paywall + report.
-        setTimeout(() => finishTest(testId), 600);
-      }
-    } catch {}
+    let ev; try { ev = JSON.parse(e.data); } catch { return; }
+    if (ev.type === 'heartbeat') return;
+    if (ev.message && live) live.textContent = String(ev.message).slice(0, 140);
+    if (ev.type === 'summary' || ev.type === 'done' || ev.type === 'complete') { es.close(); finish(); }
   };
-  es.onerror = () => {
-    es.close();
-    // Even on stream error, try to fetch the final result.
-    setTimeout(() => finishTest(testId), 1000);
-  };
+  es.onerror = () => { es.close(); finish(); };
 }
 
-async function finishTest(testId) {
-  // Pull the final test record so we can render the report behind the paywall.
+// ── 9. report + taster fix ────────────────────────────────
+async function report(testId) {
+  let r = {};
+  try { r = await (await fetch('/api/test/' + testId)).json(); } catch (e) {}
+  step('report', r.status || '');
+  const bugs = Array.isArray(r.bugs) ? r.bugs : [];
+  const status = r.status || '';
+  if (!bugs.length && status === 'completed') {
+    say(`<p><b>Everything in this test worked.</b> ✅ ${esc((r.steps || []).length)} steps, no problems found.</p>`);
+    return upsell(false);
+  }
+  if (!bugs.length) {
+    say(`<p>The test stopped before it could give a verdict${r.error ? ` (${esc(String(r.error).slice(0, 160))})` : ''}.</p><p>When that's on our side, your free test isn't used up, so you can run it again.</p>`, 'err');
+    return setReply(`<div class="row"><button onclick="showChoices()">Run again</button><button class="ghost" onclick="location.href='/app'">Open dashboard</button></div>`);
+  }
+  say(`<p>I found <b>${bugs.length} problem${bugs.length === 1 ? '' : 's'}</b>:</p>
+    ${bugs.map((b, i) => `<div class="problem${i ? ' locked' : ''}"><b>${i + 1}.</b> ${esc(String(b.description || b).slice(0, 300))}${i ? '<div class="muted" style="margin-top:4px">🔒 Fix prompt included in the €15/month plan</div>' : ''}</div>`).join('')}`);
+  const bubble = say(`<p>Here's the fix for problem 1. Paste it into ${esc(st.platformName && st.platform !== 'other' ? st.platformName + '\'s AI chat' : 'your builder\'s AI chat')}:</p><p class="live" id="fix-live">writing it…</p>`);
   try {
-    const r = await fetch('/api/test/' + testId);
-    const data = await r.json();
-    renderReport(data);
-  } catch {
-    renderReport({ status: 'unknown', steps: [], bugs: [] });
-  }
-  show('step-report');
-  // Open paywall on top — user dismisses with "Maybe later" to see report.
-  document.getElementById('paywall').classList.add('open');
+    const { res, data } = await postJson('/api/fix-prompt', { testId, index: 0, platform: st.platform });
+    const live = bubble.querySelector('#fix-live');
+    if (res.ok && data.prompt) {
+      live.outerHTML = `<code class="box" id="fix-box">${esc(data.prompt)}</code><button class="ghost" onclick="copy(document.getElementById('fix-box').textContent,this)">Copy the fix</button>`;
+      step('fix_shown');
+    } else live.textContent = data.error || 'I could not write the fix right now.';
+  } catch (e) { bubble.querySelector('#fix-live').textContent = netErr(e); }
+  upsell(bugs.length > 1);
 }
-
-function renderReport(result) {
-  const root = document.getElementById('step-report-stream');
-  root.innerHTML = '';
-  const status = result?.status || 'incomplete';
-  document.getElementById('report-status').textContent =
-    status === 'completed' ? 'passed' :
-    status === 'completed_with_bugs' ? 'finished with issues' :
-    status === 'aborted_budget' ? 'aborted (budget)' :
-    status === 'blocked' ? 'blocked' : 'incomplete';
-  document.getElementById('report-sub').textContent =
-    `// ${(result.steps || []).length} steps · ${(result.bugs || []).length} bugs`;
-  for (const s of (result.steps || [])) {
-    appendStream('step-report-stream', `• step ${s.step} ${s.action}: ${s.outcome || ''}`, s.status === 'pass' ? 'ok' : 'err');
-  }
-  for (const b of (result.bugs || [])) {
-    appendStream('step-report-stream', `⚠ ${b.description || b}`, 'err');
-  }
+function upsell(moreFixes) {
+  say(`<p>${moreFixes ? 'Want the fixes for the other problems, and a retest once you\'ve applied them?' : 'Want me to keep testing as you build?'}</p>
+    <div class="plan"><b>€15</b><span class="muted"> /month + VAT</span>
+      <div class="muted" style="margin-top:4px">Unlimited apps and test runs · a fix prompt for every problem · retest while you fix · keep watching. You connect your own Claude API key (a typical test costs €0.10–€0.50).</div></div>`);
+  setReply(`<div class="row"><button onclick="checkout()">Get the €15 plan</button><button class="ghost" onclick="location.href='/app'">Open my dashboard</button></div>`);
 }
-
-function closePaywall() {
-  document.getElementById('paywall').classList.remove('open');
-}
-
-async function checkout(plan) {
-  // Hand off to the existing checkout endpoint. /api/checkout creates a
-  // Stripe session and returns a redirect URL.
+async function checkout() {
+  step('upgrade_click');
   try {
-    // Not retried on purpose: a second POST could open a second Stripe session.
-    const res = await fetch('/api/billing/checkout', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ plan }),
-    });
-    const data = await res.json();
-    if (data.url) {
-      window.location.href = data.url;
-    } else {
-      alert(data.error || 'Could not start checkout');
-    }
-  } catch (e) {
-    alert(requestFailureText(e, 'try'));
-  }
+    const { data } = await postJson('/api/billing/checkout', { plan: 'monthly' });
+    if (data.url) return void (location.href = data.url);
+    say(`<p>${esc(data.error || 'Checkout did not open.')}</p>`, 'err');
+  } catch (e) { say('<p>' + esc(netErr(e)) + '</p>', 'err'); }
 }
+
+askEmail();
 </script>
 </body>
 </html>
