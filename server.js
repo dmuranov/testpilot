@@ -708,6 +708,11 @@ function getFreeSpendTodayWeighted() {
   return freeSpendToday.weighted;
 }
 
+// When the monthly ceiling lifts: 00:00 UTC on the 1st of next month.
+function freeBudgetResetsAtUtc(d = new Date()) {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)).toISOString();
+}
+
 function getFreeSpendMonthWeighted() {
   rolloverIfNewDay();
   return freeSpendMonthBefore + freeSpendToday.weighted;
@@ -10619,7 +10624,7 @@ app.post('/api/learn', watchOnboarding('crawl', (req) => ({ email: onboardingEma
     return res.status(429).json({
       error: 'Free tests are fully booked this month — choose the €15 plan with your own Claude API key to test right now.',
       code: 'FREE_DAILY_BUDGET_EXCEEDED',
-      resets_at_utc: utcDateString(new Date(Date.now() + 86_400_000)) + 'T00:00:00Z',
+      resets_at_utc: freeBudgetResetsAtUtc(),
     });
   }
 
@@ -10905,7 +10910,7 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
     return res.status(429).json({
       error: 'Free tests are fully booked this month — choose the €15 plan with your own Claude API key to test right now.',
       code: 'FREE_DAILY_BUDGET_EXCEEDED',
-      resets_at_utc: utcDateString(new Date(Date.now() + 86_400_000)) + 'T00:00:00Z',
+      resets_at_utc: freeBudgetResetsAtUtc(),
     });
   }
 
@@ -12249,7 +12254,7 @@ app.post('/api/test/multirole', async (req, res) => {
     return res.status(429).json({
       error: 'Free tests are fully booked this month — choose the €15 plan with your own Claude API key to test right now.',
       code: 'FREE_DAILY_BUDGET_EXCEEDED',
-      resets_at_utc: utcDateString(new Date(Date.now() + 86_400_000)) + 'T00:00:00Z',
+      resets_at_utc: freeBudgetResetsAtUtc(),
     });
   }
 
@@ -12455,7 +12460,7 @@ app.post('/api/test/flow', async (req, res) => {
     return res.status(429).json({
       error: 'Free tests are fully booked this month — choose the €15 plan with your own Claude API key to test right now.',
       code: 'FREE_DAILY_BUDGET_EXCEEDED',
-      resets_at_utc: utcDateString(new Date(Date.now() + 86_400_000)) + 'T00:00:00Z',
+      resets_at_utc: freeBudgetResetsAtUtc(),
     });
   }
 
