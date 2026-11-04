@@ -138,8 +138,15 @@ setInterval(() => {
 
 // Stripe
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+// The live €15/mo price (Stripe → Product catalog). The env var overrides it.
+const MONTHLY_PRICE_ID_DEFAULT = 'price_1UXIrA4PhClyPmHI0Y2rqJNV';   // €15/mo, live
 const PRICE_IDS = {
-  // Current catalogue (2026-10-05), the prices the site shows:
+  // Current catalogue (2026-10-30): ONE plan, €15/mo + VAT, unlimited apps,
+  // client's own Claude key. The price lives in the live Stripe account; its id
+  // comes from the env so a new price needs no code change.
+  monthly: process.env.STRIPE_MONTHLY_PRICE_ID || MONTHLY_PRICE_ID_DEFAULT,
+  // No longer sold (checkout refuses them, see SELLABLE_PLANS); kept so
+  // existing subscribers and webhooks for their subscriptions still map.
   solo: 'price_1UN8Q04PhClyPmHIIhrE5w7j',     // Solo   €19/mo
   pro: 'price_1UN8VO4PhClyPmHITe6HC5fB',      // Pro    €49/mo
   agency: 'price_1UN8ZH4PhClyPmHIOkE9eC7J',   // Agency €100/mo
@@ -149,6 +156,10 @@ const PRICE_IDS = {
   // STRIPE_SOLO_PRICE_ID is no longer read: it pointed at the old €10 Solo
   // price and would override the €19 one above.
 };
+// What /api/billing/checkout will start a new purchase for. One Run (€6) and
+// Solo/Pro/Agency are no longer sold; existing holders keep what they bought.
+const SELLABLE_PLANS = ['monthly'];
+if (!PRICE_IDS.monthly) console.error('[BILLING] no price id for the €15 monthly plan: every checkout will fail until STRIPE_MONTHLY_PRICE_ID is set');
 const PLAN_LIMITS = {
   // Pricing v2: every PAID tier includes the whole product; the only limit is
   // number of apps. `runs: null` = unlimited; `runs: 1` = capped (free/onerun).
@@ -182,6 +193,9 @@ const PLAN_LIMITS = {
   // The multirole + security endpoints reserve/refund the credit the same way
   // /api/test does.
   onerun:  { apps: 1,    runs: 1,    features: ['scenario', 'interactive', 'multirole', 'security', 'flow'] },
+  // Monthly €15/mo (2026-10-30, the only plan sold): unlimited apps, unlimited
+  // runs, every feature. Every app still has to be verified before it is tested.
+  monthly: { apps: 9999, runs: null, features: ['scenario', 'interactive', 'multirole', 'security', 'flow'] },
   // Solo €19/mo: 3 apps, unlimited runs, every feature. Recurring subscription.
   solo:    { apps: 3,    runs: null, features: ['scenario', 'interactive', 'multirole', 'security', 'flow'] },
   starter: { apps: 3,    runs: null, features: ['scenario', 'interactive', 'multirole', 'security', 'flow'] },
@@ -434,21 +448,25 @@ function canonicalEmail(email) {
 const BRAIN_FILE = './platform-maps/_global_brain.json';
 const MAX_AGENT_STEPS = 120;
 
-// ── DAILY FREE-TIER SPEND CEILING ─────────────────────────────
+// ── MONTHLY FREE-TIER SPEND CEILING ───────────────────────────
 // Cap on the cumulative weighted token spend that can be charged to
-// ANTHROPIC_SUPPORT_KEY each UTC day across all free runs (learn + test
-// combined, all users). When exceeded, /api/test and /api/learn return a
-// 429 with a clean message. Resets at midnight UTC. Paid users (own API
-// key, not the support key) are completely unaffected.
+// ANTHROPIC_SUPPORT_KEY each UTC calendar month across all free runs (learn +
+// test combined, all users). When exceeded, the free endpoints return a 429
+// with a clean message. Resets on the 1st, UTC. Paid users (own API key, not
+// the support key) are completely unaffected. Was €20/day until 2026-10-30;
+// the owner set €200/month.
 //
 // Conversion: weighted spend uses Sonnet 4.6 input as the unit (cache
 // reads × 0.1, output × 5). Sonnet 4.6 input is ~$3 per 1M tokens, so
-// 1 weighted token ≈ $0.000003. €20 ≈ $22 ≈ ~7.3M weighted tokens.
-const FREE_DAILY_BUDGET_EUR = Number(process.env.TESTPILOT_FREE_DAILY_BUDGET_EUR || 20);
+// 1 weighted token ≈ $0.000003. €200 ≈ $220 ≈ ~73M weighted tokens.
+const FREE_MONTHLY_BUDGET_EUR = Number(process.env.TESTPILOT_FREE_MONTHLY_BUDGET_EUR
+  || (process.env.TESTPILOT_FREE_DAILY_BUDGET_EUR ? Number(process.env.TESTPILOT_FREE_DAILY_BUDGET_EUR) * 30 : 200));
+if (process.env.TESTPILOT_FREE_DAILY_BUDGET_EUR && !process.env.TESTPILOT_FREE_MONTHLY_BUDGET_EUR)
+  console.warn(`[freeSpend] TESTPILOT_FREE_DAILY_BUDGET_EUR is deprecated; using it × 30 = €${FREE_MONTHLY_BUDGET_EUR}/month. Set TESTPILOT_FREE_MONTHLY_BUDGET_EUR instead.`);
 const USD_PER_EUR = Number(process.env.TESTPILOT_USD_PER_EUR || 1.10);
 const SONNET_INPUT_USD_PER_MTOK = 3;
-const FREE_DAILY_TOKEN_BUDGET = Math.floor(
-  (FREE_DAILY_BUDGET_EUR * USD_PER_EUR / SONNET_INPUT_USD_PER_MTOK) * 1_000_000
+const FREE_MONTHLY_TOKEN_BUDGET = Math.floor(
+  (FREE_MONTHLY_BUDGET_EUR * USD_PER_EUR / SONNET_INPUT_USD_PER_MTOK) * 1_000_000
 );
 
 // ═══════════════════════════════════════════════════════════════
@@ -670,8 +688,12 @@ function wrapClientWithFreeSpendTally(client) {
 // ═══════════════════════════════════════════════════════════════
 // In-memory counter, mirrored to Supabase row free_spend_daily(date, ...)
 // so a pm2 restart mid-day picks the count back up. UTC dates so the
-// rollover is the same everywhere regardless of server timezone.
+// rollover is the same everywhere regardless of server timezone. The ceiling
+// is monthly: freeSpendMonthBefore is the sum of this month's earlier days,
+// loaded from the same table at boot and carried forward on each day rollover.
 let freeSpendToday = { date: utcDateString(), weighted: 0 };
+let freeSpendMonthBefore = 0;
+let freeSpendLoaded = true;   // false while this month's earlier spend could not be read
 
 function utcDateString(d = new Date()) {
   return d.toISOString().slice(0, 10); // YYYY-MM-DD
@@ -680,6 +702,10 @@ function utcDateString(d = new Date()) {
 function rolloverIfNewDay() {
   const today = utcDateString();
   if (freeSpendToday.date !== today) {
+    // Same month: yesterday's spend still counts. New month: start from zero.
+    freeSpendMonthBefore = freeSpendToday.date.slice(0, 7) === today.slice(0, 7)
+      ? freeSpendMonthBefore + freeSpendToday.weighted
+      : 0;
     freeSpendToday = { date: today, weighted: 0 };
   }
 }
@@ -689,27 +715,44 @@ function getFreeSpendTodayWeighted() {
   return freeSpendToday.weighted;
 }
 
+// When the monthly ceiling lifts: 00:00 UTC on the 1st of next month.
+function freeBudgetResetsAtUtc(d = new Date()) {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)).toISOString();
+}
+
+function getFreeSpendMonthWeighted() {
+  rolloverIfNewDay();
+  return freeSpendMonthBefore + freeSpendToday.weighted;
+}
+
 function isFreeBudgetExceeded() {
-  return getFreeSpendTodayWeighted() >= FREE_DAILY_TOKEN_BUDGET;
+  if (!freeSpendLoaded) return true;   // unknown spend: fail closed until loadFreeSpendToday succeeds
+  return getFreeSpendMonthWeighted() >= FREE_MONTHLY_TOKEN_BUDGET;
 }
 
 function freeSpendEurEstimate(weighted = freeSpendToday.weighted) {
-  // Inverse of FREE_DAILY_TOKEN_BUDGET conversion.
+  // Inverse of FREE_MONTHLY_TOKEN_BUDGET conversion.
   return (weighted / 1_000_000) * SONNET_INPUT_USD_PER_MTOK / USD_PER_EUR;
 }
 
 async function loadFreeSpendToday() {
   const today = utcDateString();
   freeSpendToday = { date: today, weighted: 0 };
+  freeSpendMonthBefore = 0;
   if (!SUPABASE_URL || !SUPABASE_SECRET) return;
   try {
-    const rows = await supabase('GET', 'free_spend_daily', null, `?date=eq.${today}&select=weighted_tokens`);
-    if (Array.isArray(rows) && rows[0]?.weighted_tokens != null) {
-      freeSpendToday.weighted = Number(rows[0].weighted_tokens) || 0;
-      console.log(`[freeSpend] loaded today=${today} weighted=${freeSpendToday.weighted} (~€${freeSpendEurEstimate().toFixed(2)})`);
+    const rows = await supabase('GET', 'free_spend_daily', null, `?date=gte.${today.slice(0, 7)}-01&select=date,weighted_tokens`);
+    for (const r of Array.isArray(rows) ? rows : []) {
+      const w = Number(r.weighted_tokens) || 0;
+      if (r.date === today) freeSpendToday.weighted = w;
+      else if (r.date < today) freeSpendMonthBefore += w;
     }
+    freeSpendLoaded = true;
+    console.log(`[freeSpend] loaded month=${today.slice(0, 7)} weighted=${getFreeSpendMonthWeighted()} (~€${freeSpendEurEstimate(getFreeSpendMonthWeighted()).toFixed(2)} of €${FREE_MONTHLY_BUDGET_EUR})`);
   } catch (err) {
-    console.warn('[freeSpend] could not load today row from supabase:', err.message);
+    console.warn('[freeSpend] could not load this month\'s rows from supabase, free runs paused, retrying in 60s:', err.message);
+    freeSpendLoaded = false;
+    setTimeout(loadFreeSpendToday, 60_000).unref?.();
   }
 }
 
@@ -1657,7 +1700,7 @@ app.post('/api/embed/connect', async (req, res) => {
       // The crawl below runs on the support key: same gates as a free learn,
       // and one free widget per account so connects cannot be used as free crawls.
       if (!process.env.ANTHROPIC_SUPPORT_KEY) return res.status(400).json({ error: 'A valid Anthropic API key (sk-ant-…) is required.' });
-      if (isFreeBudgetExceeded()) return res.status(429).json({ error: 'Free runs are paused for today — add your own Anthropic key, or try again tomorrow.', code: 'FREE_BUDGET_EXCEEDED' });
+      if (isFreeBudgetExceeded()) return res.status(429).json({ error: 'Free tests are fully booked this month — add your own Claude API key to test right now, or try again on the 1st.', code: 'FREE_BUDGET_EXCEEDED' });
       const dbUser = await getUserByEmail(user.email);
       if (freeRunExhausted(user.email, user.free_run_used || dbUser?.free_run_used, 'free')) return res.status(402).json({ error: 'Your free run is used up — add your Anthropic key to connect the widget.', code: 'FREE_RUN_USED' });
       const ownerLc = (user.email || '').trim().toLowerCase();
@@ -1808,7 +1851,7 @@ app.post('/api/embed/run', async (req, res) => {
     if (!effectiveApiKey) return res.status(500).json({ error: 'No API key available for this token.' });
     let freeHold = null;
     if (!resolved.apiKey && resolved.freeWidget) {
-      if (isFreeBudgetExceeded()) return res.status(429).json({ error: 'Free runs are paused for today — the app owner can add a Claude API key to the widget, or try again tomorrow.', code: 'FREE_BUDGET_EXCEEDED' });
+      if (isFreeBudgetExceeded()) return res.status(429).json({ error: 'Free tests are fully booked this month — the app owner can add a Claude API key to the widget, or try again on the 1st.', code: 'FREE_BUDGET_EXCEEDED' });
       freeHold = await takeFreeRunDetached(owner);
       if (!freeHold) return res.status(402).json({ error: 'The free run for this widget is used up. The app owner can add a Claude API key in TestPilot → Widget to keep it running.', code: 'FREE_RUN_USED' });
     }
@@ -1858,7 +1901,7 @@ app.post('/api/funnel/start', watchOnboarding('signup', (req) => ({ email: onboa
     if (isFreeBudgetExceeded()) {
       return res.status(429).json({
         ok: false,
-        error: 'Free runs paused for today — sign up to continue.',
+        error: 'Free tests are fully booked this month — choose the €15 plan with your own Claude API key to test right now.',
         code: 'FREE_DAILY_BUDGET_EXCEEDED',
       });
     }
@@ -2424,7 +2467,7 @@ function helpMessageFor({ stage, code, url, error }) {
     `${where} is already connected to a different TestPilot account.`,
     'If it’s yours (maybe signed up with another email), reply to this email and we’ll move it over for you.'], cta: null };
   if (code === 'FREE_DAILY_BUDGET_EXCEEDED') return { subject: 'Free test runs are back on', p: [
-    'When you tried TestPilot, free runs were paused for the day. Sorry about that. They’re available again now and your free run is untouched.'], cta: 'Run my free test →' };
+    'When you tried TestPilot, free runs were fully booked for the month. Sorry about that. They’re available again now and your free run is untouched.'], cta: 'Run my free test →' };
   if (stage === 'crawl') return { subject: 'We couldn’t finish mapping your app (our side)', p: [
     `TestPilot couldn't finish mapping ${where}. That's on us, not a verdict on your app.`,
     'Your free test run is untouched. Try once more; if it fails again, reply to this email and we’ll look at it personally.'], cta: 'Try again →' };
@@ -2453,6 +2496,7 @@ onOnboardingFailure(({ stage, email, url, error, code }) => {
       const rec = onboardingLog[key] || {};
       if (rec.helpSentAt && Date.now() - rec.helpSentAt < 24 * 3600_000) return;
       if (await userHasRecovered(stage, email)) return;
+      if (code === 'FREE_DAILY_BUDGET_EXCEEDED' && isFreeBudgetExceeded()) return;   // still spent: the mail would be false
       // A signup-stage rejection happens before the user row exists, so a
       // sign-in link would dead-end — send them back to the signup form.
       const exists = await supabase('GET', 'users', null, `?email=eq.${encodeURIComponent(email)}&select=id`);
@@ -10590,9 +10634,9 @@ app.post('/api/learn', watchOnboarding('crawl', (req) => ({ email: onboardingEma
   // per-test/per-crawl budgets. Paid users (own apiKey) bypass this gate.
   if (freeLearn && isFreeBudgetExceeded()) {
     return res.status(429).json({
-      error: 'Free runs paused for today — sign up to continue.',
+      error: 'Free tests are fully booked this month — choose the €15 plan with your own Claude API key to test right now.',
       code: 'FREE_DAILY_BUDGET_EXCEEDED',
-      resets_at_utc: utcDateString(new Date(Date.now() + 86_400_000)) + 'T00:00:00Z',
+      resets_at_utc: freeBudgetResetsAtUtc(),
     });
   }
 
@@ -10876,9 +10920,9 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
   // apiKey) bypass entirely.
   if (freeRun && isFreeBudgetExceeded()) {
     return res.status(429).json({
-      error: 'Free runs paused for today — sign up to continue.',
+      error: 'Free tests are fully booked this month — choose the €15 plan with your own Claude API key to test right now.',
       code: 'FREE_DAILY_BUDGET_EXCEEDED',
-      resets_at_utc: utcDateString(new Date(Date.now() + 86_400_000)) + 'T00:00:00Z',
+      resets_at_utc: freeBudgetResetsAtUtc(),
     });
   }
 
@@ -10964,7 +11008,7 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
   // Free run uses support key, otherwise user must provide their own.
   // One Run (€6) is a paid run on TestPilot's key: no key needed from the buyer.
   const effectiveApiKey = freeRun ? process.env.ANTHROPIC_SUPPORT_KEY : (apiKey || (userPlan === 'onerun' ? paidRunKey() : null));
-  if (!effectiveApiKey) return res.status(400).json({ error: 'This test needs your Claude API key. Add it in the sidebar (bottom left) and start again, or choose a plan that runs on ours.', code: 'API_KEY_REQUIRED' });
+  if (!effectiveApiKey) return res.status(400).json({ error: 'This test needs your Claude API key. Add it in the sidebar (bottom left) and start again. Get one at console.anthropic.com.', code: 'API_KEY_REQUIRED' });
 
   // Word limit for free runs - counted on what the client wrote. The dashboard appends its own
   // "(Repeatable run: ...)" / "(Read-only run: ...)" instruction (~70 words) to every scenario;
@@ -11948,7 +11992,7 @@ app.post('/api/sweep', async (req, res) => {
         return res.status(402).json({ error: 'You have used your free check on a login-protected app — choose a plan, or add your own API key.', code: 'FREE_SWEEP_USED' });
       }
       if (isFreeBudgetExceeded()) {
-        return res.status(429).json({ error: 'Free runs are paused for today — try again tomorrow.', code: 'FREE_DAILY_BUDGET_EXCEEDED' });
+        return res.status(429).json({ error: 'Free tests are fully booked this month — try again on the 1st.', code: 'FREE_DAILY_BUDGET_EXCEEDED' });
       }
       freeSweep = true;
       apiKey = process.env.ANTHROPIC_SUPPORT_KEY;
@@ -12220,9 +12264,9 @@ app.post('/api/test/multirole', async (req, res) => {
 
   if (freeRun && isFreeBudgetExceeded()) {
     return res.status(429).json({
-      error: 'Free runs paused for today — sign up to continue.',
+      error: 'Free tests are fully booked this month — choose the €15 plan with your own Claude API key to test right now.',
       code: 'FREE_DAILY_BUDGET_EXCEEDED',
-      resets_at_utc: utcDateString(new Date(Date.now() + 86_400_000)) + 'T00:00:00Z',
+      resets_at_utc: freeBudgetResetsAtUtc(),
     });
   }
 
@@ -12426,9 +12470,9 @@ app.post('/api/test/flow', async (req, res) => {
 
   if (freeRun && isFreeBudgetExceeded()) {
     return res.status(429).json({
-      error: 'Free runs paused for today — sign up to continue.',
+      error: 'Free tests are fully booked this month — choose the €15 plan with your own Claude API key to test right now.',
       code: 'FREE_DAILY_BUDGET_EXCEEDED',
-      resets_at_utc: utcDateString(new Date(Date.now() + 86_400_000)) + 'T00:00:00Z',
+      resets_at_utc: freeBudgetResetsAtUtc(),
     });
   }
 
@@ -12911,7 +12955,7 @@ app.post('/api/chat/start', async (req, res) => {
   const freeChat = !apiKey && user.plan === 'free';
   const paidChat = !apiKey && user.plan === 'onerun';   // One Run: a paid session on TestPilot's key — no free cap, no free budget
   if (freeChat) {
-    if (isFreeBudgetExceeded()) return res.status(429).json({ error: 'Free runs are paused for today — add your own Claude API key, or try again tomorrow.', code: 'FREE_BUDGET_EXCEEDED' });
+    if (isFreeBudgetExceeded()) return res.status(429).json({ error: 'Free tests are fully booked this month — add your own Claude API key to test right now, or try again on the 1st.', code: 'FREE_BUDGET_EXCEEDED' });
     apiKey = process.env.ANTHROPIC_SUPPORT_KEY;
   }
   // One Run chat: the credit is taken now (atomically), not after the browser
@@ -12937,7 +12981,7 @@ app.post('/api/chat/start', async (req, res) => {
   for (const s of chatSessions.values()) {
     if (s.userId === user.userId) activeForUser++;
   }
-  const highTier = user.plan === 'agency' || user.plan === 'admin' || user.plan === 'tester';
+  const highTier = user.plan === 'agency' || user.plan === 'monthly' || user.plan === 'admin' || user.plan === 'tester';
   const SESSION_CAP = highTier ? 12 : 3;
   if (activeForUser >= SESSION_CAP) {
     return res.status(429).json({
@@ -13038,7 +13082,7 @@ app.post('/api/chat/:sessionId/message', async (req, res) => {
   const apiKey = (session.freeChat || session.paidChat) ? null : req.body.apiKey;
   if (session.freeChat) {
     if (session.commandsLeft <= 0) return res.status(402).json({ error: `Your free interactive session is at its ${FREE_CHAT_COMMANDS}-command limit. Add your Claude API key in the sidebar and start a new session to keep going.`, code: 'FREE_CHAT_LIMIT' });
-    if (isFreeBudgetExceeded()) return res.status(429).json({ error: 'Free runs are paused for today — add your own Claude API key, or try again tomorrow.', code: 'FREE_BUDGET_EXCEEDED' });
+    if (isFreeBudgetExceeded()) return res.status(429).json({ error: 'Free tests are fully booked this month — add your own Claude API key to test right now, or try again on the 1st.', code: 'FREE_BUDGET_EXCEEDED' });
   }
   const page = session.page;
   const appKnowledge = platformMaps.get(session.appId);
@@ -13740,13 +13784,31 @@ app.post('/api/billing/checkout', async (req, res) => {
   const session = sessions.get(token);
   const { plan } = req.body;
 
-  if (!PRICE_IDS[plan]) return res.status(400).json({ error: 'Invalid plan' });
+  if (!SELLABLE_PLANS.includes(plan)) return res.status(400).json({ error: 'That plan is no longer available. Choose the €15/month plan.', code: 'PLAN_NOT_SOLD' });
+  if (!PRICE_IDS[plan]) return res.status(503).json({ error: 'Checkout is not set up yet. Please try again shortly.', code: 'PRICE_NOT_CONFIGURED' });
 
   try {
     // Get or create Stripe customer
     const users = await supabase('GET', 'users', null, `?email=eq.${encodeURIComponent(session.email)}&select=*`);
     const user = users[0];
     let customerId = user.stripe_customer_id;
+
+    // A Solo/Pro/Agency subscriber who picks the €15 plan is moved onto it: the
+    // live subscription's price is swapped (prorated), never a second
+    // subscription next to it, which would bill both and let the old one's
+    // renewals reset the plan.
+    if (customerId) {
+      const subs = await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 20 });
+      const live = subs.data.find((x) => ['active', 'trialing', 'past_due'].includes(x.status));
+      if (live) {
+        const item = live.items?.data?.[0];
+        if (item?.price?.id === PRICE_IDS[plan]) return res.status(409).json({ error: 'You are already on the €15/month plan.', code: 'ALREADY_SUBSCRIBED' });
+        await stripe.subscriptions.update(live.id, { items: [{ id: item.id, price: PRICE_IDS[plan] }], proration_behavior: 'create_prorations' });
+        await applyPlanChange({ email: session.email, userId: user.id, plan, source: 'checkout:switch' });
+        console.log('[BILLING] switched', session.email, 'from', item?.price?.id, 'to', plan);
+        return res.json({ url: `${APP_URL}/app?upgraded=1`, switched: true });
+      }
+    }
 
     if (!customerId) {
       const customer = await stripe.customers.create({ email: session.email });
@@ -14074,7 +14136,7 @@ app.post('/api/support/ask', async (req, res) => {
   const now = Date.now(), hour = 3600_000;
   const times = (askBuckets.get(user.email) || []).filter((t) => now - t < hour);
   if (times.length >= 20) return res.status(429).json({ error: 'Too many questions in the last hour — reply to the support email instead.' });
-  if (user.plan === 'free' && isFreeBudgetExceeded()) return res.status(429).json({ error: 'Free help is paused for today — reply to the support email instead.' });
+  if (user.plan === 'free' && isFreeBudgetExceeded()) return res.status(429).json({ error: 'Free help is fully booked this month — reply to the support email instead.' });
   times.push(now); askBuckets.set(user.email, times);
   const ctx = {
     stage: String(context.stage || ''), appUrl: String(context.appUrl || '').slice(0, 300), cause: String(context.cause || ''),
@@ -14561,7 +14623,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
       extraScanHold = _gate.hold;
     }
     if (isFreeBudgetExceeded()) {
-      return res.status(429).json({ error: 'Free scans are paused for today — sign up to continue.', code: 'FREE_DAILY_BUDGET_EXCEEDED' });
+      return res.status(429).json({ error: 'Free scans are fully booked this month — choose the €15 plan with your own Claude API key to scan right now.', code: 'FREE_DAILY_BUDGET_EXCEEDED' });
     }
     freeScan = true;
     apiKey = process.env.ANTHROPIC_SUPPORT_KEY;   // free scan runs on the support key
@@ -16388,7 +16450,7 @@ await loadEmbedTokens();
 await loadSavedSessions();
 await loadSweepDecisions();
 await loadFreeSweepUsed();
-console.log(`[freeSpend] daily ceiling: ${FREE_DAILY_TOKEN_BUDGET} weighted tokens (~€${FREE_DAILY_BUDGET_EUR} at $${SONNET_INPUT_USD_PER_MTOK}/MTok input, ${USD_PER_EUR} USD/EUR)`);
+console.log(`[freeSpend] monthly ceiling: ${FREE_MONTHLY_TOKEN_BUDGET} weighted tokens (~€${FREE_MONTHLY_BUDGET_EUR} at $${SONNET_INPUT_USD_PER_MTOK}/MTok input, ${USD_PER_EUR} USD/EUR)`);
 // Funnel rework: one-time backfill of apps table from platform-maps.
 // Idempotent (skips rows already present). Awaited so any subsequent
 // /api/learn slot-check sees the migrated data.
@@ -16576,7 +16638,7 @@ async function runSchedule(s) {
   if (!apiKey && s.freeSchedule) {
     // Each execution is one free run. When the account has none left the
     // schedule pauses and says so, instead of failing silently every interval.
-    if (isFreeBudgetExceeded()) return finish('Free runs are paused for today — this execution was skipped.');
+    if (isFreeBudgetExceeded()) return finish('Free runs are fully booked this month — this execution was skipped.');
     freeHold = await takeFreeRunDetached(s.ownerEmail);
     if (!freeHold) { s.active = false; return finish('Your free run is used up — add your Claude API key to this schedule (delete and recreate it with the key) to keep it running.'); }
     if (!process.env.ANTHROPIC_SUPPORT_KEY) { freeHold.refund(); return finish('No usable API key on schedule.'); }
