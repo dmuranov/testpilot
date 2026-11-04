@@ -3256,7 +3256,7 @@ function tpErrsNear(test, n) {
   (d.consoleErrors || []).filter(e => near(e.step) && e.firstParty).slice(0, 2).forEach(e => out.push('Console: ' + (e.text || '')));
   return out;
 }
-function issueCard(test, item, kind) {
+function issueCard(test, item, kind, idx) {
   const st = tpStepFor(test, item.step);
   const shot = item.screenshot || (st && st.screenshot);
   const styles = {
@@ -3287,7 +3287,68 @@ function issueCard(test, item, kind) {
       ${where ? `<div style="font-size:12px;color:var(--text-dim);margin-top:4px"><strong>Where:</strong> ${where}</div>` : ''}
       ${errs.length ? `<div style="margin-top:8px;padding:8px 10px;background:rgba(239,68,68,0.1);border-radius:6px;font-family:'DM Mono',monospace;font-size:11px;color:#ef4444;line-height:1.6">${errs.map(e => '🔴 ' + tpEsc(e)).join('<br>')}</div>` : ''}
       ${shot ? `<div style="margin-top:10px"><img src="${API}${shot}" onclick="showModal('${API}${shot}')" style="max-width:100%;max-height:220px;border-radius:6px;border:1px solid var(--border);cursor:zoom-in" loading="lazy" /><div style="font-size:10px;color:var(--text-muted);margin-top:3px">📸 Screenshot at this step — click to enlarge</div></div>` : ''}
+      ${kind === 'bug' && test.testId && idx != null ? tpFixBlock(test, idx) : ''}
     </div>`;
+}
+
+// Fix help on a confirmed bug: one ready-to-paste prompt for the client's
+// builder AI (/api/fix-prompt: the first problem free, every problem on the €15
+// plan with their own key), then Retest = the same test, refilled, one click away.
+function tpFixBlock(test, idx) {
+  const k = test.testId + ':' + idx;
+  const f = (state.fixPrompts || {})[k] || {};
+  const code = 'display:block;white-space:pre-wrap;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-family:"DM Mono",monospace;font-size:12px;margin:6px 0;line-height:1.5';
+  return `
+      <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
+        ${f.prompt ? '' : `<button class="btn btn-primary btn-sm" ${f.busy ? 'disabled' : ''} onclick="tpGetFix(${Number(idx)})">${f.busy ? '<span class="loader"></span> Writing the fix…' : '✍️ Get fix prompt'}</button>`}
+        <button class="btn btn-ghost btn-sm" onclick="tpRetest()">🔁 Retest</button>
+      </div>
+      ${f.err ? `<p style="font-size:12px;color:#f59e0b;margin:6px 0 0;line-height:1.5">${tpEsc(f.err)}</p>` : ''}
+      ${f.prompt ? `
+      <div style="font-size:12px;color:var(--text-muted);margin-top:8px">Paste this into your app builder's AI chat, publish your app, then press Retest.</div>
+      <code style="${code}">${tpEsc(f.prompt)}</code>
+      <button class="btn btn-ghost btn-sm" onclick="tpCopyFix(${Number(idx)})">Copy the fix</button>` : ''}`;
+}
+// Handlers take only the bug's index: the test is state.currentTest, so no id
+// is ever written into an onclick string.
+async function tpGetFix(idx) {
+  const testId = state.currentTest?.testId; if (!testId) return;
+  state.fixPrompts = state.fixPrompts || {};
+  const k = testId + ':' + idx;
+  state.fixPrompts[k] = { busy: true };
+  render();
+  try {
+    const res = await fetch(`${API}/api/fix-prompt`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ testId, index: idx, apiKey: getApiKey(), platform: state.selectedApp?.platform || '' }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.prompt) state.fixPrompts[k] = { prompt: data.prompt };
+    else {
+      state.fixPrompts[k] = { err: data.error || `Could not write the fix (HTTP ${res.status}).` };
+      if (data.code === 'FIX_LOCKED') showFunnelPaywall('feature');
+    }
+  } catch (e) {
+    state.fixPrompts[k] = { err: 'Could not write the fix: ' + e.message };
+  }
+  render();
+}
+function tpCopyFix(idx) {
+  const p = state.fixPrompts?.[state.currentTest?.testId + ':' + idx]?.prompt; if (!p) return;
+  navigator.clipboard?.writeText(p).then(() => tpToast('Copied — paste it into your app builder, publish, then Retest.')).catch(() => {});
+}
+// Same app, same test, the form refilled (logins are not kept in a result, so
+// the client picks their saved login or types it again), then Run.
+function tpRetest() {
+  const test = state.currentTest; if (!test) return;
+  const app = (state.apps || []).find(a => a.appId === test.appId);
+  if (app) state.selectedApp = app;
+  const scenario = String(test.scenario || '').split(/\s*\(\s*(?:Repeatable run|Read-only run):/)[0].trim();
+  state._savedForm = { scenario };
+  state.testStream = [];   // the old run's log would read as this one's
+  state.testMode = test.type === 'flow_e2e' ? 'flow_e2e' : null;   // a Checkout & Booking test retests as one
+  navigate('test-run');
+  tpToast('Same test, ready to run again. Check the login, then press Run.');
 }
 
 function renderTestDetail() {
@@ -3356,7 +3417,7 @@ function renderTestDetail() {
     ${test.bugs?.length ? `
     <div class="card">
       <div class="card-title" style="margin-bottom:12px">🐛 App Bugs</div>
-      ${test.bugs.map(b => issueCard(test, b, 'bug')).join('')}
+      ${test.bugs.map((b, i) => issueCard(test, b, 'bug', i)).join('')}
     </div>` : ''}
 
     ${(() => {
