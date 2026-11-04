@@ -267,7 +267,7 @@ function gotNoLogin() { me('No, it\'s public'); step('login', 'none'); learn(); 
 function askCreds() {
   me('Yes, it has a login');
   say('<p>Give me a login I can use. Please use a <b>test account</b>, not your real one: I\'ll click around like a customer would.</p>');
-  setReply(`<div class="row"><input id="ae" type="email" autocomplete="off" placeholder="test login email"><input id="ap" type="password" autocomplete="off" placeholder="password" onkeydown="if(event.key==='Enter')gotCreds()"></div>
+  setReply(`<div class="row"><input id="ae" type="email" name="tp-app-login" autocomplete="off" data-lpignore="true" placeholder="test login email"><input id="ap" type="password" name="tp-app-secret" autocomplete="new-password" data-lpignore="true" placeholder="password" onkeydown="if(event.key==='Enter')gotCreds()"></div>
     <div class="row"><button onclick="gotCreds()">Send</button></div>
     <div class="muted">Not your TestPilot account: the login for ${esc(st.origin || 'your app')}.</div>`);
 }
