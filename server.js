@@ -12447,8 +12447,8 @@ app.post('/api/test/multirole', async (req, res) => {
     testStreams.get(scopedId).push(relay);
 
     try {
-      const roleResult = await runAgentTest(scopedId, appKnowledge, role.scenario,
-        { email: role.email, password: role.password }, effectiveApiKey);
+      const roleResult = await runWithOurSideRetry(scopedId, appId, user.email,
+        (quietError) => runAgentTest(scopedId, appKnowledge, role.scenario, { email: role.email, password: role.password, quietError }, effectiveApiKey));
       return { name: roleTag, result: roleResult };
     } catch (err) {
       return { name: roleTag, result: { status: 'error', error: err.message } };
@@ -12612,9 +12612,9 @@ app.post('/api/test/flow', async (req, res) => {
     { const _r = testResults.get(testId); if (_r && _r.status === 'queued') _r.status = 'starting'; }
     if (willQueue) emitStep(testId, { type: 'info', message: '▶ A runner just freed up — starting your flow test now…' });
     try {
-      await runAgentTest(testId, appKnowledge, scenario,
-        { email, password, allowReplay: true, ownerEmail: user.email, ownerUserId: user.userId, sessionState, indexedDB: flowIndexedDB, liveOffers: req.body?.liveOffers === true, testType: 'flow_e2e', paymentMode },
-        effectiveApiKey);
+      const flowCreds = { email, password, allowReplay: true, ownerEmail: user.email, ownerUserId: user.userId, sessionState, indexedDB: flowIndexedDB, liveOffers: req.body?.liveOffers === true, testType: 'flow_e2e', paymentMode };
+      await runWithOurSideRetry(testId, appId, user.email,
+        (quietError) => runAgentTest(testId, appKnowledge, scenario, { ...flowCreds, quietError }, effectiveApiKey));
       const _r = testResults.get(testId);
       const _flowCharged = _r && ['completed', 'completed_with_bugs', 'completed_with_unverified'].includes(_r.status);
       if (_flowCredit.reserved && !_flowCharged) refundRunCredit(user.email);
@@ -16957,7 +16957,8 @@ async function runSchedule(s) {
   testResults.set(testId, { testId, appId: s.appId, scenario: s.scenario, status: 'starting', userEmail: s.ownerEmail, userId: s.ownerUserId || null, startedAt: new Date().toISOString(), steps: [], bugs: [], scheduleId: s.id });
   await acquireScanSlot();
   try {
-    await runAgentTest(testId, appKnowledge, s.scenario, { ownerEmail: s.ownerEmail, ownerUserId: s.ownerUserId || null, sessionState, allowReplay: true }, apiKey);
+    await runWithOurSideRetry(testId, s.appId, s.ownerEmail,
+      (quietError) => runAgentTest(testId, appKnowledge, s.scenario, { ownerEmail: s.ownerEmail, ownerUserId: s.ownerUserId || null, sessionState, allowReplay: true, quietError }, apiKey));
   } catch (e) {
     const r = testResults.get(testId);
     if (r) { r.status = 'error'; r.error = e.message; }
@@ -16968,6 +16969,8 @@ async function runSchedule(s) {
   }
 
   const result = testResults.get(testId);
+  // Broke on our side: not a verdict on the app. No alert, the baseline stays.
+  if (result?.ourSide) { s.lastTestId = testId; return finish('Skipped: TestPilot had a problem on its side (not your app). The next run is as scheduled.'); }
   const curr = outcomeSignature(result);
   const prev = s.baseline || null;
   const regressed = isRegression(prev, curr);
