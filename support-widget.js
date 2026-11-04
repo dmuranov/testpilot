@@ -163,4 +163,15 @@
       open(e.detail);
     } catch (err) { /* never break the page */ }
   });
+
+  // The page recovered (a retry got through): close an offer nobody has started
+  // answering. Not a snooze: a later failure may still offer help.
+  window.addEventListener('tp_help_resolved', function () {
+    try {
+      if (!root || root.hidden) return;
+      var typed = root.querySelector('#tp-help-text').value.trim();
+      var sent = !root.querySelector('.tp-help__status').hidden;
+      if (!typed && !sent) root.hidden = true;
+    } catch (err) { /* never break the page */ }
+  });
 })();

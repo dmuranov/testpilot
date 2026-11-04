@@ -101,6 +101,9 @@ function me(text) {
 function setReply(html) { $reply.innerHTML = html; const f = $reply.querySelector('input,textarea'); if (f) f.focus(); }
 function step(name, detail) {
   fetch('/api/funnel/step', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ step: name, detail: detail || '' }) }).catch(() => {});
+  // A step that got through means an earlier error is behind us: close the
+  // "Something went wrong" helper if it is still open and untouched.
+  if (name === 'learned' || name === 'report' || name === 'verified') window.dispatchEvent(new Event('tp_help_resolved'));
 }
 async function postJson(url, body) {
   const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
