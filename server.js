@@ -13670,7 +13670,10 @@ app.post('/api/security/leak-check', async (req, res) => {
   }
 });
 
+// The super admin (the owner) is never asked to prove an app: every check below
+// answers yes for them.
 async function isSiteVerified(email, origin, pageUrl) {
+  if (isSuperAdmin(email)) return true;
   const store = await loadVerifiedSites();
   const rec = store[canonicalEmail(email)];
   if (!rec) return false;
@@ -13703,6 +13706,7 @@ function sameSiteHost(origin) {
 // folder: false for checks that probe the whole origin (the security scan), which
 // need the host-level proof; a folder proof covers tests of apps in that folder.
 async function isAppVerified(email, appId, { folder = true } = {}) {
+  if (isSuperAdmin(email)) return true;
   const origin = originForApp(appId);
   if (!origin) return false;
   const store = await loadVerifiedSites();
@@ -13734,6 +13738,7 @@ async function denyUnverifiedApp(res, email, appId) {
 // The file or meta-tag proof for (email, origin). Records a success.
 // reason on failure: 'not_found' | 'other_token' | 'unreachable'.
 async function checkSiteProof(email, origin, pageUrl) {
+  if (isSuperAdmin(email)) return { verified: true, method: 'super_admin' };
   const token = siteVerifyToken(email, origin);
   let method = null;
 
