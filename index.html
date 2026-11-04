@@ -7874,6 +7874,20 @@ async function init() {
   await initAuth();
   await Promise.all([loadApps(), loadTests()]);
   render();
+  // Just paid (Stripe success redirect, /app?upgraded=1): open their latest
+  // clean test, where the Keep watching offer sits, and say the one thing to do
+  // first. Without a Claude key nothing on the plan runs, so that comes first.
+  if (new URLSearchParams(window.location.search).get('upgraded') === '1') {
+    window.history.replaceState({}, '', '/app');
+    const clean = (state.tests || [])
+      .filter(t => t.status === 'completed' && !t.bugs)
+      .sort((a, b) => String(b.completedAt || b.startedAt || '').localeCompare(String(a.completedAt || a.startedAt || '')))[0];
+    if (clean) await viewTest(clean.testId);
+    tpToast(!hasApiKey()
+      ? 'Welcome to the €15 plan! First, add your Claude API key in the sidebar (bottom left): your tests run on it.'
+      : clean ? 'Welcome to the €15 plan! Your last test passed: you can keep watching it daily below.'
+        : 'Welcome to the €15 plan! Run a test, and when it passes you can keep watching it daily.');
+  }
   // Handle GitHub OAuth callback
   if (window._pendingGithubConnect) {
     const _pid = window._pendingGithubConnect;
