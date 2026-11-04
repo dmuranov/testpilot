@@ -13651,10 +13651,25 @@ app.post('/api/security/leak-check', async (req, res) => {
   }
 });
 
-async function isSiteVerified(email, origin) {
+async function isSiteVerified(email, origin, pageUrl) {
   const store = await loadVerifiedSites();
   const rec = store[canonicalEmail(email)];
-  return !!(rec && rec[origin]);
+  if (!rec) return false;
+  if (rec[origin]) return true;
+  return !!pageUrl && Object.keys(rec).some((k) => k.startsWith(origin + '/') && coveredByScope(pageUrl, k));
+}
+
+// The folder an app lives in, without the trailing slash: the scope a proof on
+// that page covers. null when the app sits at the root of its origin.
+function appScope(pageUrl) {
+  try {
+    const u = new URL(pageUrl);
+    const dir = u.pathname.replace(/\/[^/]*$/, '');
+    return dir ? u.origin + dir : null;
+  } catch { return null; }
+}
+function coveredByScope(pageUrl, scope) {
+  try { const u = new URL(pageUrl); const p = u.origin + u.pathname; return p === scope || p.startsWith(scope + '/'); } catch { return false; }
 }
 
 // An app counts as verified when its owner proved control of its origin. The
@@ -13662,6 +13677,7 @@ async function isSiteVerified(email, origin) {
 // the chat first-run verifies the URL the client typed, before the crawl, and
 // the crawl may settle on the other form.
 function sameSiteHost(origin) {
+  if (/^https?:\/\/[^/]+\/./.test(origin)) return null;   // a path scope never matches by host alone
   try { const u = new URL(origin); return u.protocol + '//' + u.host.replace(/^www\./, ''); } catch { return null; }
 }
 async function isAppVerified(email, appId) {
@@ -13670,7 +13686,9 @@ async function isAppVerified(email, appId) {
   const store = await loadVerifiedSites();
   const rec = store[canonicalEmail(email)] || {};
   const want = sameSiteHost(origin);
-  return Object.keys(rec).some(o => o === origin || (want && sameSiteHost(o) === want));
+  const url = platformMaps.get(appId)?.url;
+  return Object.keys(rec).some(o => o === origin || (want && sameSiteHost(o) === want)
+    || (url && o.startsWith(origin + '/') && coveredByScope(url, o)));
 }
 
 // Every test needs proof the app is the requester's (owner decision
@@ -13693,7 +13711,7 @@ async function denyUnverifiedApp(res, email, appId) {
 
 // The file or meta-tag proof for (email, origin). Records a success.
 // reason on failure: 'not_found' | 'other_token' | 'unreachable'.
-async function checkSiteProof(email, origin) {
+async function checkSiteProof(email, origin, pageUrl) {
   const token = siteVerifyToken(email, origin);
   let method = null;
 
@@ -13719,6 +13737,26 @@ async function checkSiteProof(email, origin) {
     } catch { reason = 'unreachable'; }
   }
 
+  // An app in a sub-folder (GitHub Pages project sites and the like): its owner
+  // can edit only their own folder, so the tag or file there proves that folder.
+  const scope = appScope(pageUrl);
+  let entry = origin;
+  if (!method && scope) {
+    try {
+      const r = await fetch(scope + '/tp-verify-' + token + '.txt', { redirect: 'manual', signal: AbortSignal.timeout(8000) });
+      if (r.status === 200 && tokenFileMatches(await r.text(), token)) { method = 'file-path'; entry = scope; }
+    } catch {}
+    if (!method) {
+      try {
+        const r = await fetch(pageUrl, { redirect: 'follow', signal: AbortSignal.timeout(8000) });
+        const html = (await r.text()).slice(0, 512 * 1024);
+        if (metaTagMatches(html, token)) { method = 'meta-path'; entry = scope; }
+        else if (/name=["']testpilot-site-verification["']/i.test(html)) reason = 'other_token';
+        else if (r.ok && reason === 'unreachable') reason = 'not_found';
+      } catch {}
+    }
+  }
+
   if (!method) {
     console.log('[verify-site] not verified', canonicalEmail(email), origin, reason);
     return { verified: false, reason };
@@ -13727,9 +13765,9 @@ async function checkSiteProof(email, origin) {
   const store = await loadVerifiedSites();
   const key = canonicalEmail(email);
   store[key] = store[key] || {};
-  store[key][origin] = new Date().toISOString();
+  store[key][entry] = new Date().toISOString();
   await saveVerifiedSites();
-  console.log('[leak-check] verified', key, origin, 'via', method);
+  console.log('[leak-check] verified', key, entry, 'via', method);
   return { verified: true, method };
 }
 
@@ -13737,7 +13775,7 @@ app.post('/api/security/verify-site', async (req, res) => {
   const target = await leakCheckTarget(req, res);
   if (!target) return;
   const { sessionUser, origin } = target;
-  const r = await checkSiteProof(sessionUser.email, origin);
+  const r = await checkSiteProof(sessionUser.email, origin, platformMaps.get(req.body.appId)?.url);
   if (!r.verified) return res.json({ verified: false, reason: r.reason, origin, ...siteVerificationInstructions(sessionUser.email, origin) });
   res.json({ verified: true, origin, method: r.method });
 });
@@ -13755,8 +13793,8 @@ app.post('/api/verify/url', async (req, res) => {
   try { await assertPublicUrl(origin); }
   catch (e) { return res.status(400).json({ error: 'TestPilot cannot open that address: ' + e.message, code: 'URL_BLOCKED' }); }
   const instructions = siteVerificationInstructions(sessionUser.email, origin);
-  if (!req.body?.check) return res.json({ verified: await isSiteVerified(sessionUser.email, origin), origin, ...instructions });
-  const r = await checkSiteProof(sessionUser.email, origin);
+  if (!req.body?.check) return res.json({ verified: await isSiteVerified(sessionUser.email, origin, norm.navigable), origin, ...instructions });
+  const r = await checkSiteProof(sessionUser.email, origin, norm.navigable);
   res.json({ verified: r.verified, reason: r.reason || null, origin, ...instructions });
 });
 
