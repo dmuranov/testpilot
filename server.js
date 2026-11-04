@@ -138,11 +138,13 @@ setInterval(() => {
 
 // Stripe
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+// The live €15/mo price (Stripe → Product catalog). The env var overrides it.
+const MONTHLY_PRICE_ID_DEFAULT = 'price_1UXIrA4PhClyPmHI0Y2rqJNV';   // €15/mo, live
 const PRICE_IDS = {
   // Current catalogue (2026-10-30): ONE plan, €15/mo + VAT, unlimited apps,
   // client's own Claude key. The price lives in the live Stripe account; its id
   // comes from the env so a new price needs no code change.
-  monthly: process.env.STRIPE_MONTHLY_PRICE_ID || null,
+  monthly: process.env.STRIPE_MONTHLY_PRICE_ID || MONTHLY_PRICE_ID_DEFAULT,
   // No longer sold (checkout refuses them, see SELLABLE_PLANS); kept so
   // existing subscribers and webhooks for their subscriptions still map.
   solo: 'price_1UN8Q04PhClyPmHIIhrE5w7j',     // Solo   €19/mo
@@ -157,6 +159,7 @@ const PRICE_IDS = {
 // What /api/billing/checkout will start a new purchase for. One Run (€6) and
 // Solo/Pro/Agency are no longer sold; existing holders keep what they bought.
 const SELLABLE_PLANS = ['monthly'];
+if (!PRICE_IDS.monthly) console.error('[BILLING] no price id for the €15 monthly plan: every checkout will fail until STRIPE_MONTHLY_PRICE_ID is set');
 const PLAN_LIMITS = {
   // Pricing v2: every PAID tier includes the whole product; the only limit is
   // number of apps. `runs: null` = unlimited; `runs: 1` = capped (free/onerun).
@@ -456,7 +459,10 @@ const MAX_AGENT_STEPS = 120;
 // Conversion: weighted spend uses Sonnet 4.6 input as the unit (cache
 // reads × 0.1, output × 5). Sonnet 4.6 input is ~$3 per 1M tokens, so
 // 1 weighted token ≈ $0.000003. €200 ≈ $220 ≈ ~73M weighted tokens.
-const FREE_MONTHLY_BUDGET_EUR = Number(process.env.TESTPILOT_FREE_MONTHLY_BUDGET_EUR || 200);
+const FREE_MONTHLY_BUDGET_EUR = Number(process.env.TESTPILOT_FREE_MONTHLY_BUDGET_EUR
+  || (process.env.TESTPILOT_FREE_DAILY_BUDGET_EUR ? Number(process.env.TESTPILOT_FREE_DAILY_BUDGET_EUR) * 30 : 200));
+if (process.env.TESTPILOT_FREE_DAILY_BUDGET_EUR && !process.env.TESTPILOT_FREE_MONTHLY_BUDGET_EUR)
+  console.warn(`[freeSpend] TESTPILOT_FREE_DAILY_BUDGET_EUR is deprecated; using it × 30 = €${FREE_MONTHLY_BUDGET_EUR}/month. Set TESTPILOT_FREE_MONTHLY_BUDGET_EUR instead.`);
 const USD_PER_EUR = Number(process.env.TESTPILOT_USD_PER_EUR || 1.10);
 const SONNET_INPUT_USD_PER_MTOK = 3;
 const FREE_MONTHLY_TOKEN_BUDGET = Math.floor(
@@ -687,6 +693,7 @@ function wrapClientWithFreeSpendTally(client) {
 // loaded from the same table at boot and carried forward on each day rollover.
 let freeSpendToday = { date: utcDateString(), weighted: 0 };
 let freeSpendMonthBefore = 0;
+let freeSpendLoaded = true;   // false while this month's earlier spend could not be read
 
 function utcDateString(d = new Date()) {
   return d.toISOString().slice(0, 10); // YYYY-MM-DD
@@ -719,6 +726,7 @@ function getFreeSpendMonthWeighted() {
 }
 
 function isFreeBudgetExceeded() {
+  if (!freeSpendLoaded) return true;   // unknown spend: fail closed until loadFreeSpendToday succeeds
   return getFreeSpendMonthWeighted() >= FREE_MONTHLY_TOKEN_BUDGET;
 }
 
@@ -739,9 +747,12 @@ async function loadFreeSpendToday() {
       if (r.date === today) freeSpendToday.weighted = w;
       else if (r.date < today) freeSpendMonthBefore += w;
     }
+    freeSpendLoaded = true;
     console.log(`[freeSpend] loaded month=${today.slice(0, 7)} weighted=${getFreeSpendMonthWeighted()} (~€${freeSpendEurEstimate(getFreeSpendMonthWeighted()).toFixed(2)} of €${FREE_MONTHLY_BUDGET_EUR})`);
   } catch (err) {
-    console.warn('[freeSpend] could not load this month\'s rows from supabase:', err.message);
+    console.warn('[freeSpend] could not load this month\'s rows from supabase, free runs paused, retrying in 60s:', err.message);
+    freeSpendLoaded = false;
+    setTimeout(loadFreeSpendToday, 60_000).unref?.();
   }
 }
 
@@ -2485,6 +2496,7 @@ onOnboardingFailure(({ stage, email, url, error, code }) => {
       const rec = onboardingLog[key] || {};
       if (rec.helpSentAt && Date.now() - rec.helpSentAt < 24 * 3600_000) return;
       if (await userHasRecovered(stage, email)) return;
+      if (code === 'FREE_DAILY_BUDGET_EXCEEDED' && isFreeBudgetExceeded()) return;   // still spent: the mail would be false
       // A signup-stage rejection happens before the user row exists, so a
       // sign-in link would dead-end — send them back to the signup form.
       const exists = await supabase('GET', 'users', null, `?email=eq.${encodeURIComponent(email)}&select=id`);
@@ -10996,7 +11008,7 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
   // Free run uses support key, otherwise user must provide their own.
   // One Run (€6) is a paid run on TestPilot's key: no key needed from the buyer.
   const effectiveApiKey = freeRun ? process.env.ANTHROPIC_SUPPORT_KEY : (apiKey || (userPlan === 'onerun' ? paidRunKey() : null));
-  if (!effectiveApiKey) return res.status(400).json({ error: 'This test needs your Claude API key. Add it in the sidebar (bottom left) and start again, or choose a plan that runs on ours.', code: 'API_KEY_REQUIRED' });
+  if (!effectiveApiKey) return res.status(400).json({ error: 'This test needs your Claude API key. Add it in the sidebar (bottom left) and start again. Get one at console.anthropic.com.', code: 'API_KEY_REQUIRED' });
 
   // Word limit for free runs - counted on what the client wrote. The dashboard appends its own
   // "(Repeatable run: ...)" / "(Read-only run: ...)" instruction (~70 words) to every scenario;
@@ -12969,7 +12981,7 @@ app.post('/api/chat/start', async (req, res) => {
   for (const s of chatSessions.values()) {
     if (s.userId === user.userId) activeForUser++;
   }
-  const highTier = user.plan === 'agency' || user.plan === 'admin' || user.plan === 'tester';
+  const highTier = user.plan === 'agency' || user.plan === 'monthly' || user.plan === 'admin' || user.plan === 'tester';
   const SESSION_CAP = highTier ? 12 : 3;
   if (activeForUser >= SESSION_CAP) {
     return res.status(429).json({
@@ -13780,6 +13792,23 @@ app.post('/api/billing/checkout', async (req, res) => {
     const users = await supabase('GET', 'users', null, `?email=eq.${encodeURIComponent(session.email)}&select=*`);
     const user = users[0];
     let customerId = user.stripe_customer_id;
+
+    // A Solo/Pro/Agency subscriber who picks the €15 plan is moved onto it: the
+    // live subscription's price is swapped (prorated), never a second
+    // subscription next to it, which would bill both and let the old one's
+    // renewals reset the plan.
+    if (customerId) {
+      const subs = await stripe.subscriptions.list({ customer: customerId, status: 'all', limit: 20 });
+      const live = subs.data.find((x) => ['active', 'trialing', 'past_due'].includes(x.status));
+      if (live) {
+        const item = live.items?.data?.[0];
+        if (item?.price?.id === PRICE_IDS[plan]) return res.status(409).json({ error: 'You are already on the €15/month plan.', code: 'ALREADY_SUBSCRIBED' });
+        await stripe.subscriptions.update(live.id, { items: [{ id: item.id, price: PRICE_IDS[plan] }], proration_behavior: 'create_prorations' });
+        await applyPlanChange({ email: session.email, userId: user.id, plan, source: 'checkout:switch' });
+        console.log('[BILLING] switched', session.email, 'from', item?.price?.id, 'to', plan);
+        return res.json({ url: `${APP_URL}/app?upgraded=1`, switched: true });
+      }
+    }
 
     if (!customerId) {
       const customer = await stripe.customers.create({ email: session.email });
