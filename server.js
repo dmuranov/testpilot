@@ -646,7 +646,7 @@ function getClient(apiKey) {
   // analysis calls — every call site that uses getClient) flows through the
   // same daily-budget tally. Saves having to add a one-liner to each of the
   // 7+ call sites and saves missing new ones added later.
-  const client = wrapClientWithFreeSpendTally(raw, apiKey === process.env.ANTHROPIC_SUPPORT_KEY);
+  const client = wrapClientWithUsageTally(raw, apiKey === process.env.ANTHROPIC_SUPPORT_KEY);
   clientCache.set(apiKey, client);
   setTimeout(() => clientCache.delete(apiKey), 1_800_000);
   return client;
@@ -656,7 +656,10 @@ function getClient(apiKey) {
 // runWithOurSideRetry opens it, so every Claude call a run makes, on any key,
 // is summed into that run's cost (result.costEur).
 const runUsage = new AsyncLocalStorage();
-function wrapClientWithFreeSpendTally(client, isSupportKey = true) {
+// Counts every messages.create: into the free monthly budget only for
+// TestPilot's support key (isSupportKey must be passed), and into the current
+// run's cost whatever the key.
+function wrapClientWithUsageTally(client, isSupportKey = false) {
   const wrappedMessages = new Proxy(client.messages, {
     get(target, prop, receiver) {
       if (prop === 'create') {
@@ -7167,7 +7170,11 @@ async function runWithOurSideRetry(testId, appId, owner, run) {
   try { return await runUsage.run(usage, () => runWithOurSideRetryInner(testId, appId, owner, run)); }
   finally {
     const r = testResults.get(testId);
-    if (r) { r.weightedTokens = Math.round(usage.weighted); r.costEur = Number(freeSpendEurEstimate(usage.weighted).toFixed(3)); }
+    if (r) {
+      r.weightedTokens = Math.round(usage.weighted);
+      r.costEur = Number(freeSpendEurEstimate(usage.weighted).toFixed(3));
+      await saveTestResult(testId, r).catch(() => {});   // runAgentTest saved before the cost was known
+    }
   }
 }
 async function runWithOurSideRetryInner(testId, appId, owner, run) {
@@ -7189,6 +7196,7 @@ async function runWithOurSideRetryInner(testId, appId, owner, run) {
   if (kind === 'transient' && untouched) {
     recordOurFailure({ testId, appId, owner, error: first.err, retried: true });
     emitStep(testId, { type: 'info', message: '🔁 TestPilot hit a hiccup on our side (not your app). Starting again with a fresh browser…' });
+    { const u = runUsage.getStore(); if (u) u.weighted = 0; }   // the cost shown is the run's, not the failed attempt's
     { const r = testResults.get(testId); if (r) { r.status = 'starting'; r.error = undefined; } }
     last = await attempt();
     if (last.err == null || !ourSideKind(last.err)) {
@@ -17153,6 +17161,10 @@ app.post('/api/schedules', async (req, res) => {
     if (!ss.ok) return res.status(400).json({ error: ss.error, code: 'SESSION_STATE_INVALID' });
     if (ss.sessionState) { try { sessionStateEnc = encryptSecret(JSON.stringify(ss.sessionState)); } catch {} }
   }
+
+  const sameTest = [...schedules.values()].find((x) => x.active && x.appId === appId && x.scenario === String(scenario).slice(0, 2000)
+    && canonicalEmail(x.ownerEmail) === canonicalEmail(ownerEmail));
+  if (sameTest) return res.status(409).json({ error: 'This test is already being watched. Manage it in Scheduled Runs.', code: 'ALREADY_SCHEDULED', schedule: publicSchedule(sameTest) });
 
   const id = 'sch_' + randomBytes(9).toString('hex');
   const rec = {
