@@ -3364,7 +3364,8 @@ function tpKeepWatchingCard(test) {
   if (kw.done) return card(`<div style="font-size:13px">👀 Watching it daily. You get an email only if it breaks, with the fix. Manage it in <a href="#" onclick="navigate('schedules');return false">Scheduled Runs</a>.</div>`);
   // The run's cost is attached a moment after its result is first shown: fetch it once.
   if (test.costEur == null && !kw.costFetched) { state.keepWatching = state.keepWatching || {}; state.keepWatching[test.testId] = { ...kw, costFetched: true }; setTimeout(() => tpRefreshCost(test.testId), 2500); }
-  // One click only when the run is known not to have signed in (older results do not say).
+  // One click only when the run is known not to have signed in (older results do
+  // not say), or signed in with a saved login the schedule can reuse.
   if (test.usedLogin !== false && !test.savedLoginRole) return card(`<div style="font-size:13px;line-height:1.6">👀 <b>Keep watching this test?</b> ${test.usedLogin ? 'It logs in, so a daily rerun needs a saved login' : 'Set up a daily rerun (with a saved login if the test signs in)'}: do it in <a href="#" onclick="navigate('schedules');return false">Scheduled Runs</a>.</div>`);
   const month = test.costEur ? `about €${Math.max(0.01, test.costEur * 30).toFixed(2)}/month` : 'usually €3–€15/month';
   const cost = test.costEur ? `This run cost about €${test.costEur.toFixed(2)} on your Claude key, so daily is ${month}.` : `Daily is ${month} on your Claude key.`;
@@ -3394,7 +3395,9 @@ async function tpStartWatching() {
       body: JSON.stringify({ appId: test.appId, scenario: test.scenario, intervalHours: 24, apiKey: getApiKey(), savedSessionRole: test.savedLoginRole || undefined }),
     });
     const data = await res.json().catch(() => ({}));
-    state.keepWatching[test.testId] = (res.ok || data.code === 'ALREADY_SCHEDULED') ? { done: true } : { err: data.error || `Could not set it up (HTTP ${res.status}).` };
+    state.keepWatching[test.testId] = res.ok ? { done: true }
+      : data.code === 'ALREADY_SCHEDULED' ? { err: 'This test is already being watched. You can change it in Scheduled Runs.' }
+      : { err: data.error || `Could not set it up (HTTP ${res.status}).` };
     if (res.ok) { state.schedules = undefined; tpToast('Watching it daily. You only hear from us if it breaks.'); }
   } catch (e) {
     state.keepWatching[test.testId] = { err: 'Network error — try again.' };
