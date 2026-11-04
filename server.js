@@ -7065,6 +7065,97 @@ function pngDimensionsFromBase64(b64) {
   } catch { return null; }
 }
 
+// ── Failures on our side ──────────────────────────────────────
+// A run that broke because of TestPilot (the Claude API overloaded or 5xx, our
+// browser process died, a network blip on our end, a bug in our own code) is
+// never the client's bug: the client is told so, the failure is logged to
+// OUR_FAILURES_FILE, and one failure on 3+ apps in 24h alerts the owner.
+// It is retried once, with a fresh browser, ONLY when it broke before the run
+// did anything in the client's app (no click, typing or submit yet): a retry
+// replays the journey from step 1, so a later failure would book or submit twice.
+// Our own code bugs fail the same way every time and are not retried.
+// Errors raised inside the client's page (a Playwright page/locator call, their
+// window closing) are not ours.
+const OUR_TRANSIENT_RE = /overloaded|api_error|ECONNRESET|ETIMEDOUT|EPIPE|socket hang up|fetch failed|browser has (been closed|disconnected)|browserType\.launch|Browser closed|Protocol error \((Target|Browser)\./i;
+const OUR_CODE_BUG_RE = /is not a function|Cannot read properties of|is not defined/i;
+const IN_CLIENT_PAGE_RE = /\b(page|frame|locator|elementHandle|jsHandle)\.[a-zA-Z$]+:/;
+function ourSideKind(msg) {
+  const m = String(msg || '');
+  if (IN_CLIENT_PAGE_RE.test(m)) return null;   // raised in their page, by their DOM or their app
+  if (OUR_TRANSIENT_RE.test(m)) return 'transient';
+  if (OUR_CODE_BUG_RE.test(m)) return 'code';
+  return null;
+}
+// Step actions that change nothing in the client's app.
+const NO_EFFECT_ACTIONS = new Set(['navigate', 'login', 'scroll', 'scroll_to', 'verify', 'done']);
+const OUR_FAILURES_FILE = './our-failures.jsonl';
+const OUR_SIDE_MESSAGE = 'This run hit a problem on TestPilot\'s side, not in your app. It was not counted against you and we have logged it to fix. Please try again in a few minutes.';
+const ourFailureApps = new Map();   // signature → Map(appId → last seen ms)
+function ourFailureSignature(msg) {
+  return String(msg || '')
+    .replace(/https?:\/\/\S+/g, '<url>')
+    .replace(/locator\([^)]*\)/g, 'locator(…)')
+    .replace(/(["'`]).*?\1/g, '"…"')
+    .replace(/\d+/g, 'N')
+    .slice(0, 90);
+}
+function recordOurFailure({ testId, appId, owner, error, retried }) {
+  const msg = String(error || '');
+  const sig = ourFailureSignature(msg);
+  fs.appendFile(OUR_FAILURES_FILE, JSON.stringify({ at: new Date().toISOString(), testId, appId, owner, sig, error: msg.slice(0, 500), retried }) + '\n').catch(() => {});
+  console.warn('[our-failure]', sig, 'app=' + appId, retried ? '(retrying)' : '(final)');
+  const now = Date.now();
+  for (const [s, apps] of ourFailureApps) {   // forget anything older than a day
+    for (const [a, t] of apps) if (now - t > 24 * 3600_000) apps.delete(a);
+    if (!apps.size) ourFailureApps.delete(s);
+  }
+  const apps = ourFailureApps.get(sig) || new Map();
+  apps.set(appId, now);
+  ourFailureApps.set(sig, apps);
+  if (apps.size >= 3) sendAlert('our-failure:' + sig, `same TestPilot failure on ${apps.size} apps in 24h`,
+    `Signature: ${sig}\nApps: ${[...apps.keys()].join(', ')}\nLast error: ${msg.slice(0, 400)}\n\nFull log: ${OUR_FAILURES_FILE} on the box.`).catch(() => {});
+}
+// run(quietError) starts one attempt. The first attempt is quiet so a failure
+// on our side can be retried before the client's stream sees any error.
+async function runWithOurSideRetry(testId, appId, owner, run) {
+  const attempt = async () => {
+    try { const r = await run(true); return { r, err: r?.status === 'error' ? r.error : null }; }
+    catch (e) { return { thrown: e, err: e.message }; }
+  };
+  const first = await attempt();
+  const kind = first.err != null ? ourSideKind(first.err) : null;
+  if (!kind) {   // finished, or failed on their side: report what the quiet attempt kept back
+    if (first.thrown) throw first.thrown;   // the caller's catch reports a throw as before
+    if (first.r?.status === 'config_error') emitStep(testId, { type: 'error', message: first.r.error });
+    else if (first.err != null) emitStep(testId, { type: 'error', message: `Test error: ${first.err}` });
+    return first.r;
+  }
+  const steps = testResults.get(testId)?.steps || [];
+  const untouched = steps.every((st) => NO_EFFECT_ACTIONS.has(String(st.action || '').toLowerCase()));
+  let last = first;
+  if (kind === 'transient' && untouched) {
+    recordOurFailure({ testId, appId, owner, error: first.err, retried: true });
+    emitStep(testId, { type: 'info', message: '🔁 TestPilot hit a hiccup on our side (not your app). Starting again with a fresh browser…' });
+    { const r = testResults.get(testId); if (r) { r.status = 'starting'; r.error = undefined; } }
+    last = await attempt();
+    if (last.err == null || !ourSideKind(last.err)) {
+      if (last.thrown) throw last.thrown;
+      if (last.r?.status === 'config_error') emitStep(testId, { type: 'error', message: last.r.error });
+      else if (last.err != null) emitStep(testId, { type: 'error', message: `Test error: ${last.err}` });
+      return last.r;
+    }
+  }
+  recordOurFailure({ testId, appId, owner, error: last.err, retried: false });
+  const res = testResults.get(testId);
+  if (res) {
+    res.status = 'error'; res.rawError = last.err; res.error = OUR_SIDE_MESSAGE; res.ourSide = true;
+    res.completedAt = new Date().toISOString();
+    await saveTestResult(testId, res).catch(() => {});   // runAgentTest saved the raw error already
+  }
+  emitStep(testId, { type: 'error', message: OUR_SIDE_MESSAGE });
+  return res;
+}
+
 // Distinguish "the user's account/key is misconfigured" from "the engine
 // broke". Both used to land as status:'error' with a raw API JSON blob in the
 // message, so paying users couldn't tell a TestPilot bug from their own
@@ -10307,7 +10398,9 @@ Output structure (exact sections, max 220 words total):
     result.error = cfg ? cfg.friendly : e.message;
     if (cfg) result.rawError = e.message;
     result.completedAt = new Date().toISOString();
-    emitStep(testId, { type: 'error', message: cfg ? cfg.friendly : `Test error: ${e.message}` });
+    // quietError: the caller may retry a failure on our side, so it decides
+    // whether (and what) the client sees; the stream's first error ends the run.
+    if (!credentials?.quietError) emitStep(testId, { type: 'error', message: cfg ? cfg.friendly : `Test error: ${e.message}` });
     return result;
   } finally {
     if (heartbeat) clearInterval(heartbeat);
@@ -11075,7 +11168,9 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
     { const _r = testResults.get(testId); if (_r && _r.status === 'queued') _r.status = 'starting'; }
     if (willQueue) emitStep(testId, { type: 'info', message: '▶ A runner just freed up — starting your scan now…' });
     try {
-      await runAgentTest(testId, appKnowledge, scenario, { email, password, allowReplay: true, ownerEmail, ownerUserId, sessionState, indexedDB: savedIndexedDB, liveOffers: req.body?.liveOffers === true }, effectiveApiKey);
+      const creds = { email, password, allowReplay: true, ownerEmail, ownerUserId, sessionState, indexedDB: savedIndexedDB, liveOffers: req.body?.liveOffers === true };
+      await runWithOurSideRetry(testId, appId, ownerEmail,
+        (quietError) => runAgentTest(testId, appKnowledge, scenario, { ...creds, quietError }, effectiveApiKey));
     } catch (e) {
       const result = testResults.get(testId);
       const cfg = classifyConfigError(e.message, effectiveApiKey);

@@ -357,7 +357,7 @@ function stream(testId, live) {
     let ev; try { ev = JSON.parse(e.data); } catch { return; }
     if (ev.type === 'heartbeat') return;
     if (ev.message && live) live.textContent = String(ev.message).slice(0, 140);
-    if (ev.type === 'summary' || ev.type === 'done' || ev.type === 'complete') { es.close(); finish(); }
+    if (ev.type === 'summary' || ev.type === 'done' || ev.type === 'complete' || ev.type === 'error') { es.close(); finish(); }   // an error ends the run too: the report reads it from the result
   };
   es.onerror = () => { es.close(); finish(); };
 }
@@ -374,7 +374,7 @@ async function report(testId) {
     return upsell(false);
   }
   if (!bugs.length) {
-    say(`<p>The test stopped before it could give a verdict${r.error ? ` (${esc(String(r.error).slice(0, 160))})` : ''}.</p><p>When that's on our side, your free test isn't used up, so you can run it again.</p>`, 'err');
+    say(`<p>The test stopped before it could give a verdict${r.error ? ` (${esc(String(r.error).slice(0, 300))})` : ''}.</p><p>When that's on our side, your free test isn't used up, so you can run it again.</p>`, 'err');
     return setReply(`<div class="row"><button onclick="showChoices()">Run again</button><button class="ghost" onclick="location.href='/app'">Open dashboard</button></div>`);
   }
   say(`<p>I found <b>${bugs.length} problem${bugs.length === 1 ? '' : 's'}</b>:</p>
