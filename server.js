@@ -7781,6 +7781,8 @@ async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey)
     // The run signed in (typed login or a session). A schedule cannot reuse a
     // typed login, so the dashboard offers one-click Keep watching only without.
     usedLogin: !!(credentials?.email || credentials?.sessionState),
+    // The saved login it signed in with, by name: Keep watching can reuse it.
+    savedLoginRole: credentials?.savedSessionRole || null,
     steps: [],
     // `bugs` = CONFIRMED app defects only (high-confidence app_bug). It is what
     // every downstream consumer counts as "defects found". `findings` = the
@@ -11103,12 +11105,13 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
   // credentials or pasting a session every run. An explicit pasted
   // sessionState still wins (an operator override); savedSessionRole only
   // fills in when nothing was pasted.
-  let savedIndexedDB = null;
+  let savedIndexedDB = null, usedSavedRole = null;
   if (!sessionState && savedSessionRole && appId) {
     const resolved = resolveSavedSession(appId, savedSessionRole, ownerEmail);
     if (!resolved) return res.status(400).json({ error: `No saved login found for role "${savedSessionRole}" on this app — it may have been deleted. Capture it again.`, code: 'SAVED_SESSION_NOT_FOUND' });
     sessionState = resolved.sessionState;
     savedIndexedDB = resolved.indexedDB;
+    usedSavedRole = String(savedSessionRole);
   }
 
   // Plan + free-run gate. Look up the user's persisted plan/free_run_used so
@@ -11235,7 +11238,7 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
     { const _r = testResults.get(testId); if (_r && _r.status === 'queued') _r.status = 'starting'; }
     if (willQueue) emitStep(testId, { type: 'info', message: '▶ A runner just freed up — starting your scan now…' });
     try {
-      const creds = { email, password, allowReplay: true, ownerEmail, ownerUserId, sessionState, indexedDB: savedIndexedDB, liveOffers: req.body?.liveOffers === true };
+      const creds = { email, password, allowReplay: true, ownerEmail, ownerUserId, sessionState, indexedDB: savedIndexedDB, liveOffers: req.body?.liveOffers === true, savedSessionRole: usedSavedRole };
       await runWithOurSideRetry(testId, appId, ownerEmail,
         (quietError) => runAgentTest(testId, appKnowledge, scenario, { ...creds, quietError }, effectiveApiKey));
     } catch (e) {
@@ -16973,6 +16976,22 @@ function saveSchedules() {
 }
 loadSchedules();
 
+// One email per saved-login problem (deleted or expired) until it signs in again.
+async function notifySavedLoginProblem(s, why) {
+  const to = s.alertEmail || s.ownerEmail;
+  if (!to || s.loginProblemNotifiedAt) return;
+  const appName = platformMaps.get(s.appId)?.url || s.appId;
+  const what = why === 'deleted' ? `was deleted` : `no longer signs in (it has probably expired)`;
+  try {
+    await mailer({ to, subject: `TestPilot cannot sign in to check ${appName}: save the login again`, text: `Your daily TestPilot check of ${appName} uses the saved login "${s.savedSessionRole}", which ${what}.
+
+This is not a problem with your app. Sign in once more in TestPilot (Saved logins, same name) and the daily check carries on by itself.
+
+${APP_URL}/app` });
+    s.loginProblemNotifiedAt = new Date().toISOString();   // saved by the caller's finish()
+  } catch (e) { console.warn('[schedules] saved-login mail failed:', e.message); }
+}
+
 // Strip secrets before returning a schedule over the API.
 function publicSchedule(s) {
   const { keyEnc, sessionStateEnc, ...rest } = s;
@@ -17028,13 +17047,25 @@ async function runSchedule(s) {
 
   let sessionState = null;
   try { if (s.sessionStateEnc) sessionState = JSON.parse(decryptSecret(s.sessionStateEnc)); } catch {}
+  let savedIndexedDB = null;
+  const usesSavedLogin = !sessionState && !!s.savedSessionRole;
+  if (usesSavedLogin) {
+    const saved = resolveSavedSession(s.appId, s.savedSessionRole, s.ownerEmail);
+    if (!saved && savedSessions.has(savedSessionKey(s.ownerEmail, s.appId, s.savedSessionRole))) {
+      console.warn('[schedules] saved login could not be read (secret store?)', s.id, s.savedSessionRole);
+      if (freeHold) freeHold.refund();
+      return finish('Skipped: TestPilot could not read the saved login on its side (not your app). The next run is as scheduled.');
+    }
+    if (!saved) { if (freeHold) freeHold.refund(); await notifySavedLoginProblem(s, 'deleted'); return finish(`Skipped: the saved login "${s.savedSessionRole}" was deleted. Save it again, then this schedule runs again.`); }
+    sessionState = saved.sessionState; savedIndexedDB = saved.indexedDB;
+  }
 
   const testId = randomUUID();
   testResults.set(testId, { testId, appId: s.appId, scenario: s.scenario, status: 'starting', userEmail: s.ownerEmail, userId: s.ownerUserId || null, startedAt: new Date().toISOString(), steps: [], bugs: [], scheduleId: s.id });
   await acquireScanSlot();
   try {
     await runWithOurSideRetry(testId, s.appId, s.ownerEmail,
-      (quietError) => runAgentTest(testId, appKnowledge, s.scenario, { ownerEmail: s.ownerEmail, ownerUserId: s.ownerUserId || null, sessionState, allowReplay: true, quietError }, apiKey));
+      (quietError) => runAgentTest(testId, appKnowledge, s.scenario, { ownerEmail: s.ownerEmail, ownerUserId: s.ownerUserId || null, sessionState, indexedDB: savedIndexedDB, savedSessionRole: s.savedSessionRole || null, allowReplay: true, quietError }, apiKey));
   } catch (e) {
     const r = testResults.get(testId);
     if (r) { r.status = 'error'; r.error = e.message; }
@@ -17047,6 +17078,17 @@ async function runSchedule(s) {
   const result = testResults.get(testId);
   // Broke on our side: not a verdict on the app. No alert, the baseline stays.
   if (result?.ourSide) { s.lastTestId = testId; return finish('Skipped: TestPilot had a problem on its side (not your app). The next run is as scheduled.'); }
+  // A saved login that no longer gets in has expired: that is not the app breaking.
+  // Expired saved login: a login_* block, or a failed run that ended on a sign-in
+  // page (OAuth / magic-link apps show no password form, so no login_* cause).
+  const lastUrls = (result?.steps || []).slice(-3).map((st) => String(st.url || ''));
+  const endedAtSignIn = !outcomeSignature(result).ok && lastUrls.some((u) => /\/(log-?in|sign-?in|signin|auth|sso|oauth)\b/i.test(u));
+  if (usesSavedLogin && (/^login_/.test(String(result?.blockedReason?.cause || '')) || endedAtSignIn)) {
+    s.lastTestId = testId;
+    await notifySavedLoginProblem(s, 'expired');
+    return finish(`Skipped: the saved login "${s.savedSessionRole}" no longer signs in (it has probably expired). Save it again in TestPilot.`);
+  }
+  if (usesSavedLogin && CHARGED_RUN_STATUSES.includes(result?.status)) s.loginProblemNotifiedAt = null;   // got through signed in: a later expiry mails again
   const curr = outcomeSignature(result);
   const prev = s.baseline || null;
   const regressed = isRegression(prev, curr);
@@ -17133,8 +17175,12 @@ app.post('/api/schedules', async (req, res) => {
   const user = requireUser(req, res);
   if (!user) return;
   const ownerEmail = (user.email || '').trim().toLowerCase();
-  const { appId, scenario, intervalHours, apiKey, sessionState: rawSessionState, alertEmail, useSupportKey } = req.body || {};
+  const { appId, scenario, intervalHours, apiKey, sessionState: rawSessionState, alertEmail, useSupportKey, savedSessionRole } = req.body || {};
   if (!appId || !scenario) return res.status(400).json({ error: 'appId and scenario are required' });
+  const savedRole = savedSessionRole ? String(savedSessionRole).slice(0, 80) : null;
+  if (savedRole && rawSessionState) return res.status(400).json({ error: 'Use either a saved login or a pasted session, not both.', code: 'SESSION_CONFLICT' });
+  if (savedRole && !resolveSavedSession(appId, savedRole, ownerEmail))
+    return res.status(400).json({ error: `No saved login named "${savedRole}" on this app. Save the login first, then try again.`, code: 'SAVED_SESSION_NOT_FOUND' });
   const interval = Math.max(1, Math.min(24 * 30, Number(intervalHours) || 24)); // 1h..30d, default daily
   const appKnowledge = platformMaps.get(appId);
   if (!appKnowledge) return res.status(404).json({ error: 'App not found. Learn it first.' });
@@ -17166,6 +17212,11 @@ app.post('/api/schedules', async (req, res) => {
 
   const sameTest = [...schedules.values()].find((x) => x.active && x.appId === appId && x.scenario === String(scenario).slice(0, 2000)
     && canonicalEmail(x.ownerEmail) === canonicalEmail(ownerEmail));
+  if (sameTest && savedRole && !sameTest.sessionStateEnc && sameTest.savedSessionRole !== savedRole) {
+    sameTest.savedSessionRole = savedRole; sameTest.loginProblemNotifiedAt = null;
+    saveSchedules();
+    return res.json({ ok: true, updated: true, schedule: publicSchedule(sameTest) });
+  }
   if (sameTest) return res.status(409).json({ error: 'This test is already being watched. Manage it in Scheduled Runs.', code: 'ALREADY_SCHEDULED', schedule: publicSchedule(sameTest) });
 
   const id = 'sch_' + randomBytes(9).toString('hex');
@@ -17173,6 +17224,7 @@ app.post('/api/schedules', async (req, res) => {
     id, appId, scenario: String(scenario).slice(0, 2000),
     ownerEmail, ownerUserId: user.userId || null,
     keyEnc, useSupportKey: wantSupport, freeSchedule, sessionStateEnc,
+    savedSessionRole: savedRole,   // resolved at each run, so re-saving the login keeps the schedule working
     intervalHours: interval,
     alertEmail: (alertEmail || ownerEmail || '').trim().toLowerCase() || null,
     active: true, createdAt: new Date().toISOString(),
