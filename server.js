@@ -12702,8 +12702,13 @@ app.post('/api/v1/apps/:appId/scenarios/suggest', async (req, res) => {
   // Source 1: AI summary sections (when JSON parse succeeded and gave us
   // structured entities)
   const sections = Array.isArray(map.summary?.sections) ? map.summary.sections : [];
+  // The summary writes a placeholder ("unknown", "none"…) when a section has
+  // nothing to create (a shop page, a landing page). No create test for those:
+  // "Create new unknown" reads as broken.
+  const PLACEHOLDER_ENTITY = /^(unknown|none|n\/?a|null|undefined|record|item|entity|-)?$/i;
   for (const s of sections) {
-    const entity = s.entity || s.name || 'record';
+    const entity = String(s.entity || '').trim();
+    if (PLACEHOLDER_ENTITY.test(entity)) continue;
     const sectionName = s.name || entity;
     candidates.push({
       name: `Create new ${entity}`,
