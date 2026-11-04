@@ -11004,6 +11004,7 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
   if (ownerEmail && !ownsApp(appId, ownerEmail) && !isSuperAdmin(ownerEmail)) {
     return res.status(403).json({ error: 'This app belongs to another account.', code: 'APP_OWNED_BY_OTHER' });
   }
+  if (await denyUnverifiedApp(res, ownerEmail, appId)) return;
 
   // Free run uses support key, otherwise user must provide their own.
   // One Run (€6) is a paid run on TestPilot's key: no key needed from the buyer.
@@ -11963,6 +11964,7 @@ app.post('/api/sweep', async (req, res) => {
   const appKnowledge = platformMaps.get(appId);
   if (!appKnowledge) return res.status(404).json({ error: 'App not found' });
   if (!ownsApp(appId, sessionUser.email)) return res.status(403).json({ error: 'This app belongs to another account.', code: 'OWNERSHIP_MISMATCH' });
+  if (await denyUnverifiedApp(res, sessionUser.email, appId)) return;
   const ss = parseSessionState(rawSessionState);
   if (!ss.ok) return res.status(400).json({ error: ss.error, code: 'SESSION_STATE_INVALID' });
   // Saved login — same resolution as /api/test: an explicit pasted
@@ -12255,6 +12257,7 @@ app.post('/api/test/multirole', async (req, res) => {
   }
 
   const { appId, roles, apiKey, freeRun, userEmail } = req.body || {};
+  if (await denyUnverifiedApp(res, user.email, appId)) return;
   if (!Array.isArray(roles) || roles.length < 2) {
     return res.status(400).json({ error: 'multirole requires at least 2 roles' });
   }
@@ -12443,6 +12446,7 @@ app.post('/api/test/flow', async (req, res) => {
   }
 
   const { appId, scenario, email, password, apiKey, freeRun, sessionState: rawSessionState, savedSessionRole } = req.body || {};
+  if (await denyUnverifiedApp(res, user.email, appId)) return;
   let { paymentMode } = req.body || {};
   paymentMode = FLOW_PAYMENT_MODES.includes(paymentMode) ? paymentMode : 'stop-before-pay';
 
@@ -12949,6 +12953,7 @@ app.post('/api/chat/start', async (req, res) => {
   }
 
   const { appId, email, password, securityMode } = req.body;
+  if (await denyUnverifiedApp(res, user.email, appId)) return;
   let { apiKey } = req.body;
   // Free plan without a key: the session runs on the support key — the free
   // run was taken above — capped at FREE_CHAT_COMMANDS commands.
@@ -13652,11 +13657,44 @@ async function isSiteVerified(email, origin) {
   return !!(rec && rec[origin]);
 }
 
-app.post('/api/security/verify-site', async (req, res) => {
-  const target = await leakCheckTarget(req, res);
-  if (!target) return;
-  const { sessionUser, origin } = target;
-  const token = siteVerifyToken(sessionUser.email, origin);
+// An app counts as verified when its owner proved control of its origin. The
+// www. and bare host are the same site to an owner, so either proof covers both:
+// the chat first-run verifies the URL the client typed, before the crawl, and
+// the crawl may settle on the other form.
+function sameSiteHost(origin) {
+  try { const u = new URL(origin); return u.protocol + '//' + u.host.replace(/^www\./, ''); } catch { return null; }
+}
+async function isAppVerified(email, appId) {
+  const origin = originForApp(appId);
+  if (!origin) return false;
+  const store = await loadVerifiedSites();
+  const rec = store[canonicalEmail(email)] || {};
+  const want = sameSiteHost(origin);
+  return Object.keys(rec).some(o => o === origin || (want && sameSiteHost(o) === want));
+}
+
+// Every test needs proof the app is the requester's (owner decision
+// 2026-10-30): no proof, no test. Answers 403 SITE_NOT_VERIFIED with the
+// instructions and returns true when it did. Apps the requester does not own
+// fall through to the endpoint's own ownership error; super admins skip it.
+async function denyUnverifiedApp(res, email, appId) {
+  if (!appId || !email || isSuperAdmin(email) || !ownsApp(appId, email)) return false;
+  if (await isAppVerified(email, appId)) return false;
+  const origin = originForApp(appId);
+  if (!origin) return false;
+  console.log('[verify-gate] refused', canonicalEmail(email), origin);
+  res.status(403).json({
+    error: `Before testing, show that ${origin} is yours: add the TestPilot tag to your app, publish it, then press Verify.`,
+    code: 'SITE_NOT_VERIFIED',
+    verification: { origin, appId, ...siteVerificationInstructions(email, origin) },
+  });
+  return true;
+}
+
+// The file or meta-tag proof for (email, origin). Records a success.
+// reason on failure: 'not_found' | 'other_token' | 'unreachable'.
+async function checkSiteProof(email, origin) {
+  const token = siteVerifyToken(email, origin);
   let method = null;
 
   // File first. A catch-all SPA host answers 200 + index.html here, so require
@@ -13682,17 +13720,44 @@ app.post('/api/security/verify-site', async (req, res) => {
   }
 
   if (!method) {
-    console.log('[verify-site] not verified', canonicalEmail(sessionUser.email), origin, reason);
-    return res.json({ verified: false, reason, origin, ...siteVerificationInstructions(sessionUser.email, origin) });
+    console.log('[verify-site] not verified', canonicalEmail(email), origin, reason);
+    return { verified: false, reason };
   }
 
   const store = await loadVerifiedSites();
-  const key = canonicalEmail(sessionUser.email);
+  const key = canonicalEmail(email);
   store[key] = store[key] || {};
   store[key][origin] = new Date().toISOString();
   await saveVerifiedSites();
   console.log('[leak-check] verified', key, origin, 'via', method);
-  res.json({ verified: true, origin, method });
+  return { verified: true, method };
+}
+
+app.post('/api/security/verify-site', async (req, res) => {
+  const target = await leakCheckTarget(req, res);
+  if (!target) return;
+  const { sessionUser, origin } = target;
+  const r = await checkSiteProof(sessionUser.email, origin);
+  if (!r.verified) return res.json({ verified: false, reason: r.reason, origin, ...siteVerificationInstructions(sessionUser.email, origin) });
+  res.json({ verified: true, origin, method: r.method });
+});
+
+// Verify by URL, for the chat first-run: the app is proven before it is
+// learned, so there is no appId yet. { url } returns the instructions;
+// { url, check: true } also looks for the proof.
+app.post('/api/verify/url', async (req, res) => {
+  const sessionUser = requireUser(req, res);
+  if (!sessionUser) return;
+  const norm = await resolveUserUrl(String(req.body?.url || '').trim());
+  if (!norm.ok) return res.status(400).json({ error: norm.error, code: norm.code });
+  let origin;
+  try { origin = new URL(norm.navigable).origin; } catch { return res.status(400).json({ error: 'Invalid URL', code: 'URL_INVALID' }); }
+  try { await assertPublicUrl(origin); }
+  catch (e) { return res.status(400).json({ error: 'TestPilot cannot open that address: ' + e.message, code: 'URL_BLOCKED' }); }
+  const instructions = siteVerificationInstructions(sessionUser.email, origin);
+  if (!req.body?.check) return res.json({ verified: await isSiteVerified(sessionUser.email, origin), origin, ...instructions });
+  const r = await checkSiteProof(sessionUser.email, origin);
+  res.json({ verified: r.verified, reason: r.reason || null, origin, ...instructions });
 });
 
 app.post('/api/security/verdict', async (req, res) => {
@@ -14169,6 +14234,87 @@ app.post('/api/support/ask', async (req, res) => {
   }
 });
 
+// Fix prompts: for one problem a run found, Claude writes the message the
+// client pastes into their own builder's AI (Base44, Lovable, Bolt, Replit…).
+// TestPilot sees the app from outside; the builder's AI sees the code, so the
+// prompt describes the symptom, where it happens and what should happen, and
+// never guesses at code. Free accounts get the FIRST problem's prompt as a
+// taster, on the support key; the €15 plan gets every one, on the client's key.
+// One prompt per problem is cached on the run, so asking again costs nothing.
+const FIX_PLATFORMS = { base44: 'Base44', lovable: 'Lovable', bolt: 'Bolt', replit: 'Replit', v0: 'v0', other: 'their AI app builder' };
+app.post('/api/fix-prompt', async (req, res) => {
+  const user = requireUser(req, res);
+  if (!user) return;
+  const { testId, apiKey } = req.body || {};
+  const index = Math.max(0, parseInt(req.body?.index, 10) || 0);
+  const platform = FIX_PLATFORMS[String(req.body?.platform || '').toLowerCase()] || FIX_PLATFORMS.other;
+  const result = testResults.get(testId);
+  if (!result) return res.status(404).json({ error: 'That test is no longer available — run it again to get fixes.', code: 'TEST_NOT_FOUND' });
+  if (result.userEmail && result.userEmail !== requesterEmail(req))
+    return res.status(403).json({ error: 'This test belongs to another account.', code: 'OWNERSHIP_MISMATCH' });
+  const bug = (result.bugs || [])[index];
+  if (!bug) return res.status(404).json({ error: 'No such problem in this test.', code: 'PROBLEM_NOT_FOUND' });
+
+  result.fixPrompts = result.fixPrompts || {};
+  if (result.fixPrompts[index]) return res.json({ prompt: result.fixPrompts[index], index, cached: true });
+
+  const free = !user.plan || user.plan === 'free' || user.plan === 'onerun';
+  let key;
+  if (free) {
+    if (index !== 0) return res.status(402).json({ error: 'The free test includes the fix for the first problem. The €15/month plan gives you a fix prompt for every problem.', code: 'FIX_LOCKED' });
+    if (isFreeBudgetExceeded()) return res.status(429).json({ error: 'Free fixes are fully booked this month — add your own Claude API key to get it now.', code: 'FREE_BUDGET_EXCEEDED' });
+    key = process.env.ANTHROPIC_SUPPORT_KEY;
+  } else {
+    key = typeof apiKey === 'string' ? apiKey.trim() : '';
+    if (!key) return res.status(400).json({ error: 'Add your Claude API key in the dashboard to get fix prompts.', code: 'API_KEY_REQUIRED' });
+  }
+
+  const app = platformMaps.get(result.appId);
+  const steps = (result.steps || []).filter((st) => !bug.step || st.step <= bug.step).slice(-8)
+    .map((st) => `step ${st.step}: ${String(st.action || '').slice(0, 120)} → ${String(st.outcome || '').slice(0, 160)}`);
+  const facts = [
+    `App: ${app?.url || ''}`,
+    `What the test was doing: ${String(result.scenario || '').split(/\(\s*(?:Repeatable run|Read-only run):/)[0].trim().slice(0, 600)}`,
+    `Problem: ${String(bug.description || bug).slice(0, 600)}`,
+    bug.expected ? `Expected: ${String(bug.expected).slice(0, 300)}` : '',
+    bug.actual ? `Actually happened: ${String(bug.actual).slice(0, 300)}` : '',
+    bug.url || bug.page ? `Page: ${String(bug.url || bug.page).slice(0, 200)}` : '',
+    steps.length ? 'Steps before it:\n' + steps.join('\n') : '',
+  ].filter(Boolean).join('\n');
+  try {
+    const client = getClient(key);
+    const r = await client.messages.create({
+      model: 'claude-sonnet-5',
+      max_tokens: 500,
+      system: `You write ONE message that the owner of a web app pastes into the AI chat of ${platform}, the tool they built the app with, so that AI fixes one problem an automated tester found. You only saw the app from the outside, like a user; the builder's AI sees the code. So: say where it happens (page, button, form), what a user does, what should happen and what happens instead, in plain words. Never guess at code, file names or causes you did not see. Ask it to fix only this and not change the design or anything else. Under 120 words. Output only the message, no preamble, no quotes.`,
+      messages: [{ role: 'user', content: facts }],
+    });
+    const prompt = (r.content || []).map((c) => c.text || '').join('').trim();
+    if (!prompt) throw new Error('empty reply');
+    result.fixPrompts[index] = prompt;
+    console.log('[fix-prompt]', canonicalEmail(user.email), 'test=' + testId, 'problem=' + index, free ? 'free' : 'paid', platform);
+    res.json({ prompt, index });
+  } catch (e) {
+    console.warn('[fix-prompt] failed:', e.message);
+    const authErr = /401|authentication|invalid x-api-key/i.test(e.message || '');
+    res.status(authErr ? 400 : 502).json(authErr
+      ? { error: 'Your Claude API key was refused. Check it in console.anthropic.com.', code: 'API_KEY_INVALID' }
+      : { error: 'Could not write the fix right now — try again in a minute. This is on our side, not your app.', code: 'FIX_FAILED' });
+  }
+});
+
+// Funnel step log for the chat first-run, so drop-off between steps can be
+// read from the server log ([funnel-step] lines). Known step names only.
+const FUNNEL_STEPS = new Set(['email', 'url', 'platform', 'verify_shown', 'verified', 'login', 'learned', 'test_chosen', 'run_started', 'report', 'fix_shown', 'upgrade_click']);
+app.post('/api/funnel/step', (req, res) => {
+  const step = String(req.body?.step || '');
+  if (!FUNNEL_STEPS.has(step)) return res.status(400).json({ error: 'unknown step' });
+  const token = req.cookies?.tpsession;
+  const who = (token && sessions.get(token)?.email) || 'anon';
+  console.log('[funnel-step]', step, who, String(req.body?.detail || '').slice(0, 80));
+  res.json({ ok: true });
+});
+
 app.post('/api/support', async (req, res) => {
   // Widget path: signal.js/support-widget.js post JSON, already parsed into
   // req.body by the global express.json() middleware (server.js:785). The
@@ -14600,7 +14746,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
   // Checked before any free scan or credit is taken.
   const scanOrigin = originForApp(appId);
   if (scanOrigin && ownsApp(appId, sessionUser.email) && !isSuperAdmin(sessionUser.email)
-      && !(await isSiteVerified(sessionUser.email, scanOrigin))) {
+      && !(await isAppVerified(sessionUser.email, appId))) {
     return res.status(403).json({
       error: `Before a security scan, prove that ${scanOrigin} is yours: add the TestPilot tag to your app, publish it, then press Verify.`,
       code: 'SITE_NOT_VERIFIED',
@@ -16631,6 +16777,10 @@ async function runSchedule(s) {
   };
   const appKnowledge = platformMaps.get(s.appId);
   if (!appKnowledge) return finish('App not learned (map missing) — re-learn it.');
+  // Schedules made before every test needed a verified app: skip, and say why,
+  // until the owner verifies. The schedule stays active.
+  if (!isSuperAdmin(s.ownerEmail) && !(await isAppVerified(s.ownerEmail, s.appId)))
+    return finish('Skipped: verify that this app is yours in the TestPilot dashboard, then it runs again.');
 
   let apiKey = null, freeHold = null;
   try { if (s.keyEnc) apiKey = decryptSecret(s.keyEnc); } catch {}
@@ -16734,6 +16884,7 @@ app.post('/api/schedules', async (req, res) => {
   // Per-account ownership (see /api/test): the appId must be the requester's own.
   if (!ownsApp(appId, ownerEmail) && !isSuperAdmin(ownerEmail))
     return res.status(403).json({ error: 'This app belongs to another account.', code: 'APP_OWNED_BY_OTHER' });
+  if (await denyUnverifiedApp(res, ownerEmail, appId)) return;
 
   // Keys: BYOK, or the super admin on the shared support key, or a free-plan
   // schedule that spends the account's free run(s) one execution at a time.

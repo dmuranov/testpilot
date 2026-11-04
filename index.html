@@ -4365,6 +4365,78 @@ function renderSecVerify() {
       </details>
     </div>`;
 }
+// Every test needs a verified app: the server refuses any run on an unproven
+// one with 403 SITE_NOT_VERIFIED. The security tab shows its own panel
+// (renderSecVerify); every other refused run opens this modal, via the fetch
+// hook below, so no run type needs its own handling.
+function renderVerifyModal() {
+  const m = state.modal; const v = m.v;
+  const box = 'display:block;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-family:"DM Mono",monospace;font-size:12px;word-break:break-all;margin:6px 0';
+  const muted = 'font-size:12px;color:var(--text-muted);line-height:1.6';
+  return `
+    <div class="modal-overlay" onclick="closeModal()">
+      <div class="modal-content" onclick="event.stopPropagation()" style="max-width:620px;padding:24px">
+        <div style="display:flex;justify-content:space-between;align-items:start;gap:12px">
+          <div style="font-size:16px;font-weight:700;margin-bottom:6px">First, show that ${escapeHtml(v.origin)} is yours</div>
+          <button onclick="closeModal()" style="background:none;border:none;color:var(--text-muted);font-size:20px;cursor:pointer">×</button>
+        </div>
+        <p style="${muted};margin:0 0 12px">TestPilot only tests apps their owner has verified. It is a one-time step per app.</p>
+        <div style="font-size:13px;font-weight:700;margin-bottom:4px">1. Paste this into your app's AI chat (Lovable, Bolt, Base44…)</div>
+        <code style="${box}">${escapeHtml(secVerifyInstruction(v))}</code>
+        <button class="btn btn-primary btn-sm" onclick="verifyModalCopy('ai')">Copy the message</button>
+        <div style="font-size:13px;font-weight:700;margin:14px 0 4px">2. When your app is published again, press Verify, then start the test again</div>
+        <button class="btn btn-primary btn-sm" onclick="verifyModalCheck()" ${m.busy ? 'disabled' : ''}>${m.busy ? '<span class="loader"></span> Checking…' : 'Verify'}</button>
+        ${m.msg ? `<p style="font-size:12px;color:#f59e0b;margin:8px 0 0;line-height:1.6">${escapeHtml(m.msg)}</p>` : ''}
+        <details style="margin-top:16px">
+          <summary style="cursor:pointer;${muted}">Prefer to do it by hand?</summary>
+          <p style="${muted};margin:8px 0 4px">Add this line inside the <code>&lt;head&gt;</code> of your app's <code>index.html</code>, then publish. In Base44: dashboard → Code tab → index.html.</p>
+          <code style="${box}">${escapeHtml(v.metaTag)}</code>
+          <button class="btn btn-ghost btn-sm" onclick="verifyModalCopy('tag')">Copy the tag</button>
+          <p style="${muted};margin:12px 0 4px">Or publish a file at <code>${escapeHtml(v.filePath)}</code> containing only:</p>
+          <code style="${box}">${escapeHtml(v.fileBody)}</code>
+        </details>
+      </div>
+    </div>`;
+}
+function verifyModalCopy(what) {
+  const v = state.modal?.v; if (!v) return;
+  navigator.clipboard?.writeText(what === 'ai' ? secVerifyInstruction(v) : v.metaTag)
+    .then(() => tpToast('Copied — paste it, publish your app, then press Verify.')).catch(() => {});
+}
+async function verifyModalCheck() {
+  const m = state.modal; if (!m || m.type !== 'verify') return;
+  m.busy = true; m.msg = ''; render();
+  try {
+    const res = await fetch(`${API}/api/security/verify-site`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appId: m.v.appId }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { m.msg = data.error || `Could not verify (HTTP ${res.status}).`; return; }
+    if (data.verified) { state.modal = null; tpToast('Verified — start your test again.'); return; }
+    m.msg = data.reason === 'other_token'
+      ? 'Your app has a TestPilot tag, but with a different code. Copy the message again and ask the AI chat to replace the old tag, then publish.'
+      : data.reason === 'unreachable'
+        ? `TestPilot could not open ${m.v.origin}. Check the app is published and public, then press Verify again.`
+        : `The tag is not on ${m.v.origin} yet. Make sure the app was published after the change, wait a minute, then press Verify again.`;
+  } catch (e) { m.msg = 'Could not verify: ' + e.message; }
+  finally { m.busy = false; render(); }
+}
+(function hookUnverifiedRuns() {
+  const orig = window.fetch;
+  window.fetch = async function (input) {
+    const res = await orig.apply(this, arguments);
+    if (res.status === 403) {
+      const url = String((input && input.url) || input || '');
+      if (!url.includes('/api/security/')) {
+        res.clone().json().then((d) => {
+          if (d && d.code === 'SITE_NOT_VERIFIED' && d.verification) { state.modal = { type: 'verify', v: d.verification }; render(); }
+        }).catch(() => {});
+      }
+    }
+    return res;
+  };
+})();
 function secVerifyInstruction(v) {
   return `Add exactly this line inside the <head> of index.html, change nothing else, then publish the app: ${v.metaTag}`;
 }
@@ -4565,6 +4637,7 @@ function renderDetailStep(s) {
 }
 
 function renderModal() {
+  if (state.modal?.type === 'verify') return renderVerifyModal();
   if (state.modal?.type === 'support') {
     const sending = state.modal.sending;
     const sent = state.modal.sent;
