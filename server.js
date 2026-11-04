@@ -7070,8 +7070,15 @@ function pngDimensionsFromBase64(b64) {
 // message, so paying users couldn't tell a TestPilot bug from their own
 // billing problem — and our error-rate metric counted their billing problems
 // against the engine. Returns {friendly} for account-side failures, else null.
-function classifyConfigError(msg) {
+// key: the key the failed call used. On TestPilot's own key (free runs, One Run)
+// the failure is ours: the client is told so, and the owner is alerted.
+function classifyConfigError(msg, key) {
   const m = String(msg || '');
+  const ours = !!key && (key === process.env.ANTHROPIC_SUPPORT_KEY || key === process.env.ANTHROPIC_PAID_KEY);
+  if (ours && /credit balance is too low|invalid x-api-key|authentication_error/i.test(m)) {
+    sendAlert('own-key', 'TestPilot\'s own Claude key is failing', `Free/One Run calls on TestPilot's key fail: ${m.slice(0, 300)}\n\nTop up at console.anthropic.com → Plans & Billing (or check the key in .env).`).catch(() => {});
+    return { friendly: 'TestPilot could not run this: our own Claude account is out of credit. That is on our side, not your app, and your free test is untouched. We have been alerted; please try again a little later.' };
+  }
   if (/credit balance is too low/i.test(m)) {
     return { friendly: 'Your Anthropic API key has run out of credits. Add credits at console.anthropic.com → Plans & Billing, then re-run the test.' };
   }
@@ -10295,7 +10302,7 @@ Output structure (exact sections, max 220 words total):
     return result;
 
   } catch (e) {
-    const cfg = classifyConfigError(e.message);
+    const cfg = classifyConfigError(e.message, apiKey);
     result.status = cfg ? 'config_error' : 'error';
     result.error = cfg ? cfg.friendly : e.message;
     if (cfg) result.rawError = e.message;
@@ -10693,7 +10700,7 @@ app.post('/api/learn', watchOnboarding('crawl', (req) => ({ email: onboardingEma
     // /api/learn just never called it. The raw e.message still went into
     // failure_message above and reaches signal.js below, so diagnostics
     // aren't lost — only the user-facing text changes.
-    const cfg = classifyConfigError(e.message);
+    const cfg = classifyConfigError(e.message, effectiveApiKey);
     // A crawl that never succeeded must not keep the user's only free slot.
     await releaseFailedClaim(norm.normalized, ownerEmail);
     alertOnboardingIssue({ stage: 'crawl', email: ownerEmail, url, error: cfg ? cfg.friendly : e.message, code: e.category || 'tool_limitation', detail: cfg ? e.message : undefined });
@@ -11071,7 +11078,7 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
       await runAgentTest(testId, appKnowledge, scenario, { email, password, allowReplay: true, ownerEmail, ownerUserId, sessionState, indexedDB: savedIndexedDB, liveOffers: req.body?.liveOffers === true }, effectiveApiKey);
     } catch (e) {
       const result = testResults.get(testId);
-      const cfg = classifyConfigError(e.message);
+      const cfg = classifyConfigError(e.message, effectiveApiKey);
       if (result) {
         result.status = cfg ? 'config_error' : 'error';
         result.error = cfg ? cfg.friendly : e.message;
@@ -12533,7 +12540,7 @@ app.post('/api/test/flow', async (req, res) => {
         if (_flowDirty3) saveSessions();
       }
       const result = testResults.get(testId);
-      const cfg = classifyConfigError(e.message);
+      const cfg = classifyConfigError(e.message, effectiveApiKey);
       if (result) {
         result.status = cfg ? 'config_error' : 'error';
         result.error = cfg ? cfg.friendly : e.message;
