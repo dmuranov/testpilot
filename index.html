@@ -3352,6 +3352,56 @@ function tpRetest() {
   tpToast('Same test, ready to run again. Check the login, then press Run.');
 }
 
+// Keep watching, offered on every clean pass: TestPilot reruns this test daily
+// on the client's key and mails only when it breaks (with the fix). One click,
+// never automatic: it spends the client's key every day, so the card says what
+// it costs (this run's real cost × 30) before anything is scheduled.
+function tpKeepWatchingCard(test) {
+  const paid = !!currentUser?.plan && !['free', 'onerun'].includes(currentUser.plan);
+  if (!paid || test.status !== 'completed' || test.bugs?.length || test.type === 'flow_e2e') return '';
+  const kw = (state.keepWatching || {})[test.testId] || {};
+  const card = (inner) => `<div class="card" style="border-left:3px solid var(--accent,#c8f040)">${inner}</div>`;
+  if (kw.done) return card(`<div style="font-size:13px">👀 Watching it daily. You get an email only if it breaks, with the fix. Manage it in <a href="#" onclick="navigate('schedules');return false">Scheduled Runs</a>.</div>`);
+  // The run's cost is attached a moment after its result is first shown: fetch it once.
+  if (test.costEur == null && !kw.costFetched) { state.keepWatching = state.keepWatching || {}; state.keepWatching[test.testId] = { ...kw, costFetched: true }; setTimeout(() => tpRefreshCost(test.testId), 2500); }
+  // One click only when the run is known not to have signed in (older results do not say).
+  if (test.usedLogin !== false) return card(`<div style="font-size:13px;line-height:1.6">👀 <b>Keep watching this test?</b> ${test.usedLogin ? 'It logs in, so a daily rerun needs a saved login' : 'Set up a daily rerun (with a saved login if the test signs in)'}: do it in <a href="#" onclick="navigate('schedules');return false">Scheduled Runs</a>.</div>`);
+  const month = test.costEur ? `about €${Math.max(0.01, test.costEur * 30).toFixed(2)}/month` : 'usually €3–€15/month';
+  const cost = test.costEur ? `This run cost about €${test.costEur.toFixed(2)} on your Claude key, so daily is ${month}.` : `Daily is ${month} on your Claude key.`;
+  return card(`
+    <div style="font-size:14px;font-weight:700;margin-bottom:4px">👀 Keep watching this test?</div>
+    <div style="font-size:13px;color:var(--text-dim);line-height:1.6">TestPilot reruns it every day and emails you only when it breaks, with the fix ready to paste. ${cost} You can stop it any time.</div>
+    <div style="display:flex;gap:8px;margin-top:10px">
+      <button class="btn btn-primary btn-sm" ${kw.busy ? 'disabled' : ''} onclick="tpStartWatching()">${kw.busy ? '<span class="loader"></span> Setting up…' : 'Keep watching daily'}</button>
+    </div>
+    ${kw.err ? `<p style="font-size:12px;color:#f59e0b;margin:6px 0 0">${tpEsc(kw.err)}</p>` : ''}`);
+}
+async function tpRefreshCost(testId) {
+  try {
+    const r = await (await fetch(`${API}/api/test/${encodeURIComponent(testId)}`)).json();
+    if (r && r.costEur != null && state.currentTest?.testId === testId) { state.currentTest.costEur = r.costEur; render(); }
+  } catch (e) {}
+}
+async function tpStartWatching() {
+  const test = state.currentTest; if (!test?.testId) return;
+  if (!hasApiKey()) { tpToast('Add your Claude API key in the sidebar first'); return; }
+  state.keepWatching = state.keepWatching || {};
+  state.keepWatching[test.testId] = { busy: true };
+  render();
+  try {
+    const res = await fetch(API + '/api/schedules', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appId: test.appId, scenario: test.scenario, intervalHours: 24, apiKey: getApiKey() }),
+    });
+    const data = await res.json().catch(() => ({}));
+    state.keepWatching[test.testId] = (res.ok || data.code === 'ALREADY_SCHEDULED') ? { done: true } : { err: data.error || `Could not set it up (HTTP ${res.status}).` };
+    if (res.ok) { state.schedules = undefined; tpToast('Watching it daily. You only hear from us if it breaks.'); }
+  } catch (e) {
+    state.keepWatching[test.testId] = { err: 'Network error — try again.' };
+  }
+  render();
+}
+
 function renderTestDetail() {
   const test = state.currentTest;
   if (!test) return '<p>Test not found</p>';
@@ -3414,6 +3464,8 @@ function renderTestDetail() {
         ${s.frictionPoints.map(f => `<div style="font-family:'DM Mono',monospace;font-size:11.5px;color:var(--text-dim);padding:4px 0;border-bottom:1px solid var(--border)">Step ${f.step} took <strong style="color:#f59e0b">${(f.durationMs / 1000).toFixed(1)}s</strong>${f.intent ? ' — ' + tpEsc(f.intent) : ''}</div>`).join('')}
       </div>` : `<div style="font-size:12px;color:var(--text-muted);margin-top:10px">No steps crossed the slow-step threshold.</div>`}
     </div>` : ''}
+
+    ${tpKeepWatchingCard(test)}
 
     ${test.bugs?.length ? `
     <div class="card">

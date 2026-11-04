@@ -24,6 +24,7 @@ import { randomUUID, createHash, timingSafeEqual, createCipheriv, createDecipher
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'node:os';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import net from 'node:net';
 import nodemailer from 'nodemailer';
 import Stripe from 'stripe';
@@ -645,15 +646,20 @@ function getClient(apiKey) {
   // analysis calls — every call site that uses getClient) flows through the
   // same daily-budget tally. Saves having to add a one-liner to each of the
   // 7+ call sites and saves missing new ones added later.
-  const client = (apiKey && apiKey === process.env.ANTHROPIC_SUPPORT_KEY)
-    ? wrapClientWithFreeSpendTally(raw)
-    : raw;
+  const client = wrapClientWithUsageTally(raw, apiKey === process.env.ANTHROPIC_SUPPORT_KEY);
   clientCache.set(apiKey, client);
   setTimeout(() => clientCache.delete(apiKey), 1_800_000);
   return client;
 }
 
-function wrapClientWithFreeSpendTally(client) {
+// The run (if any) the current async call chain belongs to: { weighted }.
+// runWithOurSideRetry opens it, so every Claude call a run makes, on any key,
+// is summed into that run's cost (result.costEur).
+const runUsage = new AsyncLocalStorage();
+// Counts every messages.create: into the free monthly budget only for
+// TestPilot's support key (isSupportKey must be passed), and into the current
+// run's cost whatever the key.
+function wrapClientWithUsageTally(client, isSupportKey = false) {
   const wrappedMessages = new Proxy(client.messages, {
     get(target, prop, receiver) {
       if (prop === 'create') {
@@ -665,7 +671,9 @@ function wrapClientWithFreeSpendTally(client) {
               + (usage.cache_creation_input_tokens || 0) * 1.25
               + (usage.cache_read_input_tokens || 0) * 0.1
               + (usage.output_tokens || 0) * 5;
-            recordFreeSpend(weighted);
+            if (isSupportKey) recordFreeSpend(weighted);
+            const run = runUsage.getStore();
+            if (run) run.weighted += weighted;
           }
           return response;
         };
@@ -7160,6 +7168,18 @@ async function ourMissesDigest() {
 // run(quietError) starts one attempt. The first attempt is quiet so a failure
 // on our side can be retried before the client's stream sees any error.
 async function runWithOurSideRetry(testId, appId, owner, run) {
+  const usage = { weighted: 0 };
+  try { return await runUsage.run(usage, () => runWithOurSideRetryInner(testId, appId, owner, run)); }
+  finally {
+    const r = testResults.get(testId);
+    if (r) {
+      r.weightedTokens = Math.round(usage.weighted);
+      r.costEur = Number(freeSpendEurEstimate(usage.weighted).toFixed(3));
+      await saveTestResult(testId, r).catch(() => {});   // runAgentTest saved before the cost was known
+    }
+  }
+}
+async function runWithOurSideRetryInner(testId, appId, owner, run) {
   const attempt = async () => {
     try { const r = await run(true); return { r, err: r?.status === 'error' ? r.error : null }; }
     catch (e) { return { thrown: e, err: e.message }; }
@@ -7178,6 +7198,7 @@ async function runWithOurSideRetry(testId, appId, owner, run) {
   if (kind === 'transient' && untouched) {
     recordOurFailure({ testId, appId, owner, error: first.err, retried: true });
     emitStep(testId, { type: 'info', message: '🔁 TestPilot hit a hiccup on our side (not your app). Starting again with a fresh browser…' });
+    { const u = runUsage.getStore(); if (u) u.weighted = 0; }   // the cost shown is the run's, not the failed attempt's
     { const r = testResults.get(testId); if (r) { r.status = 'starting'; r.error = undefined; } }
     last = await attempt();
     if (last.err == null || !ourSideKind(last.err)) {
@@ -7757,6 +7778,9 @@ async function runAgentTest(testId, appKnowledge, scenario, credentials, apiKey)
     // queue delay + this overwrite of any placeholder row — used by #2 authz.
     userEmail: credentials?.ownerEmail || null,
     userId: credentials?.ownerUserId || null,
+    // The run signed in (typed login or a session). A schedule cannot reuse a
+    // typed login, so the dashboard offers one-click Keep watching only without.
+    usedLogin: !!(credentials?.email || credentials?.sessionState),
     steps: [],
     // `bugs` = CONFIRMED app defects only (high-confidence app_bug). It is what
     // every downstream consumer counts as "defects found". `findings` = the
@@ -17139,6 +17163,10 @@ app.post('/api/schedules', async (req, res) => {
     if (!ss.ok) return res.status(400).json({ error: ss.error, code: 'SESSION_STATE_INVALID' });
     if (ss.sessionState) { try { sessionStateEnc = encryptSecret(JSON.stringify(ss.sessionState)); } catch {} }
   }
+
+  const sameTest = [...schedules.values()].find((x) => x.active && x.appId === appId && x.scenario === String(scenario).slice(0, 2000)
+    && canonicalEmail(x.ownerEmail) === canonicalEmail(ownerEmail));
+  if (sameTest) return res.status(409).json({ error: 'This test is already being watched. Manage it in Scheduled Runs.', code: 'ALREADY_SCHEDULED', schedule: publicSchedule(sameTest) });
 
   const id = 'sch_' + randomBytes(9).toString('hex');
   const rec = {
