@@ -67,6 +67,7 @@
 <div class="reply"><div class="reply-in" id="reply"></div></div>
 
 <script src="/attrib.js"></script>
+<script src="/live-login.js"></script>
 <!-- data-stall-ms: the test stream can legitimately go ~100s between events
      (runAgentTest step timeout), well past signal.js's 90s default. -->
 <script src="/signal.js" defer data-stall-ms="180000"></script>
@@ -84,6 +85,37 @@ const $chat = document.getElementById('chat');
 const $reply = document.getElementById('reply');
 const esc = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+// Login help during a crawl or a test (live-login.js): the code prompt lands
+// at the bottom of the chat, the takeover opens over the page. True when ev
+// was one of those events.
+const liveIds = new Set();
+// The run ended: nothing may stay over the chat (an open takeover, an
+// unanswered offer) and an unanswered code box can no longer be used.
+function endLive() {
+  for (const id of liveIds) {
+    try { closeLiveOverlay(id); } catch (e) {}
+    const box = document.getElementById('twofa-prompt-' + id);
+    if (box && box.querySelector('input')) box.innerHTML = '<div class="muted">This code request has ended.</div>';
+  }
+  liveIds.clear();
+}
+function liveEvent(ev, runId) {
+  const id = ev.runId || runId;
+  if (!id) return false;
+  if (ev.type === 'awaiting_2fa') {
+    liveIds.add(id);
+    document.getElementById('tp-live-host')?.removeAttribute('id');
+    const host = document.createElement('div'); host.id = 'tp-live-host';
+    $chat.appendChild(host);
+    show2faPrompt(id, ev.message);
+    host.scrollIntoView({ block: 'end' });
+    return true;
+  }
+  if (ev.type === 'awaiting_oauth_handoff') { liveIds.add(id); showOAuthHandoffPrompt(id, ev.message, ev.hostname, ev.offerId); return true; }
+  if (ev.type === 'live_view_ready') { openLiveView(id, ev.hostname, ev.offerId); return true; }
+  if (ev.type === 'live_frame') { renderLiveFrame(id, ev.data); return true; }
+  return false;
+}
 function say(html, cls) {
   const d = document.createElement('div');
   d.className = 'msg tp' + (cls ? ' ' + cls : '');
@@ -252,7 +284,7 @@ async function learn() {
   const bubble = say('<p>Looking around your app to see what\'s there…</p><p class="live" id="learn-live">starting</p>');
   const live = bubble.querySelector('#learn-live');
   try {
-    const res = await fetch('/api/learn', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: st.url, userEmail: st.email, email: st.appEmail || '', password: st.appPw || '', freeLearn: true }) });
+    const res = await fetch('/api/learn', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: st.url, userEmail: st.email, email: st.appEmail || '', password: st.appPw || '', freeLearn: true, liveOffers: true }) });
     if (!res.ok) { const d = await res.json().catch(() => ({})); return learnFailed(d.error || 'The crawl did not start.', null); }
     const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = '';
     while (true) {
@@ -264,12 +296,14 @@ async function learn() {
         if (!line.startsWith('data: ')) continue;
         let ev; try { ev = JSON.parse(line.slice(6)); } catch { continue; }
         if (ev.appId) st.appId = ev.appId;
+        if (liveEvent(ev, st.appId)) continue;
         if (ev.message && live) live.textContent = String(ev.message).slice(0, 140);
         if (ev.phase === 'error') {
+          endLive();
           try { window.tpReportSignal && window.tpReportSignal({ type: 'stream_error', name: ev.category || 'unknown', message: ev.message, path: '/api/learn' }); } catch (e) {}
           return learnFailed(ev.message, ev.next);
         }
-        if (ev.phase === 'done') { if (live) live.textContent = 'done'; step('learned'); return suggest(); }
+        if (ev.phase === 'done') { endLive(); if (live) live.textContent = 'done'; step('learned'); return suggest(); }
       }
     }
     if (st.appId) return suggest();
@@ -338,7 +372,7 @@ async function run(scenario) {
   setReply('<div class="muted">Testing… usually two to four minutes. You can leave this tab open.</div>');
   try {
     // Not retried on purpose: a second POST could spend the free run twice.
-    const { res, data } = await postJson('/api/test', { appId: st.appId, scenario, email: st.appEmail, password: st.appPw, freeRun: true, userEmail: st.email });
+    const { res, data } = await postJson('/api/test', { appId: st.appId, scenario, email: st.appEmail, password: st.appPw, freeRun: true, userEmail: st.email, liveOffers: true });
     if (!res.ok || !data.testId) {
       if (data.code === 'SITE_NOT_VERIFIED') { say('<p>I need the ownership check again for this address.</p>', 'err'); return askVerify(); }
       say(`<p>${esc(data.error || 'The test did not start.')}</p>`, 'err');
@@ -351,15 +385,23 @@ async function run(scenario) {
 }
 function stream(testId, live) {
   let finished = false;
-  const finish = () => { if (finished) return; finished = true; setTimeout(() => report(testId), 700); };
+  const finish = () => { if (finished) return; finished = true; endLive(); setTimeout(() => report(testId), 700); };
   const es = new EventSource('/api/test/' + testId + '/stream');
   es.onmessage = (e) => {
     let ev; try { ev = JSON.parse(e.data); } catch { return; }
     if (ev.type === 'heartbeat') return;
+    if (liveEvent(ev, testId)) return;
     if (ev.message && live) live.textContent = String(ev.message).slice(0, 140);
     if (ev.type === 'summary' || ev.type === 'done' || ev.type === 'complete' || ev.type === 'error') { es.close(); finish(); }   // an error ends the run too: the report reads it from the result
   };
-  es.onerror = () => { es.close(); finish(); };
+  es.onerror = async () => {
+    if (finished) return;
+    try {
+      const r = await (await fetch('/api/test/' + testId)).json();
+      if (['running', 'starting', 'queued'].includes(r.status)) return;   // still alive: EventSource reconnects
+    } catch (e) {}
+    es.close(); finish();
+  };
 }
 
 // ── 9. report + taster fix ────────────────────────────────

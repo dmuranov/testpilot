@@ -5266,7 +5266,9 @@ async function crawlApp(appId, url, credentials, description, apiKey, onProgress
       // announcing "Logging in…" for an app the user declared public reads
       // like the crawler ignored them.
       if (credentials?.email) onProgress?.({ phase: 'login', message: 'Logging in...' });
-      loginResult = await visionLogin(page, credentials, apiKey, { runId: appId, emit: onProgress, offerOnRejection: navOpts.offerOnRejection === true });
+      // A random run id, never the app id: /api/2fa and /api/live-view take the
+      // run id as their only key, and an app id can be guessed from its URL.
+      loginResult = await visionLogin(page, credentials, apiKey, { runId: 'crawl-' + randomUUID(), emit: onProgress, offerOnRejection: navOpts.offerOnRejection === true });
     }
     appKnowledge.loginFlow = loginResult;
     if (!loginResult.success) {
