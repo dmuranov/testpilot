@@ -4381,6 +4381,7 @@ function renderVerifyModal() {
           <button onclick="closeModal()" style="background:none;border:none;color:var(--text-muted);font-size:20px;cursor:pointer">×</button>
         </div>
         <p style="${muted};margin:0 0 12px">TestPilot only tests apps their owner has verified. It is a one-time step per app.</p>
+        ${v.folder ? `<p style="font-size:13px;line-height:1.6;margin:0 0 12px">Your app is in the folder <code>${escapeHtml(v.folder)}</code>: publish a file at <code>${escapeHtml(v.filePath)}</code> containing only <code>${escapeHtml(v.fileBody)}</code>, then press Verify. The tag in step 1 only works for apps at the root of their address.</p>` : ''}
         <div style="font-size:13px;font-weight:700;margin-bottom:4px">1. Paste this into your app's AI chat (Lovable, Bolt, Base44…)</div>
         <code style="${box}">${escapeHtml(secVerifyInstruction(v))}</code>
         <button class="btn btn-primary btn-sm" onclick="verifyModalCopy('ai')">Copy the message</button>

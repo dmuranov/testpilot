@@ -193,8 +193,12 @@ async function askVerify() {
     if (data.verified) { say(`<p>${esc(data.origin)} is already verified as yours. 👍</p>`); step('verified', 'already'); return askLogin(); }
     step('verify_shown');
     const own = st.platform === 'other';
-    say(`<p>Before I test, I need to know <b>${esc(data.origin)}</b> is yours. I only test apps their owner has verified. It's a one-time step.</p>
-      ${own
+    say(`<p>Before I test, I need to know <b>${esc(data.origin + (data.folder || ''))}</b> is yours. I only test apps their owner has verified. It's a one-time step.</p>
+      ${data.folder
+        ? `<p>Your app is in the folder <code>${esc(data.folder)}</code>, so the proof goes there: publish a file at <code>${esc(data.filePath)}</code> containing only:</p><code class="box">${esc(data.fileBody)}</code>
+           <button class="ghost" onclick="copy(st.verification.fileBody,this)">Copy the code</button>
+           <p class="muted">A file named <code>${esc(data.filePath.split('/').pop())}</code> next to your app's index.html.</p>`
+        : own
         ? `<p>Add this line inside the <code>&lt;head&gt;</code> of your <code>index.html</code>, then publish:</p><code class="box">${esc(data.metaTag)}</code>
            <button class="ghost" onclick="copy(st.verification.metaTag,this)">Copy the tag</button>
            <p class="muted">Or publish a file at <code>${esc(data.filePath)}</code> containing only <code>${esc(data.fileBody)}</code>.</p>`
