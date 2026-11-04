@@ -7070,6 +7070,59 @@ function pngDimensionsFromBase64(b64) {
 // message, so paying users couldn't tell a TestPilot bug from their own
 // billing problem — and our error-rate metric counted their billing problems
 // against the engine. Returns {friendly} for account-side failures, else null.
+// ── Failures on our side ──────────────────────────────────────
+// A run that broke because of TestPilot (our browser died, the Claude API was
+// overloaded or 5xx, a network blip on our end, a bug in our own code) is never
+// the client's bug: it is retried once with a fresh browser, logged to
+// OUR_FAILURES_FILE, and the same failure on 3+ apps in 24h alerts the owner.
+// Errors from the client's app or setup (unreachable site, login refused, their
+// key) do not match and are reported as before.
+const OUR_SIDE_RE = /overloaded|api_error|ECONNRESET|ETIMEDOUT|EPIPE|socket hang up|fetch failed|Target (page, context or browser|closed)|browser has (been closed|disconnected)|Protocol error|browserType\.launch|low memory|ERR_INSUFFICIENT_RESOURCES|is not a function|Cannot read properties of|is not defined/i;
+function isOurSideError(msg) { return OUR_SIDE_RE.test(String(msg || '')); }
+const OUR_FAILURES_FILE = './our-failures.jsonl';
+const OUR_SIDE_MESSAGE = 'This run hit a problem on TestPilot\'s side, not in your app. It was not counted against you and we have logged it to fix. Please try again in a few minutes.';
+const ourFailureApps = new Map();   // signature → Map(appId → last seen ms)
+function recordOurFailure({ testId, appId, owner, error, retried }) {
+  const msg = String(error || '');
+  const sig = msg.replace(/https?:\/\/\S+/g, '<url>').replace(/\d+/g, 'N').slice(0, 90);
+  fs.appendFile(OUR_FAILURES_FILE, JSON.stringify({ at: new Date().toISOString(), testId, appId, owner, sig, error: msg.slice(0, 500), retried }) + '\n').catch(() => {});
+  console.warn('[our-failure]', sig, 'app=' + appId, retried ? '(retrying)' : '(final)');
+  const now = Date.now();
+  const apps = ourFailureApps.get(sig) || new Map();
+  for (const [a, t] of apps) if (now - t > 24 * 3600_000) apps.delete(a);
+  apps.set(appId, now);
+  ourFailureApps.set(sig, apps);
+  if (apps.size >= 3) sendAlert('our-failure:' + sig.slice(0, 40), `same TestPilot failure on ${apps.size} apps in 24h`,
+    `Signature: ${sig}\nApps: ${[...apps.keys()].join(', ')}\nLast error: ${msg.slice(0, 400)}\n\nFull log: ${OUR_FAILURES_FILE} on the box.`).catch(() => {});
+}
+// run(quietError) starts one attempt. The first attempt is quiet so a failure
+// on our side can be retried before the client's stream sees any error.
+async function runWithOurSideRetry(testId, appId, owner, run) {
+  const attempt = async () => {
+    try { const r = await run(true); return { r, err: r?.status === 'error' ? r.error : null }; }
+    catch (e) { return { thrown: e, err: e.message }; }
+  };
+  // What the quiet attempt kept back: a config error's message, or an error that is not ours.
+  const surface = (a) => {
+    if (a.thrown) throw a.thrown;   // the caller's catch reports a throw as before
+    if (a.r?.status === 'config_error') emitStep(testId, { type: 'error', message: a.r.error });
+    else if (a.err != null) emitStep(testId, { type: 'error', message: `Test error: ${a.err}` });
+    return a.r;
+  };
+  const first = await attempt();
+  if (first.err == null || !isOurSideError(first.err)) return surface(first);
+  recordOurFailure({ testId, appId, owner, error: first.err, retried: true });
+  emitStep(testId, { type: 'info', message: '🔁 TestPilot hit a hiccup on our side (not your app). Starting again with a fresh browser…' });
+  { const r = testResults.get(testId); if (r) { r.status = 'starting'; r.error = undefined; } }
+  const second = await attempt();
+  if (second.err == null || !isOurSideError(second.err)) return surface(second);
+  recordOurFailure({ testId, appId, owner, error: second.err, retried: false });
+  const res = testResults.get(testId);
+  if (res) { res.status = 'error'; res.rawError = second.err; res.error = OUR_SIDE_MESSAGE; res.ourSide = true; res.completedAt = new Date().toISOString(); }
+  emitStep(testId, { type: 'error', message: OUR_SIDE_MESSAGE });
+  return res;
+}
+
 // key: the key the failed call used. On TestPilot's own key (free runs, One Run)
 // the failure is ours: the client is told so, and the owner is alerted.
 function classifyConfigError(msg, key) {
@@ -10307,7 +10360,9 @@ Output structure (exact sections, max 220 words total):
     result.error = cfg ? cfg.friendly : e.message;
     if (cfg) result.rawError = e.message;
     result.completedAt = new Date().toISOString();
-    emitStep(testId, { type: 'error', message: cfg ? cfg.friendly : `Test error: ${e.message}` });
+    // quietError: the caller may retry a failure on our side, so it decides
+    // whether (and what) the client sees; the stream's first error ends the run.
+    if (!credentials?.quietError) emitStep(testId, { type: 'error', message: cfg ? cfg.friendly : `Test error: ${e.message}` });
     return result;
   } finally {
     if (heartbeat) clearInterval(heartbeat);
@@ -11075,7 +11130,9 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
     { const _r = testResults.get(testId); if (_r && _r.status === 'queued') _r.status = 'starting'; }
     if (willQueue) emitStep(testId, { type: 'info', message: '▶ A runner just freed up — starting your scan now…' });
     try {
-      await runAgentTest(testId, appKnowledge, scenario, { email, password, allowReplay: true, ownerEmail, ownerUserId, sessionState, indexedDB: savedIndexedDB, liveOffers: req.body?.liveOffers === true }, effectiveApiKey);
+      const creds = { email, password, allowReplay: true, ownerEmail, ownerUserId, sessionState, indexedDB: savedIndexedDB, liveOffers: req.body?.liveOffers === true };
+      await runWithOurSideRetry(testId, appId, ownerEmail,
+        (quietError) => runAgentTest(testId, appKnowledge, scenario, { ...creds, quietError }, effectiveApiKey));
     } catch (e) {
       const result = testResults.get(testId);
       const cfg = classifyConfigError(e.message, effectiveApiKey);
