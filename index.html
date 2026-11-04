@@ -5224,9 +5224,6 @@ async function startLearn(opts = {}) {
   render();
 }
 
-// 2FA / one-time-code prompt — shown when a run pauses at a verification step.
-// Self-contained (appends its own DOM, no render() dependency) so it survives
-// while the server is blocked waiting for the code. Reused by learn + test.
 // The verification-code prompt and the live browser takeover live in
 // /live-login.js (shared with the chat first-run).
 

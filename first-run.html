@@ -88,18 +88,30 @@ const esc = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, (c) => ({ '&':
 // Login help during a crawl or a test (live-login.js): the code prompt lands
 // at the bottom of the chat, the takeover opens over the page. True when ev
 // was one of those events.
+const liveIds = new Set();
+// The run ended: nothing may stay over the chat (an open takeover, an
+// unanswered offer) and an unanswered code box can no longer be used.
+function endLive() {
+  for (const id of liveIds) {
+    try { closeLiveOverlay(id); } catch (e) {}
+    const box = document.getElementById('twofa-prompt-' + id);
+    if (box && box.querySelector('input')) box.innerHTML = '<div class="muted">This code request has ended.</div>';
+  }
+  liveIds.clear();
+}
 function liveEvent(ev, runId) {
   const id = ev.runId || runId;
   if (!id) return false;
   if (ev.type === 'awaiting_2fa') {
-    let host = document.getElementById('tp-live-host');
-    if (!host) { host = document.createElement('div'); host.id = 'tp-live-host'; }
+    liveIds.add(id);
+    document.getElementById('tp-live-host')?.removeAttribute('id');
+    const host = document.createElement('div'); host.id = 'tp-live-host';
     $chat.appendChild(host);
     show2faPrompt(id, ev.message);
     host.scrollIntoView({ block: 'end' });
     return true;
   }
-  if (ev.type === 'awaiting_oauth_handoff') { showOAuthHandoffPrompt(id, ev.message, ev.hostname, ev.offerId); return true; }
+  if (ev.type === 'awaiting_oauth_handoff') { liveIds.add(id); showOAuthHandoffPrompt(id, ev.message, ev.hostname, ev.offerId); return true; }
   if (ev.type === 'live_view_ready') { openLiveView(id, ev.hostname, ev.offerId); return true; }
   if (ev.type === 'live_frame') { renderLiveFrame(id, ev.data); return true; }
   return false;
@@ -287,10 +299,11 @@ async function learn() {
         if (liveEvent(ev, st.appId)) continue;
         if (ev.message && live) live.textContent = String(ev.message).slice(0, 140);
         if (ev.phase === 'error') {
+          endLive();
           try { window.tpReportSignal && window.tpReportSignal({ type: 'stream_error', name: ev.category || 'unknown', message: ev.message, path: '/api/learn' }); } catch (e) {}
           return learnFailed(ev.message, ev.next);
         }
-        if (ev.phase === 'done') { if (live) live.textContent = 'done'; step('learned'); return suggest(); }
+        if (ev.phase === 'done') { endLive(); if (live) live.textContent = 'done'; step('learned'); return suggest(); }
       }
     }
     if (st.appId) return suggest();
@@ -372,7 +385,7 @@ async function run(scenario) {
 }
 function stream(testId, live) {
   let finished = false;
-  const finish = () => { if (finished) return; finished = true; setTimeout(() => report(testId), 700); };
+  const finish = () => { if (finished) return; finished = true; endLive(); setTimeout(() => report(testId), 700); };
   const es = new EventSource('/api/test/' + testId + '/stream');
   es.onmessage = (e) => {
     let ev; try { ev = JSON.parse(e.data); } catch { return; }
@@ -381,7 +394,14 @@ function stream(testId, live) {
     if (ev.message && live) live.textContent = String(ev.message).slice(0, 140);
     if (ev.type === 'summary' || ev.type === 'done' || ev.type === 'complete' || ev.type === 'error') { es.close(); finish(); }   // an error ends the run too: the report reads it from the result
   };
-  es.onerror = () => { es.close(); finish(); };
+  es.onerror = async () => {
+    if (finished) return;
+    try {
+      const r = await (await fetch('/api/test/' + testId)).json();
+      if (['running', 'starting', 'queued'].includes(r.status)) return;   // still alive: EventSource reconnects
+    } catch (e) {}
+    es.close(); finish();
+  };
 }
 
 // ── 9. report + taster fix ────────────────────────────────

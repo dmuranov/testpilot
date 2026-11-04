@@ -3,16 +3,20 @@
 // the live browser takeover (awaiting_oauth_handoff → live_view_ready → live_frame).
 // A page that wants the code prompt somewhere specific gives that element
 // id="tp-live-host".
-function tpLiveEsc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function tpLiveEsc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
 
 function show2faPrompt(runId, message) {
-  if (!runId || document.getElementById('twofa-prompt-' + runId)) return;
+  if (!runId) return;
+  // A box still waiting for a code stays; one already answered is replaced, so
+  // a second code request on the same run (a retried login) gets a new input.
+  const prev = document.getElementById('twofa-prompt-' + runId);
+  if (prev) { if (prev.querySelector('input')) return; prev.remove(); }
   const host = document.getElementById('tp-live-host') || document.getElementById('learn-stream') || document.getElementById('test-stream') || document.getElementById('sec-stream') || document.body;
   const box = document.createElement('div');
   box.id = 'twofa-prompt-' + runId;
   box.style.cssText = 'margin:12px 0;padding:14px;border:1px solid var(--accent,#6c5ce7);border-radius:8px;background:rgba(108,92,231,0.08)';
   box.innerHTML = `
-    <div style="font-weight:600;margin-bottom:8px">🔐 ${message || 'Enter the verification code sent to your inbox'}</div>
+    <div style="font-weight:600;margin-bottom:8px">🔐 ${tpLiveEsc(message || 'Enter the verification code sent to your inbox')}</div>
     <div style="display:flex;gap:8px;align-items:center">
       <input id="twofa-input-${runId}" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="123456"
         style="flex:1;padding:9px;border:1px solid #ccc;border-radius:6px;font-family:monospace;letter-spacing:2px" />
@@ -118,10 +122,10 @@ function showOAuthHandoffPrompt(runId, message, hostname, offerId) {
   const badge = hostname ? `<div style="display:inline-block;font-family:'DM Mono',monospace;font-size:11px;color:var(--accent,#6c5ce7);background:rgba(108,92,231,0.12);border-radius:4px;padding:2px 8px;margin-bottom:8px">${tpLiveEsc(hostname)}</div>` : '';
   box.innerHTML = `
     ${badge}
-    <div style="font-weight:600;margin-bottom:10px">🔑 ${message || 'Login failed — this app may need Google sign-in'}</div>
+    <div style="font-weight:600;margin-bottom:10px">🔑 ${tpLiveEsc(message || 'Login failed — this app may need Google sign-in')}</div>
     <div style="display:flex;gap:8px">
       <button id="oauth-take-${runId}" class="btn btn-primary">Take over &amp; log in myself</button>
-      <button id="oauth-skip-${runId}" class="btn btn-ghost">Skip</button>
+      <button id="oauth-skip-${runId}" class="btn btn-ghost ghost">Skip</button>
     </div>`;
   getLiveOverlayHost().appendChild(box);
   box.scrollIntoView({ block: 'center' });
@@ -166,7 +170,7 @@ function openLiveView(runId, hostname, offerId) {
     ${badge}
     <div style="font-weight:600;margin-bottom:8px">🔑 Log in yourself below, then click Done.</div>
     <canvas id="live-canvas-${runId}" width="${LIVE_VIEW_W}" height="${LIVE_VIEW_H}" tabindex="0"
-      style="width:100%;max-width:${LIVE_VIEW_W}px;border:1px solid var(--border);border-radius:4px;cursor:pointer;outline:none;background:#000"></canvas>
+      style="width:100%;max-width:${LIVE_VIEW_W}px;border:1px solid var(--border,#333);border-radius:4px;cursor:pointer;outline:none;background:#000"></canvas>
     <div style="display:flex;gap:8px;margin-top:10px">
       <button id="oauth-done-${runId}" class="btn btn-primary">Done — I'm logged in</button>
     </div>`;
