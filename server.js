@@ -14396,6 +14396,36 @@ app.post('/api/support/ask', async (req, res) => {
 // taster, on the support key; the €15 plan gets every one, on the client's key.
 // One prompt per problem is cached on the run, so asking again costs nothing.
 const FIX_PLATFORMS = { base44: 'Base44', lovable: 'Lovable', bolt: 'Bolt', replit: 'Replit', v0: 'v0', other: 'their AI app builder' };
+// Writes (and caches on the run) the fix prompt for problem #index of a run.
+// Throws when Claude fails; the callers decide what the client hears.
+async function writeFixPrompt(result, index, platform, key) {
+  result.fixPrompts = result.fixPrompts || {};
+  if (result.fixPrompts[index]) return result.fixPrompts[index];
+  const bug = (result.bugs || [])[index];
+  if (!bug) throw new Error('no such problem');
+  const app = platformMaps.get(result.appId);
+  const steps = (result.steps || []).filter((st) => !bug.step || st.step <= bug.step).slice(-8)
+    .map((st) => `step ${st.step}: ${String(st.action || '').slice(0, 120)} → ${String(st.outcome || '').slice(0, 160)}`);
+  const facts = [
+    `App: ${app?.url || ''}`,
+    `What the test was doing: ${String(result.scenario || '').split(/\(\s*(?:Repeatable run|Read-only run):/)[0].trim().slice(0, 600)}`,
+    `Problem: ${String(bug.description || bug).slice(0, 600)}`,
+    bug.expected ? `Expected: ${String(bug.expected).slice(0, 300)}` : '',
+    bug.actual ? `Actually happened: ${String(bug.actual).slice(0, 300)}` : '',
+    bug.url || bug.page ? `Page: ${String(bug.url || bug.page).slice(0, 200)}` : '',
+    steps.length ? 'Steps before it:\n' + steps.join('\n') : '',
+  ].filter(Boolean).join('\n');
+  const r = await getClient(key).messages.create({
+    model: 'claude-sonnet-5',
+    max_tokens: 500,
+    system: `You write ONE message that the owner of a web app pastes into the AI chat of ${platform}, the tool they built the app with, so that AI fixes one problem an automated tester found. You only saw the app from the outside, like a user; the builder's AI sees the code. So: say where it happens (page, button, form), what a user does, what should happen and what happens instead, in plain words. Never guess at code, file names or causes you did not see. Ask it to fix only this and not change the design or anything else. Under 120 words. Output only the message, no preamble, no quotes.`,
+    messages: [{ role: 'user', content: facts }],
+  });
+  const prompt = (r.content || []).map((c) => c.text || '').join('').trim();
+  if (!prompt) throw new Error('empty reply');
+  result.fixPrompts[index] = prompt;
+  return prompt;
+}
 app.post('/api/fix-prompt', async (req, res) => {
   const user = requireUser(req, res);
   if (!user) return;
@@ -14423,29 +14453,8 @@ app.post('/api/fix-prompt', async (req, res) => {
     if (!key) return res.status(400).json({ error: 'Add your Claude API key in the dashboard to get fix prompts.', code: 'API_KEY_REQUIRED' });
   }
 
-  const app = platformMaps.get(result.appId);
-  const steps = (result.steps || []).filter((st) => !bug.step || st.step <= bug.step).slice(-8)
-    .map((st) => `step ${st.step}: ${String(st.action || '').slice(0, 120)} → ${String(st.outcome || '').slice(0, 160)}`);
-  const facts = [
-    `App: ${app?.url || ''}`,
-    `What the test was doing: ${String(result.scenario || '').split(/\(\s*(?:Repeatable run|Read-only run):/)[0].trim().slice(0, 600)}`,
-    `Problem: ${String(bug.description || bug).slice(0, 600)}`,
-    bug.expected ? `Expected: ${String(bug.expected).slice(0, 300)}` : '',
-    bug.actual ? `Actually happened: ${String(bug.actual).slice(0, 300)}` : '',
-    bug.url || bug.page ? `Page: ${String(bug.url || bug.page).slice(0, 200)}` : '',
-    steps.length ? 'Steps before it:\n' + steps.join('\n') : '',
-  ].filter(Boolean).join('\n');
   try {
-    const client = getClient(key);
-    const r = await client.messages.create({
-      model: 'claude-sonnet-5',
-      max_tokens: 500,
-      system: `You write ONE message that the owner of a web app pastes into the AI chat of ${platform}, the tool they built the app with, so that AI fixes one problem an automated tester found. You only saw the app from the outside, like a user; the builder's AI sees the code. So: say where it happens (page, button, form), what a user does, what should happen and what happens instead, in plain words. Never guess at code, file names or causes you did not see. Ask it to fix only this and not change the design or anything else. Under 120 words. Output only the message, no preamble, no quotes.`,
-      messages: [{ role: 'user', content: facts }],
-    });
-    const prompt = (r.content || []).map((c) => c.text || '').join('').trim();
-    if (!prompt) throw new Error('empty reply');
-    result.fixPrompts[index] = prompt;
+    const prompt = await writeFixPrompt(result, index, platform, key);
     console.log('[fix-prompt]', canonicalEmail(user.email), 'test=' + testId, 'problem=' + index, free ? 'free' : 'paid', platform);
     res.json({ prompt, index });
   } catch (e) {
@@ -16986,12 +16995,38 @@ async function runSchedule(s) {
   if (regressed) { s.lastRegressionAt = s.lastRunAt; s.lastRegressionTestId = testId; }
   saveSchedules();
 
-  if (regressed) await sendRegressionAlert(s, prev, curr, result);
+  if (regressed) await sendRegressionAlert(s, prev, curr, result, apiKey);
 }
 
-async function sendRegressionAlert(s, prev, curr, result) {
+// The fix for each bug the run found, ready to paste into the client's builder
+// AI, written on the key the run used: every problem (up to 3) on the client's
+// own key, the first one on TestPilot's key (free schedules). '' when none.
+async function regressionFixText(s, result, apiKey) {
+  const bugs = result?.bugs || [];
+  const ownKey = !!apiKey && apiKey !== process.env.ANTHROPIC_SUPPORT_KEY;
+  const count = Math.min(bugs.length, ownKey || isSuperAdmin(s.ownerEmail) ? 3 : 1);
+  if (!count || !apiKey || (!ownKey && isFreeBudgetExceeded())) return '';
+  const appMap = platformMaps.get(s.appId);
+  const platform = FIX_PLATFORMS[String(appMap?.platform || '').toLowerCase()] || FIX_PLATFORMS.other;
+  const where = platform === FIX_PLATFORMS.other ? 'your app builder' : platform;
+  const parts = [];
+  for (let i = 0; i < count; i++) {
+    try {
+      const p = await writeFixPrompt(result, i, platform, apiKey);
+      parts.push(`${i + 1}. ${String(bugs[i].description || bugs[i]).slice(0, 200)}\nPaste this into ${where}'s AI chat:\n----\n${p}\n----`);
+    } catch (e) { console.warn('[schedules] fix prompt for alert failed:', e.message); }
+  }
+  if (!parts.length) return '';
+  const left = bugs.length - parts.length;
+  const more = left > 0 ? `\n(${left} more problem${left === 1 ? '' : 's'} in the report${ownKey ? '' : ': the €15 plan gives a fix for every one'}.)` : '';
+  return `\nHow to fix it:\n\n${parts.join('\n\n')}${more}\n\nThen publish your app and press Retest on this test in TestPilot: ${APP_URL}/app\n`;
+}
+
+async function sendRegressionAlert(s, prev, curr, result, apiKey) {
   const to = s.alertEmail || s.ownerEmail;
   if (!to) return;
+  const appName = platformMaps.get(s.appId)?.url || s.appId;
+  const fixText = await regressionFixText(s, result, apiKey);
   const fails = (result?.steps || []).filter(x => x.status === 'fail' || x.status === 'retry').slice(0, 5)
     .map(x => `• step ${x.step}: ${x.action} — ${(x.outcome || '').slice(0, 140)}`).join('\n');
   const errLines = [
@@ -17002,9 +17037,9 @@ async function sendRegressionAlert(s, prev, curr, result) {
   const wasNow = prev
     ? `Was: ${prev.ok ? 'PASSING' : prev.status} (${prev.bugs} bugs) → Now: ${curr.ok ? 'passing' : curr.status} (${curr.bugs} bugs)`
     : `Now: ${curr.status} (${curr.bugs} bugs)`;
-  const text = `TestPilot found a regression on a scheduled run.\n\nApp: ${s.appId}\nScenario: ${s.scenario}\n${wasNow}\n\n${fails ? 'Failing steps:\n' + fails + '\n' : ''}${errLines ? '\nRuntime errors:\n' + errLines + '\n' : ''}\nTest ID: ${s.lastTestId}\nAutomated alert from your TestPilot schedule (every ${s.intervalHours}h). Delete the schedule in the app to stop these.`;
+  const text = `TestPilot found a regression on a scheduled run.\n\nApp: ${appName}\nScenario: ${s.scenario}\n${wasNow}\n\n${fails ? 'Failing steps:\n' + fails + '\n' : ''}${errLines ? '\nRuntime errors:\n' + errLines + '\n' : ''}${fixText}\nTest ID: ${s.lastTestId}\nAutomated alert from your TestPilot schedule (every ${s.intervalHours}h). Delete the schedule in the app to stop these.`;
   try {
-    await mailer({ to, subject: `⚠ TestPilot regression: ${s.appId}`, text });
+    await mailer({ to, subject: `⚠ TestPilot regression: ${appName}`, text });
     s.lastNotifiedAt = new Date().toISOString();
     saveSchedules();
   } catch (e) { console.warn('[schedules] alert email failed:', e.message); }
