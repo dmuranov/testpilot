@@ -2561,7 +2561,7 @@ if (PROD_JOBS) setInterval(async () => {
     }
     const done = users.filter(u => u.free_run_used).length;
     await mailer({ from: 'TestPilot <alerts@testpilotapp.dev>', to: ADMIN_REPLY_TO, subject: `📈 TestPilot onboarding: ${users.length} signup(s), ${done} finished first run (24h)`,
-      html: `<pre style="font-family:monospace;font-size:13px;white-space:pre-wrap">${escHtml(lines.join('\n') || 'No new signups in the last 24h.')}</pre>` });
+      html: `<pre style="font-family:monospace;font-size:13px;white-space:pre-wrap">${escHtml((lines.join('\n') || 'No new signups in the last 24h.') + await ourMissesDigest())}</pre>` });
   } catch (e) { console.warn('[onboarding] digest failed:', e.message); }
 }, 10 * 60_000);
 
@@ -7115,6 +7115,46 @@ function recordOurFailure({ testId, appId, owner, error, retried }) {
   if (apps.size >= 3) sendAlert('our-failure:' + sig, `same TestPilot failure on ${apps.size} apps in 24h`,
     `Signature: ${sig}\nApps: ${[...apps.keys()].join(', ')}\nLast error: ${msg.slice(0, 400)}\n\nFull log: ${OUR_FAILURES_FILE} on the box.`).catch(() => {});
 }
+// TestPilot limitations (a button it could not find or click, a field it could
+// not fill…) never count against the app; they are our to-do list. Each one is
+// appended to TOOL_LIMITS_FILE and summed up in the owner's daily digest.
+const TOOL_LIMITS_FILE = './tool-limitations.jsonl';
+function recordToolLimitations(result) {
+  const items = (result.findings || []).filter((f) => f.category === Category.TOOL_LIMITATION);
+  if (!items.length) return;
+  const at = new Date().toISOString();
+  fs.appendFile(TOOL_LIMITS_FILE, items.map((f) => JSON.stringify({
+    at, testId: result.testId, appId: result.appId, owner: result.userEmail || null,
+    cause: f.cause, step: f.step ?? null, description: String(f.description || '').slice(0, 300),
+  })).join('\n') + '\n').catch(() => {});
+}
+async function jsonlSince(file, sinceMs) {
+  try {
+    return (await fs.readFile(file, 'utf8')).split('\n').filter(Boolean)
+      .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+      .filter((r) => r && Date.parse(r.at) >= sinceMs);
+  } catch { return []; }
+}
+// The digest's "our own misses" block: failures on our side and limitations, last 24h.
+async function ourMissesDigest() {
+  const since = Date.now() - 24 * 3600_000;
+  const [ours, tools] = await Promise.all([jsonlSince(OUR_FAILURES_FILE, since), jsonlSince(TOOL_LIMITS_FILE, since)]);
+  const top = (rows, key, n = 3) => Object.entries(rows.reduce((m, r) => { const k = r[key] || '?'; m[k] = (m[k] || 0) + 1; return m; }, {}))
+    .sort((a, b) => b[1] - a[1]).slice(0, n).map(([k, c]) => `${k} ×${c}`).join(', ');
+  const apps = (rows) => new Set(rows.map((r) => r.appId)).size;
+  const runs = (rows) => new Set(rows.map((r) => r.testId)).size;
+  const finals = ours.filter((r) => !r.retried);
+  const lines = ['', '── TestPilot\'s own misses (24h) ──'];
+  lines.push(ours.length
+    ? `Failures on our side: ${ours.length} (${finals.length} not recovered) on ${apps(ours)} app(s). Top: ${top(ours, 'sig', 2)}`
+    : 'Failures on our side: none');
+  lines.push(tools.length
+    ? `Limitations (could not find/click/fill): ${tools.length} in ${runs(tools)} run(s) on ${apps(tools)} app(s). Top causes: ${top(tools, 'cause')}`
+    : 'Limitations: none');
+  for (const t of tools.slice(-3)) lines.push(`  e.g. ${String(t.description).slice(0, 140)} (${t.appId})`);
+  return lines.join('\n');
+}
+
 // run(quietError) starts one attempt. The first attempt is quiet so a failure
 // on our side can be retried before the client's stream sees any error.
 async function runWithOurSideRetry(testId, appId, owner, run) {
@@ -10184,6 +10224,7 @@ Then the JSON action object on the next line.`;
     // A click TestPilot refused by policy is not a retry in the user's eyes.
     const retries = result.steps.filter(s => s.status === 'retry' && !/^BLOCKED — refusing to click/.test(s.outcome || '')).length;
     const fsum = summarizeFindings(result.findings);
+    if (fsum.toolLimitations) recordToolLimitations(result);
     let bugs = fsum.bugs; // confirmed app bugs only (result.bugs already holds these) — may be reconciled to 0 below once the analysis runs
     // Did the agent actually FINISH (reach `done`)? Surface it in the summary so
     // consumers can't read a budget-exhausted/early-stop run as a clean pass just
