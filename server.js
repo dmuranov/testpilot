@@ -4120,8 +4120,14 @@ async function selectFromDropdown(page, triggerText, optionText) {
   // "Qty [Ciotola in maiolica]": one select per item (a cart line, a table row).
   // The bracket names the item; the native fast path below picks that item's select.
   const entTrigger = splitEntityTarget(triggerText);
-  if (entTrigger) { triggerText = entTrigger.base; await tagEntityContext(page); }
-  const triggerCtx = entTrigger ? entTrigger.ctx : null;
+  let triggerCtx = null;
+  if (entTrigger) {
+    triggerText = entTrigger.base;
+    await tagEntityContext(page);
+    const r = await page.evaluate(pickEntityControlInPage, { ...entTrigger, selects: true }).catch(() => ({ ok: false, items: [] }));
+    if (r.ok) triggerCtx = entTrigger.ctx;   // that item's select carries data-tp-pick
+    else if (r.items && r.items.length) return { success: false, reason: `No dropdown for "${entTrigger.ctx}". Items with one: ${r.items.map((x) => `"${x}"`).join(', ')}.` };
+  }
   // These searchable-combobox controls (radix Popover + cmdk) render their
   // trigger, search input, and options ASYNC and hydrate late — so fixed waits
   // race them. Define the selectors up front and POLL for the popover instead
@@ -4154,12 +4160,8 @@ async function selectFromDropdown(page, triggerText, optionText) {
       const toks = s => (s || '').toLowerCase().replace(/[^a-záéíóúñü\s]/gi,' ').split(/\s+/).filter(w => w && !STOP.has(w));
       const isPlaceholder = (o) => o.value === '' || /seleccion|select|choose|choisir|--|elij|elig|escog|auswäh/i.test((o.textContent||'').trim());
       let selects = [...document.querySelectorAll('select')].filter(s => !s.disabled && s.offsetParent !== null && s.options.length);
-      // A named item ("[Ciotola in maiolica]"): only that item's select(s).
-      if (ctx) {
-        const c = ctx.toLowerCase();
-        const mine = selects.filter((s) => { const t = (s.getAttribute('data-tp-ctx') || '').toLowerCase(); return t && (t.includes(c) || c.includes(t)); });
-        if (mine.length) selects = mine;
-      }
+      // A named item ("[Ciotola in maiolica]"): only the select picked for it.
+      if (ctx) { const mine = selects.filter((s) => s.hasAttribute('data-tp-pick')); if (mine.length) selects = mine; }
       if (!selects.length) return null;
       const wantToks = toks(label);
       let best = null, bestScore = -1;
@@ -4677,35 +4679,83 @@ function describeToggles(toggles) {
 // means ("Add to cart [Tagliere in ulivo]") and the click lands on that one.
 // The item is the largest ancestor that holds only this control of its kind;
 // its name is that block's heading/title, else its first line of text.
+// Returns the tagged controls [{ label, ctx, select, value }] (empty when no label
+// repeats). Each tagged element also carries data-tp-label: the label exactly as
+// capturePageKnowledge names buttons (icons stripped, then aria-label/title), so
+// the Buttons list, the bracket target and the click all agree on one name.
 async function tagEntityContext(page) {
   return page.evaluate(() => {
+    const ICON_SEL = 'mat-icon, .mat-icon, .material-icons, .material-icons-outlined, .material-symbols-outlined, svg, i[class*="fa" i], [aria-hidden="true"]';
     const visible = (el) => el.offsetParent !== null || el.getClientRects().length > 0;
-    const labelOf = (el) => (el.tagName === 'SELECT' ? '<select>' : (el.getAttribute('aria-label') || el.innerText || el.value || '').trim().replace(/\s+/g, ' ').slice(0, 60));
-    document.querySelectorAll('[data-tp-ctx]').forEach((e) => e.removeAttribute('data-tp-ctx'));
+    const textLabel = (el) => {
+      const clone = el.cloneNode(true);
+      clone.querySelectorAll(ICON_SEL).forEach((n) => n.remove());
+      const t = (clone.textContent || '').replace(/\s+/g, ' ').trim() || (el.value || '').trim();
+      return (t || (el.getAttribute('aria-label') || el.getAttribute('title') || '').trim()).slice(0, 60);
+    };
+    // Selects group by their options, so a per-row quantity select repeats but a
+    // country select and a sort select do not join it.
+    const groupKey = (el) => el.tagName === 'SELECT'
+      ? 'select:' + [...el.options].slice(0, 6).map((o) => (o.textContent || '').trim()).join('|')
+      : textLabel(el);
+    const BAD_NAME = /^[\d\s.,€$£%:+-]*$|^(new|sale|hot|nuevo|novedad|oferta|nuovo|neu)$/i;
+    const nameOf = (c, el, label) => {
+      for (const sel of ['h1,h2,h3,h4,h5,h6,[itemprop="name"],[class*="title" i],[class*="name" i]', 'strong,b,td,th,label']) {
+        for (const h of c.querySelectorAll(sel)) {
+          if (h === el || el.contains(h) || h.contains(el)) continue;
+          const t = (h.innerText || '').trim().replace(/\s+/g, ' ');
+          if (t && t !== label && t.length >= 2 && t.length <= 60 && !BAD_NAME.test(t)) return t;
+        }
+      }
+      return (c.innerText || '').split('\n').map((s) => s.trim()).find((s) => s && s !== label && s.length >= 2 && !BAD_NAME.test(s)) || '';
+    };
+    document.querySelectorAll('[data-tp-ctx]').forEach((e) => { e.removeAttribute('data-tp-ctx'); e.removeAttribute('data-tp-label'); });
     const els = [...document.querySelectorAll('button, [role="button"], a, input[type="submit"], input[type="button"], select')].filter(visible);
     const groups = new Map();
-    for (const el of els) { const l = labelOf(el); if (!l) continue; if (!groups.has(l)) groups.set(l, []); groups.get(l).push(el); }
-    let tagged = 0;
-    for (const [label, peers] of groups) {
-      if (peers.length < 2 || peers.length > 40) continue;
+    for (const el of els) { const k = groupKey(el); if (!k) continue; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(el); }
+    const out = [];
+    for (const peers of groups.values()) {
+      if (peers.length < 2 || peers.length > 60) continue;
       for (const el of peers) {
         let c = el;
         while (c.parentElement && c.parentElement !== document.body && peers.filter((p) => c.parentElement.contains(p)).length === 1) c = c.parentElement;
         if (c === el) continue;
-        const head = c.querySelector('h1,h2,h3,h4,h5,h6,[class*="title" i],[class*="name" i],strong,b,td,th');
-        let name = head && head !== el && !el.contains(head) ? head.innerText : '';
-        if (!name || name.trim() === label) name = (c.innerText || '').split('\n').map((s) => s.trim()).find((s) => s && s !== label && !/^[\d\s.,€$£%-]+$/.test(s)) || '';
-        name = name.trim().replace(/\s+/g, ' ').slice(0, 40);
-        if (name) { el.setAttribute('data-tp-ctx', name); tagged++; }
+        const isSelect = el.tagName === 'SELECT';
+        const label = isSelect ? '' : textLabel(el);
+        const name = nameOf(c, el, label).slice(0, 40);
+        if (!name) continue;
+        el.setAttribute('data-tp-ctx', name);
+        el.setAttribute('data-tp-label', label);
+        out.push({ label, ctx: name, select: isSelect, value: isSelect ? ((el.options[el.selectedIndex] || {}).text || '').trim() : '' });
       }
     }
-    return tagged;
-  }).catch(() => 0);
+    return out;
+  }).catch(() => []);
 }
-// "Add to cart [Tagliere in ulivo]" → { base: 'Add to cart', ctx: 'Tagliere in ulivo' }; null for a plain label.
+// "Add to cart [Tagliere in ulivo]" → { base: 'Add to cart', ctx: 'Tagliere in ulivo' };
+// null for a plain label. A bracket holding a count or a shortcut ("Cart [3]",
+// "Save [Ctrl+S]") is part of the label, not an item.
 function splitEntityTarget(label) {
-  const m = /^(.+?)\s*\[([^\]]+)\]\s*$/.exec(String(label || ''));
-  return m ? { base: m[1].trim(), ctx: m[2].trim() } : null;
+  const m = /^(.+?)\s*\[(.+)\]\s*$/.exec(String(label || ''));
+  if (!m) return null;
+  const ctx = m[2].trim();
+  if (/^\d+$|^(ctrl|cmd|alt|shift|⌘|⌥)\b/i.test(ctx)) return null;
+  return { base: m[1].trim(), ctx };
+}
+// Of the tagged controls with this label, the one for the named item: an exact
+// item name first, then a name that contains it, then one it contains (longest).
+// Runs in the page, so it has no access to anything above.
+function pickEntityControlInPage({ base, ctx, selects }) {
+  const norm = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const want = norm(base), wc = norm(ctx);
+  const els = [...document.querySelectorAll('[data-tp-ctx]')].filter((el) => (el.tagName === 'SELECT') === !!selects && (selects || norm(el.getAttribute('data-tp-label')) === want));
+  const score = (el) => { const c = norm(el.getAttribute('data-tp-ctx')); return c === wc ? 3e3 : c.includes(wc) ? 2e3 - c.length : wc.includes(c) ? 1e3 + c.length : -1; };
+  let best = null, bs = -1;
+  for (const el of els) { const s = score(el); if (s > bs) { bs = s; best = el; } }
+  document.querySelectorAll('[data-tp-pick]').forEach((e) => e.removeAttribute('data-tp-pick'));
+  if (!best || bs < 0) return { ok: false, items: [...new Set(els.map((el) => el.getAttribute('data-tp-ctx')))].slice(0, 12) };
+  best.setAttribute('data-tp-pick', '1');
+  return { ok: true };
 }
 
 async function clickButton(page, label, { skipEscape = false, frame = null } = {}) {
@@ -4775,28 +4825,21 @@ async function clickButton(page, label, { skipEscape = false, frame = null } = {
   const ent = splitEntityTarget(label);
   if (ent) {
     await tagEntityContext(page);
-    const hit = await page.evaluate(({ base, ctx }) => {
-      const norm = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
-      const want = norm(base), wc = norm(ctx);
-      const els = [...document.querySelectorAll('[data-tp-ctx]')].filter((el) => el.tagName !== 'SELECT');
-      const lab = (el) => norm(el.getAttribute('aria-label') || el.innerText || el.value);
-      const inItem = (el) => { const c = norm(el.getAttribute('data-tp-ctx')); return c.includes(wc) || wc.includes(c); };
-      const pick = els.find((el) => lab(el) === want && inItem(el)) || els.find((el) => lab(el).includes(want) && inItem(el));
-      document.querySelectorAll('[data-tp-pick]').forEach((e) => e.removeAttribute('data-tp-pick'));
-      if (!pick) return false;
-      pick.setAttribute('data-tp-pick', '1');
-      return true;
-    }, ent).catch(() => false);
-    if (hit) {
+    const r = await page.evaluate(pickEntityControlInPage, { ...ent, selects: false }).catch(() => ({ ok: false, items: [] }));
+    if (r.ok) {
       const loc = page.locator('[data-tp-pick]').first();
       try {
         await loc.scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => {});
         await loc.click({ timeout: 5000 });
         await page.waitForTimeout(1200);
         return { success: true, navigated: page.url() !== urlBefore, url: page.url() };
-      } catch { /* fall through to the plain label */ }
+      } catch {
+        return { success: false, reason: `"${ent.base}" for "${ent.ctx}" could not be clicked (it may be covered or disabled).` };
+      }
     }
-    label = ent.base;
+    // The label repeats but not on that item: never fall back to the first one.
+    if (r.items && r.items.length) return { success: false, reason: `No "${ent.base}" for "${ent.ctx}". Items with that button: ${r.items.map((x) => `"${x}"`).join(', ')}.` };
+    label = ent.base;   // the label no longer repeats: there is only one to click
   }
 
   // Strategy 1: JavaScript DOM walk — find the MOST SPECIFIC clickable
@@ -8967,7 +9010,9 @@ What is your first action?`,
                 status = tg.now === null || tg.was !== tg.now ? 'pass' : 'retry';
                 break;
               }
-              outcome = `Could not find "${action.target}" on screen.` + describeToggles(tg.toggles);
+              outcome = clickResult.reason
+                ? `Could not click "${action.target}": ${clickResult.reason}`   // a named item that does not have this button
+                : `Could not find "${action.target}" on screen.` + describeToggles(tg.toggles);
               status = 'retry';
               const k = tgtRaw.toLowerCase().slice(0, 50);
               const prev = recentFailedClicks.get(k);
@@ -10141,21 +10186,20 @@ RESPOND ONLY JSON: {"confirmed":true,"actual":"the visible failure, plainly","de
         // brackets ("Add to cart [Tagliere in ulivo]"), which is also the click
         // target — a bare "Add to cart" can only ever reach the first one.
         try {
-          if (await tagEntityContext(page)) {
-            const perItem = await page.evaluate(() => [...document.querySelectorAll('[data-tp-ctx]')].map((el) => ({
-              select: el.tagName === 'SELECT',
-              label: el.tagName === 'SELECT' ? '' : (el.getAttribute('aria-label') || el.innerText || el.value || '').trim().replace(/\s+/g, ' ').slice(0, 60),
-              ctx: el.getAttribute('data-tp-ctx'),
-              value: el.tagName === 'SELECT' ? ((el.options[el.selectedIndex] || {}).text || '').trim() : '',
-            })));
+          const perItem = await tagEntityContext(page);
+          if (perItem.length) {
+            // Every other button stays listed; a repeated label shows at most 8
+            // of its items, so a long catalog cannot push "Checkout" out of view.
             const dupLabels = new Set(perItem.filter((p) => !p.select).map((p) => p.label));
             const expanded = [];
             for (const b of visibleBtns) {
               if (!dupLabels.has(b)) { expanded.push(b); continue; }
               if (expanded.some((x) => x.startsWith(b + ' ['))) continue;
-              for (const p of perItem) if (!p.select && p.label === b) expanded.push(`${b} [${p.ctx}]`);
+              const mine = perItem.filter((p) => !p.select && p.label === b);
+              for (const p of mine.slice(0, 8)) expanded.push(`${b} [${p.ctx}]`);
+              if (mine.length > 8) expanded.push(`${b} [… ${mine.length - 8} more items: name the item in brackets]`);
             }
-            visibleBtns.splice(0, visibleBtns.length, ...expanded.slice(0, 25));
+            visibleBtns.splice(0, visibleBtns.length, ...expanded.slice(0, 40));
             const sel = perItem.filter((p) => p.select);
             if (sel.length) visibleDropdowns.push(...sel.slice(0, 8).map((p) => `"dropdown [${p.ctx}]" (now "${p.value}")`));
           }
