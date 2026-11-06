@@ -63,6 +63,7 @@ const CAUSE_CATEGORY = {
   login_vision:       Category.ENVIRONMENT,    // couldn't READ the login form
   login_credentials:  Category.ENVIRONMENT,    // creds we were given were rejected
   login_timeout:      Category.ENVIRONMENT,
+  login_code:         Category.ENVIRONMENT,    // the one-time code was not accepted (wrong or expired)
   nav_timeout:        Category.ENVIRONMENT,
   api_error:          Category.ENVIRONMENT,     // Anthropic / our network failed
   timeout:            Category.ENVIRONMENT,

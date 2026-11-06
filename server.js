@@ -3055,6 +3055,24 @@ async function detectOtpField(page) {
   return null;
 }
 
+// Submit the code from its own form: the visible submit control of the form
+// that holds the code field, else Enter in that field. Single-page apps often
+// keep the (hidden) password form in the DOM, and a page-wide "first submit
+// button" lands on that hidden one, so the code was typed and never sent.
+async function submitOtp(page, det) {
+  const field = det.multi ? page.locator(det.selector).last() : page.locator(det.selector).first();
+  try {
+    const form = field.locator('xpath=ancestor::form[1]');
+    if (await form.count()) {
+      for (const sel of ['button[type="submit"]', 'input[type="submit"]', 'button:not([type])']) {
+        const b = form.locator(sel).filter({ visible: true }).first();
+        if (await b.count()) { await b.click(); return true; }
+      }
+    }
+  } catch {}
+  try { await field.press('Enter'); return true; } catch { return false; }
+}
+
 async function fillOtpField(page, det, code) {
   const c = String(code || '').trim();
   if (det.multi) {
@@ -3367,7 +3385,17 @@ async function hasOAuthSignIn(page) {
     'a:has-text("Sign in with Google")', 'a:has-text("Continue with Google")',
     '[aria-label*="Sign in with Google" i]', '[aria-label*="Continue with Google" i]',
   ].join(', ');
-  return await page.locator(sel).first().isVisible({ timeout: 1500 }).catch(() => false);
+  if (await page.locator(sel).first().isVisible({ timeout: 1500 }).catch(() => false)) return true;
+  // Any language ("Accedi con Google", "Continuar con Google", "Mit Google
+  // anmelden"…): a button or link with a sign-in word AND the provider, so a
+  // footer "GitHub" link or an App Store badge does not count.
+  const SIGN_IN = 'sign|log|continu|accedi|accedere|acceder|iniciar|inicia|entrar|anmelden|connexion|connecter|login';
+  const PROVIDER = 'google|github|microsoft|apple';
+  return await page.locator('button, a, [role="button"]')
+    .filter({ hasText: new RegExp(`(${SIGN_IN}).{0,30}(${PROVIDER})|(${PROVIDER}).{0,20}(${SIGN_IN})`, 'i') })
+    .filter({ hasNotText: /play|store|maps|calendar|docs|drive|music|privacy|terms/i })
+    .filter({ visible: true })
+    .count().then((n) => n > 0).catch(() => false);
 }
 
 // Many modern apps (Lovable/Base44/most SPAs) serve a PUBLIC landing at the entry
@@ -3555,9 +3583,14 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
       catch (e) { return { success: false, cause: 'login_timeout', screenshot: await takeScreenshot(page, 'login-2fa-wait'), error: e.message === 'timeout' ? 'A 2FA code was required but none was entered within 5 minutes.' : 'The 2FA step was interrupted before a code was entered.' }; }
       await fillOtpField(page, otp, code);
       await page.waitForTimeout(400);
-      await clickSubmit();
+      if (!(await submitOtp(page, otp))) await clickSubmit();
       await page.waitForTimeout(2500);
       await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+      // Still asking for a code: it was not accepted (wrong, expired, or the submit
+      // did not happen). Saying "logged in" here would crawl the code screen.
+      if (await detectOtpField(page)) {
+        return { success: false, cause: 'login_code', screenshot: await takeScreenshot(page, 'login-2fa-rejected'), error: 'The verification code was entered, but the app still asks for it: the code may be wrong or expired. Run again and enter the newest code.' };
+      }
       ctx.emit({ phase: 'login', type: 'info', message: '2FA code submitted — continuing.' });
       return 'handled';
     };
@@ -3623,7 +3656,9 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
     // fire even though the page clearly showed the error. 3000 comfortably
     // covers real-world header sizes without scanning the whole page.
     const bodyText = await page.textContent('body').catch(() => '');
-    const hasError = /invalid|incorrect|wrong|error|failed|falló|incorrecta/i.test(bodyText.substring(0, 3000));
+    // English, Spanish, Italian, Portuguese, French, German: an app rejecting a
+    // login says so in its own language, and a missed error means no takeover offer.
+    const hasError = /invalid|inválid|incorrect|incorret|wrong|error|erreur|errore|fehler|failed|falló|non corrett|non valid|errat|sbagliat|falsch|ungültig|no coincide|não confere/i.test(bodyText.substring(0, 3000));
     // What the page said, so the verdict can quote it instead of only "the app
     // showed an error". Seen 2026-10-05: two people at one company got that
     // line on the same SSO page and nobody could tell whether it was their
