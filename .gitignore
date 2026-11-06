@@ -60,3 +60,4 @@ pp-*
 # free-tier counters (runtime state, not code)
 free-runs-used.json*
 verified-sites.json
+free-security-used.json

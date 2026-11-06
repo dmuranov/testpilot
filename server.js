@@ -15528,8 +15528,9 @@ app.post('/api/security/api-intercept', async (req, res) => {
     // ── Level 10: EXPOSED SECRETS IN CLIENT BUNDLE ──────────────────────
     // Vibe-coded apps routinely ship live keys / service-role secrets in frontend
     // JS. Cheap, high-signal, fires without login — real findings on real apps.
+    let inlineJs = '';   // also read by the Supabase table discovery below
     try {
-      const inlineJs = await pageA.evaluate(() => Array.from(document.querySelectorAll('script:not([src])')).map(s => s.textContent || '').join('\n')).catch(() => '');
+      inlineJs = await pageA.evaluate(() => Array.from(document.querySelectorAll('script:not([src])')).map(s => s.textContent || '').join('\n')).catch(() => '');
       const secretHits = scanForSecrets([...bundleTexts, { url: 'inline', text: inlineJs }]);
       for (const s of secretHits) results.push({ type: 'secret_exposure', level: 10, test: s.name, verdict: 'VULNERABLE', severity: s.sev, note: s.note + ` (found: ${s.redacted})` });
       if (secretHits.length === 0 && bundleTexts.length === 0 && !inlineJs.trim()) results.push({ type: 'secret_exposure', level: 10, test: 'Exposed secrets in client bundle', verdict: 'INCONCLUSIVE', severity: 'none', note: 'No script or document body was captured from the app — nothing was scanned for secrets. NOT tested.' });
@@ -15565,7 +15566,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
           try { return await fetch(u, { ...opts, headers: H, signal: ac.signal }); }
           finally { clearTimeout(tid); }
         };
-        const sources = [...capturedRequests.map(r => r.url), ...bundleTexts.map(b => b.text)];
+        const sources = [...capturedRequests.map(r => r.url), ...bundleTexts.map(b => b.text), inlineJs];
         let discovered = supabaseTablesFromTraffic(sources);
         try {
           const specRes = await sbFetch(`${sb.url}/rest/v1/`);

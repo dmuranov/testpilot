@@ -531,16 +531,22 @@ export function rlsReadVerdict({ status, rowCount, sensitiveFields }) {
 // Discover candidate Supabase table names from the app's OWN traffic + bundle.
 // Necessary because modern Supabase blocks OpenAPI introspection for public keys
 // (GET /rest/v1/ → 401), so the spec can't be listed. We look for the
-// /rest/v1/<table> paths the app itself calls — the real tables, no guessing.
+// /rest/v1/<table> paths the app itself calls — the real tables, no guessing —
+// and the supabase-js calls in its code, .from('order_receipts').select(…), which
+// name tables a session never opened (a receipt page nobody visited).
 // Excludes the rpc/ function namespace.
 export function supabaseTablesFromTraffic(sources) {
   const out = new Set();
   const re = /\/rest\/v1\/([A-Za-z0-9_]+)/g;
+  // A string literal in .from(…) followed by a query method: not Array.from / Buffer.from.
+  const reCode = /\.from\(\s*['"`]([A-Za-z_][A-Za-z0-9_]*)['"`]\s*\)\s*\.\s*(?:select|insert|update|upsert|delete)\b/g;
   for (const src of (sources || [])) {
     const text = String(src || '');
-    let m; re.lastIndex = 0; let guard = 0;
-    while ((m = re.exec(text)) && guard++ < 20000) {
-      if (m[1] && !/^rpc$/i.test(m[1])) out.add(m[1]);
+    for (const r of [re, reCode]) {
+      let m; r.lastIndex = 0; let guard = 0;
+      while ((m = r.exec(text)) && guard++ < 20000) {
+        if (m[1] && !/^rpc$/i.test(m[1])) out.add(m[1]);
+      }
     }
   }
   return [...out];

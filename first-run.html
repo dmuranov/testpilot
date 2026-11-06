@@ -561,8 +561,8 @@ async function securityCheck() {
   if (!res.ok) {
     if (data.code === 'SITE_NOT_VERIFIED' && data.verification) {
       const v = data.verification;
-      say(`<p>The security check needs proof for the whole site ${esc(v.origin || '')}, not only your app's folder. Add this line inside the <code>&lt;head&gt;</code> of the site's home page, or publish <code>${esc(v.filePath || '')}</code> containing only <code>${esc(v.fileBody || '')}</code>, then pick the security check again.</p><code class="box">${esc(v.metaTag || '')}</code>`, 'err');
-      return showChoices();
+      say(`<p>The security check needs proof for the whole site ${esc(v.origin || '')}, not only your app's folder. Add this line inside the <code>&lt;head&gt;</code> of the site's home page, or publish <code>${esc(v.filePath || '')}</code> containing only <code>${esc(v.fileBody || '')}</code>, then press <b>Check</b>.</p><code class="box">${esc(v.metaTag || '')}</code>`, 'err');
+      return setReply(`<div class="row"><button onclick="checkSiteProof()">Check</button><button class="ghost" onclick="showChoices()">Pick another test</button></div>`);
     }
     if (data.code === 'FREE_SECURITY_USED' || data.code === 'FREE_DAILY_BUDGET_EXCEEDED') { say(`<p>${esc(data.error)}</p>`, 'err'); return upsell(false); }
     if (data.code === 'SAVED_LOGIN_NOT_FOUND' || data.code === 'SAVED_LOGIN_UNREADABLE') { st.savedLogin = null; say(`<p>${esc(data.error)}</p>`, 'err'); st.afterCreds = securityCheck; return askCredsNow(); }
@@ -570,6 +570,17 @@ async function securityCheck() {
     return showChoices();
   }
   securityReport(data);
+}
+// The whole-site proof for the security check, checked now (like the first
+// verify step); on success the security check runs straight away.
+async function checkSiteProof() {
+  me('Check'); setReply('<div class="muted">Looking for the proof…</div>');
+  try {
+    const { res, data } = await postJson('/api/security/verify-site', { appId: st.appId });
+    if (res.ok && data.verified) { say('<p>Verified for the whole site, thanks! ✅</p>'); return securityCheck(); }
+    say(`<p>${esc(!res.ok ? (data.error || 'The check did not work.') : data.reason === 'unreachable' ? `I could not open ${data.origin}. Check the site is published.` : `I do not see the proof on ${data.origin} yet. It can take a minute after publishing.`)}</p>`, 'err');
+  } catch (e) { say('<p>' + esc(netErr(e)) + '</p>', 'err'); }
+  setReply(`<div class="row"><button onclick="checkSiteProof()">Check again</button><button class="ghost" onclick="showChoices()">Pick another test</button></div>`);
 }
 function gotSecond() {
   const e = (document.getElementById('be') || {}).value.trim(), p = (document.getElementById('bp') || {}).value;
@@ -653,6 +664,13 @@ function securityReport(d) {
     say(`<p>I could not sign in as ${!c.loginVerified.userA ? 'account 1' : 'account 2'}, so the cross-account checks did not run. Check that login and try again.</p>${cov}`, 'err');
     if (!c.loginVerified.userB) { st.peerEmail = ''; st.peerPw = ''; }
     if (!c.loginVerified.userA) { if (st.appPw) { st.appEmail = ''; st.appPw = ''; } else if (st.savedLogin) say('<p>Account 1 is your saved login: if its password changed, pick <b>Forget this login</b> in the test list and type the new one.</p>'); }
+    return menu('<p>What next?</p>', back);
+  }
+  // A table anyone can read, or a leaked secret, is the headline: never a green
+  // shield above it (it reads as "all clear" and the client stops there).
+  const serious = other.filter((r) => verdict(r) === 'VULNERABLE' && ['rls_exposure', 'secret_exposure'].includes(r.type));
+  if (!leaks.length && serious.length) {
+    say(`<p>⚠ <b>Private data in your app is open to anyone</b>, even people who are not signed in:</p>${otherHtml}<p class="muted">Account 2 could not reach account 1’s data through the app’s own pages, but the database itself is open: fix that first.</p>${cov}`, 'err');
     return menu('<p>What next?</p>', back);
   }
   if (!leaks.length) {

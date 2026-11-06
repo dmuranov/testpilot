@@ -4,6 +4,7 @@ import {
   isReadRequest, extractRecordIdentity, findLeakedIdentity, crossTenantVerdict,
   requestKey, endpointKey, isPublicPath, isConfirmedPublic, prioritizeEndpoints,
   fabricateLoginBody, isIdorCandidate, hasRecordIdInBody, bodyHasData, noAuthVerdict,
+  supabaseTablesFromTraffic,
 } from '../routes/sec-classify.js';
 
 const B44 = 'https://base44.app/api/apps/f002-6059/functions/secure';
@@ -163,4 +164,16 @@ test('bodyHasData: empty collections and HTML shells are not data', () => {
   assert.equal(bodyHasData(200, '<!DOCTYPE html><html>â€¦</html>'), false);
   assert.equal(bodyHasData(401, '{"data":[{"id":"abc123456"}]}'), false);
   assert.equal(bodyHasData(200, '{"data":[{"id":"abc123456","title":"Roof"}]}'), true);
+});
+
+test('supabaseTablesFromTraffic finds tables named in supabase-js calls, not Array.from', () => {
+  const code = [
+    "const { data } = await db.from('order_receipts').select('*').eq('order_id', id);",
+    'await supabase.from("orders").insert({ qty: 1 });',
+    'x=e.from(`profiles`).update({a:1});',          // minified, template literal
+    "const rows = Array.from(items).map(f); const b = Buffer.from('aGk=', 'base64');",
+    "fetch('https://abc.supabase.co/rest/v1/products?select=*')",
+  ].join('\n');
+  const tables = supabaseTablesFromTraffic([code]).sort();
+  assert.deepEqual(tables, ['order_receipts', 'orders', 'products', 'profiles']);
 });
