@@ -11069,7 +11069,11 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
   // The login the client saved in the chat ("save this login for next time"),
   // resolved here so it never travels back to the browser.
   if (!email && req.body.useSavedLogin && appId) {
-    const saved = resolveAppLogin(requesterEmail(req) || userEmail, appId);
+    // Only a signed-in session: an email in the body is not proof of anything.
+    const who = requesterEmail(req);
+    if (!who) return res.status(401).json({ error: 'Sign in to use a saved login.', code: 'NOT_SIGNED_IN' });
+    const saved = resolveAppLogin(who, appId);
+    if (saved?.unreadable) return res.status(500).json({ error: 'TestPilot could not read the saved login on its side (not your app). Type the login once more, or try again in a few minutes.', code: 'SAVED_LOGIN_UNREADABLE' });
     if (!saved) return res.status(400).json({ error: 'The saved login for this app is gone. Type the login again in the chat.', code: 'SAVED_LOGIN_NOT_FOUND' });
     email = saved.email; password = saved.password;
   }
@@ -12141,6 +12145,13 @@ app.post('/api/sweep', async (req, res) => {
   const sessionUser = requireUser(req, res);
   if (!sessionUser) return;
   let { appId, email, password, apiKey, sessionState: rawSessionState, savedSessionRole } = req.body || {};
+  // The chat's saved app login, resolved here (same as /api/test).
+  if (!email && req.body?.useSavedLogin && appId) {
+    const saved = resolveAppLogin(sessionUser.email, appId);
+    if (saved?.unreadable) return res.status(500).json({ error: 'TestPilot could not read the saved login on its side (not your app). Type the login once more, or try again in a few minutes.', code: 'SAVED_LOGIN_UNREADABLE' });
+    if (!saved) return res.status(400).json({ error: 'The saved login for this app is gone. Type the login again in the chat.', code: 'SAVED_LOGIN_NOT_FOUND' });
+    email = saved.email; password = saved.password;
+  }
   const appKnowledge = platformMaps.get(appId);
   if (!appKnowledge) return res.status(404).json({ error: 'App not found' });
   if (!ownsApp(appId, sessionUser.email)) return res.status(403).json({ error: 'This app belongs to another account.', code: 'OWNERSHIP_MISMATCH' });
@@ -14611,14 +14622,22 @@ function saveAppLogins() {
 }
 function resolveAppLogin(owner, appId) {
   if (!owner || !appId) return null;
-  const r = appLogins.get(appLoginKey(owner, appId));
+  let r = appLogins.get(appLoginKey(owner, appId));
+  // A re-crawl of the same address makes a new app id; the login saved for an
+  // earlier crawl of that address still belongs to this client and this app.
+  if (!r) {
+    const url = platformMaps.get(appId)?.url;
+    const me = canonicalEmail(owner);
+    if (url) for (const x of appLogins.values()) { if (x.owner === me && platformMaps.get(x.appId)?.url === url) { r = x; break; } }
+  }
   if (!r) return null;
-  try { return { email: decryptSecret(r.emailEnc), password: decryptSecret(r.passwordEnc) }; } catch { return null; }
+  // A record that cannot be decrypted is our problem (secret store), not a deleted login.
+  try { return { email: decryptSecret(r.emailEnc), password: decryptSecret(r.passwordEnc) }; } catch { return { unreadable: true }; }
 }
 app.get('/api/app-login/:appId', (req, res) => {
   const user = requireUser(req, res); if (!user) return;
   const saved = resolveAppLogin(user.email, req.params.appId);
-  res.json(saved ? { saved: true, email: saved.email } : { saved: false });
+  res.json(saved && !saved.unreadable ? { saved: true, email: saved.email } : { saved: false, unreadable: !!saved?.unreadable });
 });
 app.post('/api/app-login', (req, res) => {
   const user = requireUser(req, res); if (!user) return;
@@ -14638,7 +14657,10 @@ app.post('/api/app-login', (req, res) => {
 });
 app.delete('/api/app-login/:appId', (req, res) => {
   const user = requireUser(req, res); if (!user) return;
-  appLogins.delete(appLoginKey(user.email, req.params.appId));
+  // Every crawl of the same address shares the login (resolveAppLogin): delete it from all.
+  const url = platformMaps.get(req.params.appId)?.url;
+  const me = canonicalEmail(user.email);
+  for (const [k, x] of appLogins) { if (x.owner === me && (x.appId === req.params.appId || (url && platformMaps.get(x.appId)?.url === url))) appLogins.delete(k); }
   saveAppLogins();
   res.json({ ok: true });
 });
@@ -17042,7 +17064,7 @@ async function notifySavedLoginProblem(s, why) {
   try {
     await mailer({ to, subject: `TestPilot cannot sign in to check ${appName}: save the login again`, text: `Your daily TestPilot check of ${appName} uses ${s.savedSessionRole ? `the saved login "${s.savedSessionRole}"` : 'the login you saved in the chat'}, which ${what}.
 
-This is not a problem with your app. Sign in once more in TestPilot (Saved logins, same name) and the daily check carries on by itself.
+This is not a problem with your app. ${s.savedSessionRole ? 'Sign in once more in TestPilot (Saved logins, same name)' : 'Open the TestPilot chat, pick this app, type the login again and save it'}, and the daily check carries on by itself.
 
 ${APP_URL}/app` });
     s.loginProblemNotifiedAt = new Date().toISOString();   // saved by the caller's finish()
@@ -17109,6 +17131,7 @@ async function runSchedule(s) {
   let appEmail = null, appPassword = null;
   if (!sessionState && !s.savedSessionRole && s.savedAppLogin) {
     const login = resolveAppLogin(s.ownerEmail, s.appId);
+    if (login?.unreadable) { console.warn('[schedules] chat-saved login could not be read (secret store?)', s.id); if (freeHold) freeHold.refund(); return finish('Skipped: TestPilot could not read the saved login on its side (not your app). The next run is as scheduled.'); }
     if (!login) { if (freeHold) freeHold.refund(); await notifySavedLoginProblem(s, 'deleted'); return finish('Skipped: the saved login for this app was deleted. Save it again in the TestPilot chat, then this schedule runs again.'); }
     appEmail = login.email; appPassword = login.password;
   }
@@ -17240,9 +17263,11 @@ app.post('/api/schedules', async (req, res) => {
   if (!user) return;
   const ownerEmail = (user.email || '').trim().toLowerCase();
   const { appId, scenario, intervalHours, apiKey, sessionState: rawSessionState, alertEmail, useSupportKey, savedSessionRole, useSavedLogin } = req.body || {};
-  if (useSavedLogin && !savedSessionRole && !resolveAppLogin(ownerEmail, appId))
-    return res.status(400).json({ error: 'There is no saved login for this app yet. Save it in the chat first.', code: 'SAVED_LOGIN_NOT_FOUND' });
   if (!appId || !scenario) return res.status(400).json({ error: 'appId and scenario are required' });
+  if (useSavedLogin && !savedSessionRole && !rawSessionState) {
+    const chatLogin = resolveAppLogin(ownerEmail, appId);
+    if (!chatLogin || chatLogin.unreadable) return res.status(400).json({ error: 'There is no saved login for this app yet. Save it in the chat first.', code: 'SAVED_LOGIN_NOT_FOUND' });
+  }
   const savedRole = savedSessionRole ? String(savedSessionRole).slice(0, 80) : null;
   if (savedRole && rawSessionState) return res.status(400).json({ error: 'Use either a saved login or a pasted session, not both.', code: 'SESSION_CONFLICT' });
   if (savedRole && !resolveSavedSession(appId, savedRole, ownerEmail))
@@ -17291,7 +17316,7 @@ app.post('/api/schedules', async (req, res) => {
     ownerEmail, ownerUserId: user.userId || null,
     keyEnc, useSupportKey: wantSupport, freeSchedule, sessionStateEnc,
     savedSessionRole: savedRole,   // resolved at each run, so re-saving the login keeps the schedule working
-    savedAppLogin: !savedRole && !!useSavedLogin,   // the chat's saved email + password, also resolved at each run
+    savedAppLogin: !savedRole && !rawSessionState && !!useSavedLogin,   // the chat's saved email + password, also resolved at each run
     intervalHours: interval,
     alertEmail: (alertEmail || ownerEmail || '').trim().toLowerCase() || null,
     active: true, createdAt: new Date().toISOString(),

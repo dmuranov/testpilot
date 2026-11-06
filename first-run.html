@@ -338,15 +338,18 @@ async function suggest() {
 // ── numbered choices ──────────────────────────────────────
 // Every list in the chat is numbered: the client clicks an item or types its
 // number, the way they would answer a person.
-let numberHandler = null;
+let numberHandler = null, menuSeq = 0;
 function menu(title, items, extra) {
   st.menu = items;
+  const seq = ++menuSeq;
+  // Older lists stay readable but no longer answer: their numbers belong to them.
+  document.querySelectorAll('.choices button.choice').forEach((b) => { b.disabled = true; });
   say(`${title}
-    <div class="choices">${items.map((it, i) => `<button class="choice${it.locked ? ' locked' : ''}" onclick="choose(${i + 1})"><span>${i + 1}.</span><span><b>${esc(it.label)}</b>${esc(it.desc || '')}${it.tag ? ` <span class="tag">${esc(it.tag)}</span>` : ''}</span></button>`).join('')}</div>`);
+    <div class="choices">${items.map((it, i) => `<button class="choice${it.locked ? ' locked' : ''}" onclick="choose(${i + 1}, ${seq})"><span>${i + 1}.</span><span><b>${esc(it.label)}</b>${esc(it.desc || '')}${it.tag ? ` <span class="tag">${esc(it.tag)}</span>` : ''}</span></button>`).join('')}</div>`);
   numberHandler = (n) => { const it = st.menu[n - 1]; if (it) { numberHandler = null; me(`${n}. ${it.label}`); it.act(); } };
   setReply(`<div class="row"><input id="num" inputmode="numeric" placeholder="Type a number (1–${items.length})" onkeydown="if(event.key==='Enter')gotNumber()"><button onclick="gotNumber()">Send</button></div>${extra || ''}`);
 }
-function choose(n) { if (numberHandler) numberHandler(n); }
+function choose(n, seq) { if (seq && seq !== menuSeq) return; if (numberHandler) numberHandler(n); }
 function gotNumber() {
   const n = parseInt((document.getElementById('num') || {}).value, 10);
   if (!(n >= 1 && n <= st.menu.length)) return say(`<p>Type a number from 1 to ${st.menu.length}.</p>`, 'err');
@@ -354,6 +357,12 @@ function gotNumber() {
 }
 
 const paid = () => !!st.plan && !['free', 'onerun'].includes(st.plan);
+const onerun = () => st.plan === 'onerun';   // a bought run on TestPilot's key: not free, no client key
+// What the server says about the free run, not a guess: a run that failed on
+// our side gives it back.
+async function refreshMe() {
+  try { const r = await fetch('/api/auth/me'); if (r.ok) { const w = await r.json(); st.plan = w.plan || st.plan; st.freeUsed = !!w.free_run_used; } } catch (e) {}
+}
 const keyName = () => 'testpilot_api_key_' + (st.email || 'anon');   // the dashboard keeps the key under the same name
 const claudeKey = () => { try { return localStorage.getItem(keyName()) || ''; } catch (e) { return ''; } };
 const hostOf = (u) => { try { return new URL(u).host; } catch (e) { return u || ''; } };
@@ -405,16 +414,19 @@ function askCredsNow() {
 
 // ── save the login once ───────────────────────────────────
 function afterLearn() {
-  if (st.appPw && !st.savedLogin) return askSaveLogin(suggest);
+  if (st.appPw && !st.savedLogin && !st.loginAnswered) return askSaveLogin(suggest);
   suggest();
 }
-function askSaveLogin(next) {
-  st.afterSave = next;
+// onNo: what happens when they keep it unsaved (default: carry on with next).
+function askSaveLogin(next, onNo) {
+  st.afterSave = next; st.afterSaveNo = onNo || null;
   say(`<p>Save this login for next time? Then I will not ask again for ${esc(st.origin || 'this app')}. It is stored encrypted, only used to test your app, and you can delete it any time.</p>`);
   setReply(`<div class="row"><button onclick="saveLogin(true)">Yes, save it</button><button class="ghost" onclick="saveLogin(false)">No, ask me each time</button></div>`);
 }
 async function saveLogin(yes) {
   me(yes ? 'Yes, save it' : 'No, ask me each time');
+  st.loginAnswered = true;   // asked once per login: not again after the crawl
+  if (!yes && st.afterSaveNo) { const no = st.afterSaveNo; st.afterSave = st.afterSaveNo = null; return no(); }
   if (yes) {
     try {
       const { res, data } = await postJson('/api/app-login', { appId: st.appId, email: st.appEmail, password: st.appPw });
@@ -449,12 +461,12 @@ function showChoices() {
   items.push(
     { label: 'Journey test', desc: 'Describe any flow in your own words, e.g. "a customer books a table for Saturday".', act: ownTest },
     { label: 'Security check', desc: 'Can users see each other’s data?', tag: 'needs 2 test accounts · for now in the dashboard', act: () => toDashboard('security') },
-    { label: 'Click-everything check', desc: 'Find buttons and links that are broken.', tag: 'for now in the dashboard', act: () => toDashboard('sweep') },
+    { label: 'Click-everything check', desc: 'I click every button and link I can find and tell you which ones are broken.', act: clickEverything },
   );
   const title = picks.length
     ? `<p>I looked at your app. Which test do you want to run?${freeLeft ? ' Your free test covers <b>one</b>.' : ''}</p>`
     : `<p>I could not see much to suggest${st.appEmail || st.savedLogin ? '' : ' without logging in'}. Which test do you want to run?</p>`;
-  menu(title, items, (st.appEmail || st.savedLogin) ? '' : `<div class="row"><button class="ghost" onclick="st.afterCreds=suggest;askCredsNow()">Give a test login and look again</button></div>`);
+  menu(title, items, (st.appEmail || st.savedLogin) ? '' : `<div class="row"><button class="ghost" onclick="st.afterCreds=learn;askCredsNow()">Give a test login and look again</button></div>`);
 }
 function ownTest() {
   say('<p>Please describe the flow you want to test: what a customer does, step by step, and what should be true at the end.</p><p class="muted">Example: "Open the shop, add the Ciotola in maiolica to the cart, go to checkout and check the total is €24."</p>');
@@ -483,7 +495,7 @@ function toDashboard(kind) {
 // saved one. Paid runs go on the client's key (asked once, here in the chat).
 async function run(scenario) {
   st.lastScenario = scenario;
-  const body = { appId: st.appId, scenario, userEmail: st.email, liveOffers: true, freeRun: !paid() && !st.freeUsed };
+  const body = { appId: st.appId, scenario, userEmail: st.email, liveOffers: true, freeRun: !paid() && !onerun() && !st.freeUsed };
   if (st.appPw) { body.email = st.appEmail; body.password = st.appPw; }
   else if (st.savedLogin) body.useSavedLogin = true;
   if (paid()) {
@@ -503,7 +515,6 @@ async function run(scenario) {
       say(`<p>${esc(data.error || 'The test did not start.')}</p>`, 'err');
       return showChoices();
     }
-    if (!paid()) st.freeUsed = true;
     st.testId = data.testId; step('run_started');
     const bubble = say('<p>Testing your app now, step by step…</p><p class="live" id="run-live">starting</p>');
     stream(data.testId, bubble.querySelector('#run-live'));
@@ -530,10 +541,97 @@ function stream(testId, live) {
   };
 }
 
+// ── Click-everything, in the chat ─────────────────────────
+// Clicks every button and link it can find and reports what is dead. Anything
+// that could delete or commit something real is asked here first, in the chat.
+async function clickEverything() {
+  step('test_chosen', 'sweep');
+  const body = { appId: st.appId };
+  if (st.appPw) { body.email = st.appEmail; body.password = st.appPw; }
+  else if (st.savedLogin) body.useSavedLogin = true;
+  // Only signing in costs Claude tokens; a paid account pays that on its own key.
+  if (paid() && (body.email || body.useSavedLogin)) {
+    if (!claudeKey()) return askKey(clickEverything);
+    body.apiKey = claudeKey();
+  }
+  setReply('<div class="muted">Clicking everything… usually three to eight minutes. You can leave this tab open.</div>');
+  let res, data;
+  try { ({ res, data } = await postJson('/api/sweep', body)); } catch (e) { say('<p>' + esc(netErr(e)) + '</p>', 'err'); return showChoices(); }
+  if (!res.ok || !data.sweepId) {
+    if (data.code === 'FREE_SWEEP_USED') { say(`<p>${esc(data.error)}</p>`, 'err'); return upsell(false); }
+    if (data.code === 'API_KEY_REQUIRED') return askKey(clickEverything);
+    if (data.code === 'SAVED_LOGIN_NOT_FOUND') { st.savedLogin = null; say(`<p>${esc(data.error)}</p>`, 'err'); st.afterCreds = clickEverything; return askCredsNow(); }
+    say(`<p>${esc(data.error || 'The check did not start.')}</p>`, 'err');
+    return showChoices();
+  }
+  const sweepId = data.sweepId;
+  const bubble = say('<p>Clicking every button and link I can find…</p><p class="live" id="sweep-live">starting</p>');
+  const live = bubble.querySelector('#sweep-live');
+  const es = new EventSource('/api/sweep/' + sweepId + '/stream');
+  let finished = false;
+  const finish = () => { if (finished) return; finished = true; es.close(); endLive(); sweepReport(sweepId); };
+  es.onmessage = (e) => {
+    let ev; try { ev = JSON.parse(e.data); } catch { return; }
+    if (ev.type === 'heartbeat') return;
+    if (liveEvent(ev, sweepId)) return;
+    if (ev.type === 'awaiting_confirm') return askSweepConfirm(sweepId, ev);
+    if (ev.message && live) live.textContent = String(ev.message).slice(0, 140);
+    if (ev.type === 'done') finish();
+  };
+  es.onerror = async () => {
+    if (finished) return;
+    try { const r = await (await fetch('/api/sweep/' + sweepId)).json(); if (r.status === 'running') return; } catch (e) {}
+    finish();
+  };
+}
+// "This one could delete data": asked as a chat message; the check waits.
+function askSweepConfirm(sweepId, ev) {
+  const b = say(`<p>⚠ ${esc(ev.question || 'Should I click this?')}</p>
+    <div class="row"><button data-a="no">Skip it</button><button class="ghost" data-a="yes">Click it anyway</button></div>
+    <label class="muted"><input type="checkbox" checked data-r> Remember my answer for "${esc(ev.label || '')}" on this app</label>`);
+  b.querySelectorAll('button[data-a]').forEach((btn) => {
+    btn.onclick = async () => {
+      const allow = btn.dataset.a === 'yes';
+      const remember = b.querySelector('[data-r]').checked;
+      b.querySelectorAll('button').forEach((x) => { x.disabled = true; });
+      me(allow ? 'Click it anyway' : 'Skip it');
+      await postJson('/api/sweep/' + sweepId + '/confirm', { allow, remember }).catch(() => {});
+    };
+  });
+}
+async function sweepReport(sweepId) {
+  let r = {};
+  try { r = await (await fetch('/api/sweep/' + sweepId)).json(); } catch (e) {}
+  const items = Array.isArray(r.items) ? r.items : [];
+  const count = (v) => items.filter((i) => i.verdict === v).length;
+  const again = [
+    { label: 'Run it again', desc: 'After you fixed something.', act: clickEverything },
+    { label: 'Test something else', act: showChoices },
+    { label: 'Another app', act: welcomeBack },
+  ];
+  if (!items.length) {
+    say(`<p>The check stopped before it clicked anything${r.error ? ` (${esc(String(r.error).slice(0, 300))})` : ''}.</p>`, 'err');
+    return menu('<p>What next?</p>', again);
+  }
+  const broken = items.filter((i) => i.verdict === 'broken');
+  const defects = Array.isArray(r.defects) ? r.defects : [];
+  const cov = r.coverage;
+  say(`<p>I clicked <b>${items.length}</b> buttons and links: <b>${count('works')}</b> work${broken.length ? `, <b>${broken.length}</b> broken` : ''}${count('no_effect') ? `, ${count('no_effect')} did nothing` : ''}${count('skipped') ? `, ${count('skipped')} skipped` : ''}.</p>
+    ${defects.length
+      ? defects.map((d, i) => `<div class="problem"><b>${i + 1}.</b> ${esc(d.detail || '')}<div class="muted" style="margin-top:4px">On ${esc(d.controls)} control${d.controls === 1 ? '' : 's'}: ${esc((d.pages || []).join(', '))}</div></div>`).join('')
+      : broken.length
+        ? broken.slice(0, 10).map((i, k) => `<div class="problem"><b>${k + 1}.</b> "${esc(i.label)}" on ${esc(i.page)} is broken${i.detail ? `: ${esc(String(i.detail).slice(0, 160))}` : ''}</div>`).join('')
+        : '<p>Nothing broken. ✅</p>'}
+    ${count('no_effect') ? `<p class="muted">"Did nothing" means I clicked and nothing visible changed: often fine (a link to the same page), sometimes a dead button. ${items.filter((i) => i.verdict === 'no_effect').slice(0, 5).map((i) => `"${esc(i.label)}"`).join(', ')}</p>` : ''}
+    ${cov && cov.pagesChecked < cov.pagesInApp ? `<p class="muted">This covered ${esc(cov.pagesChecked)} of ${esc(cov.pagesInApp)} pages (${esc(cov.stoppedBecause || '')}). The other pages were not opened.</p>` : ''}`);
+  menu('<p>What next?</p>', again);
+}
+
 // ── 9. report: problems, fixes, what next ─────────────────
 async function report(testId) {
   let r = {};
   try { r = await (await fetch('/api/test/' + testId)).json(); } catch (e) {}
+  await refreshMe();   // a run that did not count gave the free run back
   step('report', r.status || '');
   const bugs = Array.isArray(r.bugs) ? r.bugs : [];
   const status = r.status || '';
@@ -554,7 +652,9 @@ async function report(testId) {
   say(`<p>I found <b>${bugs.length} problem${bugs.length === 1 ? '' : 's'}</b>:</p>
     ${bugs.map((b, i) => `<div class="problem${!all && i ? ' locked' : ''}"><b>${i + 1}.</b> ${esc(String(b.description || b).slice(0, 300))}${!all && i ? '<div class="muted" style="margin-top:4px">🔒 Fix prompt included in the €15/month plan</div>' : ''}</div>`).join('')}`);
   const where = esc(st.platformName && st.platform !== 'other' ? st.platformName + '’s AI chat' : 'your builder’s AI chat');
-  for (let i = 0; i < (all ? bugs.length : 1); i++) {
+  // All fixes are written at once; each bubble fills as its answer comes back.
+  const count = all ? bugs.length : 1;
+  await Promise.all(Array.from({ length: count }, async (_, i) => {
     const bubble = say(`<p>The fix for problem ${i + 1}. Paste it into ${where}:</p><p class="live" id="fix-live-${i}">writing it…</p>`);
     try {
       const { res, data } = await postJson('/api/fix-prompt', { testId, index: i, platform: st.platform, apiKey: all ? claudeKey() : undefined });
@@ -564,7 +664,7 @@ async function report(testId) {
         step('fix_shown');
       } else live.textContent = data.error || 'I could not write the fix right now.';
     } catch (e) { bubble.querySelector('#fix-live-' + i).textContent = netErr(e); }
-  }
+  }));
   return all ? whatNext(r, false) : upsell(bugs.length > 1);
 }
 function whatNext(r, clean) {
@@ -581,7 +681,13 @@ function whatNext(r, clean) {
 async function keepWatching() {
   if (!claudeKey()) return askKey(keepWatching);
   // A typed login that was not saved cannot be reused by a daily run.
-  if (st.appPw && !st.savedLogin) { say('<p>The daily check signs in on its own, so it needs the login saved.</p>'); return askSaveLogin(keepWatching); }
+  if (st.appPw && !st.savedLogin) {
+    say('<p>The daily check signs in on its own, so it needs the login saved.</p>');
+    return askSaveLogin(keepWatching, () => {
+      say('<p>Then I cannot watch it daily. You can save the login any time and set it up again.</p>');
+      menu('<p>What next?</p>', [{ label: 'Test something else', act: showChoices }, { label: 'Another app', act: welcomeBack }]);
+    });
+  }
   try {
     const { res, data } = await postJson('/api/schedules', { appId: st.appId, scenario: st.lastScenario, intervalHours: 24, apiKey: claudeKey(), useSavedLogin: !!st.savedLogin || undefined });
     if (res.ok) say('<p>👀 Watching it daily. You only hear from me if it breaks, with the fix ready to paste.</p>');
