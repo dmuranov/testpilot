@@ -423,7 +423,8 @@ async function welcomeBack() {
 // Everything that belongs to one app, reset before another is opened or added.
 function resetApp() {
   Object.assign(st, { appId: null, url: '', origin: '', appEmail: '', appPw: '', savedLogin: null, loginAnswered: false,
-    secondEmail: '', secondPw: '', platform: 'other', platformName: '', verification: null, lastScenario: '' });
+    secondEmail: '', secondPw: '', platform: 'other', platformName: '', verification: null, lastScenario: '', lastKind: 'journey',
+    afterCreds: null, afterVerify: null, afterSecond: null, afterKey: null, afterSave: null, afterSaveNo: null });
   picks = [];
 }
 function newApp() { resetApp(); askUrl(); }
@@ -530,7 +531,8 @@ function gotOwn() {
   const words = v.split(/\s+/).filter(Boolean).length;
   if (words < 6) return say('<p>Tell me a bit more: the steps a customer takes and what should happen at the end.</p>', 'err');
   if (!paid() && words > 100) return say('<p>The free test takes up to 100 words. Can you make it shorter?</p>', 'err');
-  if (/\b(everything|every (button|page|link)|whole app|entire app|all (buttons|pages|links))\b/i.test(v)) return say('<p>That is the whole app, not one flow. Pick <b>Click-everything check</b> for that, or describe one flow.</p>', 'err');
+  // The whole app, not one flow ("check everything in the summary" is one flow).
+  if (/\b(test everything|every (button|page|link)|whole app|entire app|all (buttons|pages|links))\b/i.test(v)) return say('<p>That is the whole app, not one flow. Pick <b>Click-everything check</b> for that, or describe one flow.</p>', 'err');
   me(v); step('test_chosen', 'own');
   run(v);
 }
@@ -543,13 +545,7 @@ async function securityCheck() {
     say('<p>First the login of account 1, the one whose data I try to reach.</p>');
     st.afterCreds = securityCheck; return askCredsNow();
   }
-  if (!st.secondEmail) {
-    say(`<p>To see whether one customer can reach another customer's data, I sign in as a <b>second test account</b> (a different user of ${esc(st.origin || 'your app')}) and try to open account 1's records.</p>`);
-    setReply(`<div class="row"><input id="be" type="email" name="tp-app-login-2" autocomplete="off" data-lpignore="true" placeholder="second test account email"><input id="bp" type="password" name="tp-app-secret-2" autocomplete="new-password" data-lpignore="true" placeholder="password" onkeydown="if(event.key==='Enter')gotSecond()"></div>
-      <div class="row"><button onclick="gotSecond()">Send</button></div>
-      <div class="muted">Must be a different user from ${esc(st.appEmail || st.savedLogin || 'account 1')}.</div>`);
-    return;
-  }
+  if (!st.secondEmail) return askSecondAccount(`To see whether one customer can reach another customer's data, I sign in as a <b>second test account</b> (a different user of ${esc(st.origin || 'your app')}) and try to open account 1's records.`, securityCheck);
   const userA = { name: 'Account 1' };
   if (st.appPw) { userA.email = st.appEmail; userA.password = st.appPw; } else userA.useSavedLogin = true;
   const body = { appId: st.appId, userA, userB: { name: 'Account 2', email: st.secondEmail, password: st.secondPw }, mode: 'read-only' };
@@ -653,6 +649,7 @@ function securityReport(d) {
   if (!loginOk) {
     say(`<p>I could not sign in as ${!c.loginVerified.userA ? 'account 1' : 'account 2'}, so the cross-account checks did not run. Check that login and try again.</p>${cov}`, 'err');
     if (!c.loginVerified.userB) { st.secondEmail = ''; st.secondPw = ''; }
+    if (!c.loginVerified.userA) { if (st.appPw) { st.appEmail = ''; st.appPw = ''; } else if (st.savedLogin) say('<p>Account 1 is your saved login: if its password changed, pick <b>Forget this login</b> in the test list and type the new one.</p>'); }
     return menu('<p>What next?</p>', back);
   }
   if (!leaks.length) {
@@ -706,8 +703,8 @@ async function run(scenario, kind = 'journey') {
       if (data.code === 'SITE_NOT_VERIFIED') { say('<p>I need the ownership check again for this address.</p>', 'err'); st.afterVerify = () => run(scenario, kind); return askVerify(); }
       if (data.code === 'SCENARIO_NOT_TESTABLE') { say(`<p>${esc(data.error || 'I cannot test that as written.')}</p>${data.hint ? `<p class="muted">${esc(data.hint)}</p>` : ''}`, 'err'); return ownTest(); }
       if (data.code === 'FREE_RUN_USED' || res.status === 402) { st.freeUsed = true; say(`<p>${esc(data.error || 'Your free test is used.')}</p>`, 'err'); return upsell(false); }
-      if (data.code === 'SAVED_LOGIN_NOT_FOUND' || data.code === 'SAVED_LOGIN_UNREADABLE') { st.savedLogin = null; say(`<p>${esc(data.error)}</p>`, 'err'); st.afterCreds = () => run(scenario); return askCredsNow(); }
-      if (data.code === 'API_KEY_REQUIRED' || data.code === 'API_KEY_INVALID') { say(`<p>${esc(data.error || 'I need your Claude API key.')}</p>`, 'err'); return askKey(() => run(scenario)); }
+      if (data.code === 'SAVED_LOGIN_NOT_FOUND' || data.code === 'SAVED_LOGIN_UNREADABLE') { st.savedLogin = null; say(`<p>${esc(data.error)}</p>`, 'err'); st.afterCreds = () => run(scenario, kind); return askCredsNow(); }
+      if (data.code === 'API_KEY_REQUIRED' || data.code === 'API_KEY_INVALID') { say(`<p>${esc(data.error || 'I need your Claude API key.')}</p>`, 'err'); return askKey(() => run(scenario, kind)); }
       say(`<p>${esc(data.error || 'The test did not start.')}</p>`, 'err');
       return showChoices();
     }
@@ -785,7 +782,7 @@ async function clickEverything() {
 function askSweepConfirm(sweepId, ev) {
   const b = say(`<p>⚠ ${esc(ev.question || 'Should I click this?')}</p>
     <div class="row"><button data-a="no">Skip it</button><button class="ghost" data-a="yes">Click it anyway</button></div>
-    <label class="muted"><input type="checkbox" checked data-r> Remember my answer for "${esc(ev.label || '')}" on this app</label>`);
+    <label class="muted"><input type="checkbox" data-r> Remember my answer for "${esc(ev.label || '')}" on this app</label>`);
   b.querySelectorAll('button[data-a]').forEach((btn) => {
     btn.onclick = async () => {
       const allow = btn.dataset.a === 'yes';
@@ -849,10 +846,13 @@ async function report(testId) {
   say(`<p>I found <b>${bugs.length} problem${bugs.length === 1 ? '' : 's'}</b>:</p>
     ${bugs.map((b, i) => `<div class="problem${!all && i ? ' locked' : ''}"><b>${i + 1}.</b> ${b.role ? `<span class="tag">${esc(b.role)}</span> ` : ''}${esc(String(b.description || b).slice(0, 300))}${!all && i ? '<div class="muted" style="margin-top:4px">🔒 Fix prompt included in the €15/month plan</div>' : ''}</div>`).join('')}`);
   const where = esc(st.platformName && st.platform !== 'other' ? st.platformName + '’s AI chat' : 'your builder’s AI chat');
-  // All fixes are written at once; each bubble fills as its answer comes back.
+  // Every fix gets its bubble now, in order; at most three are written at a
+  // time (they run on the client's key, under its rate limit).
   const count = all ? bugs.length : 1;
-  await Promise.all(Array.from({ length: count }, async (_, i) => {
-    const bubble = say(`<p>The fix for problem ${i + 1}. Paste it into ${where}:</p><p class="live" id="fix-live-${i}">writing it…</p>`);
+  const bubbles = Array.from({ length: count }, (_, i) => say(`<p>The fix for problem ${i + 1}. Paste it into ${where}:</p><p class="live" id="fix-live-${i}">writing it…</p>`));
+  let nextFix = 0;
+  const writeOne = async (i) => {
+    const bubble = bubbles[i];
     try {
       const { res, data } = await postJson('/api/fix-prompt', { testId, index: i, platform: st.platform, apiKey: all ? claudeKey() : undefined });
       const live = bubble.querySelector('#fix-live-' + i);
@@ -861,7 +861,9 @@ async function report(testId) {
         step('fix_shown');
       } else live.textContent = data.error || 'I could not write the fix right now.';
     } catch (e) { bubble.querySelector('#fix-live-' + i).textContent = netErr(e); }
-  }));
+  };
+  const worker = async () => { while (nextFix < count) await writeOne(nextFix++); };
+  await Promise.all(Array.from({ length: Math.min(3, count) }, worker));
   return all ? whatNext(r, false) : upsell(bugs.length > 1);
 }
 function whatNext(r, clean) {

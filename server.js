@@ -11069,12 +11069,7 @@ app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail
   // The login the client saved in the chat ("save this login for next time"),
   // resolved here so it never travels back to the browser.
   if (!email && req.body.useSavedLogin && appId) {
-    // Only a signed-in session: an email in the body is not proof of anything.
-    const who = requesterEmail(req);
-    if (!who) return res.status(401).json({ error: 'Sign in to use a saved login.', code: 'NOT_SIGNED_IN' });
-    const saved = resolveAppLogin(who, appId);
-    if (saved?.unreadable) return res.status(500).json({ error: 'TestPilot could not read the saved login on its side (not your app). Type the login once more, or try again in a few minutes.', code: 'SAVED_LOGIN_UNREADABLE' });
-    if (!saved) return res.status(400).json({ error: 'The saved login for this app is gone. Type the login again in the chat.', code: 'SAVED_LOGIN_NOT_FOUND' });
+    const saved = savedLoginFor(req, res, appId); if (!saved) return;
     email = saved.email; password = saved.password;
   }
   // "Bring your own session" — paste an already-authenticated Playwright
@@ -12147,9 +12142,7 @@ app.post('/api/sweep', async (req, res) => {
   let { appId, email, password, apiKey, sessionState: rawSessionState, savedSessionRole } = req.body || {};
   // The chat's saved app login, resolved here (same as /api/test).
   if (!email && req.body?.useSavedLogin && appId) {
-    const saved = resolveAppLogin(sessionUser.email, appId);
-    if (saved?.unreadable) return res.status(500).json({ error: 'TestPilot could not read the saved login on its side (not your app). Type the login once more, or try again in a few minutes.', code: 'SAVED_LOGIN_UNREADABLE' });
-    if (!saved) return res.status(400).json({ error: 'The saved login for this app is gone. Type the login again in the chat.', code: 'SAVED_LOGIN_NOT_FOUND' });
+    const saved = savedLoginFor(req, res, appId); if (!saved) return;
     email = saved.email; password = saved.password;
   }
   const appKnowledge = platformMaps.get(appId);
@@ -12451,9 +12444,7 @@ app.post('/api/test/multirole', async (req, res) => {
   let { roles } = req.body || {};
   // A role may sign in with the chat's saved app login (signed-in session only).
   if (Array.isArray(roles) && roles.some((r) => r?.useSavedLogin && !r.email)) {
-    const saved = resolveAppLogin(requesterEmail(req), appId);
-    if (saved?.unreadable) return res.status(500).json({ error: 'TestPilot could not read the saved login on its side (not your app). Type the login once more, or try again in a few minutes.', code: 'SAVED_LOGIN_UNREADABLE' });
-    if (!saved) return res.status(400).json({ error: 'The saved login for this app is gone. Type the login again in the chat.', code: 'SAVED_LOGIN_NOT_FOUND' });
+    const saved = savedLoginFor(req, res, appId); if (!saved) return;
     roles = roles.map((r) => (r?.useSavedLogin && !r.email ? { ...r, email: saved.email, password: saved.password } : r));
   }
   if (await denyUnverifiedApp(res, user.email, appId)) return;
@@ -12648,9 +12639,7 @@ app.post('/api/test/flow', async (req, res) => {
   let { email, password } = req.body || {};
   // The chat's saved app login (signed-in session only), as /api/test.
   if (!email && req.body?.useSavedLogin && appId) {
-    const saved = resolveAppLogin(requesterEmail(req), appId);
-    if (saved?.unreadable) return res.status(500).json({ error: 'TestPilot could not read the saved login on its side (not your app). Type the login once more, or try again in a few minutes.', code: 'SAVED_LOGIN_UNREADABLE' });
-    if (!saved) return res.status(400).json({ error: 'The saved login for this app is gone. Type the login again in the chat.', code: 'SAVED_LOGIN_NOT_FOUND' });
+    const saved = savedLoginFor(req, res, appId); if (!saved) return;
     email = saved.email; password = saved.password;
   }
   if (await denyUnverifiedApp(res, user.email, appId)) return;
@@ -14649,6 +14638,17 @@ function saveAppLogins() {
     .then(() => fs.rename('./app-logins.tmp.json', APP_LOGINS_FILE))
     .catch((e) => console.warn('[app-logins] save failed:', e.message));
 }
+// For a request that asked for the saved login (useSavedLogin): the signed-in
+// session's login for this app, or null after sending the error. An email in
+// the request body is never enough.
+function savedLoginFor(req, res, appId) {
+  const who = requesterEmail(req);
+  if (!who) { res.status(401).json({ error: 'Sign in to use a saved login.', code: 'NOT_SIGNED_IN' }); return null; }
+  const saved = resolveAppLogin(who, appId);
+  if (saved?.unreadable) { res.status(500).json({ error: 'TestPilot could not read the saved login on its side (not your app). Type the login once more, or try again in a few minutes.', code: 'SAVED_LOGIN_UNREADABLE' }); return null; }
+  if (!saved) { res.status(400).json({ error: 'The saved login for this app is gone. Type the login again in the chat.', code: 'SAVED_LOGIN_NOT_FOUND' }); return null; }
+  return saved;
+}
 function resolveAppLogin(owner, appId) {
   if (!owner || !appId) return null;
   let r = appLogins.get(appLoginKey(owner, appId));
@@ -14673,6 +14673,7 @@ app.post('/api/app-login', (req, res) => {
   const { appId, email, password } = req.body || {};
   if (!appId || !email || !password) return res.status(400).json({ error: 'appId, email and password are required' });
   if (!ownsApp(appId, user.email) && !isSuperAdmin(user.email)) return res.status(403).json({ error: 'This app belongs to another account.', code: 'APP_OWNED_BY_OTHER' });
+  if (appLoginsBroken) return res.status(503).json({ error: 'Saving logins is paused on our side right now (not your app). I will use this login while the page is open.', code: 'SAVE_PAUSED' });
   try {
     appLogins.set(appLoginKey(user.email, appId), {
       owner: loginOwner(user.email), appId,
@@ -15092,11 +15093,7 @@ app.post('/api/security/api-intercept', async (req, res) => {
   // Account 1 can be the chat's saved app login: resolved here, for a signed-in
   // session only (as /api/test), so it never goes back to the browser.
   if (userA?.useSavedLogin && !userA.email) {
-    const who = requesterEmail(req);
-    if (!who) return res.status(401).json({ error: 'Sign in to use a saved login.', code: 'NOT_SIGNED_IN' });
-    const saved = resolveAppLogin(who, appId);
-    if (saved?.unreadable) return res.status(500).json({ error: 'TestPilot could not read the saved login on its side (not your app). Type the login once more, or try again in a few minutes.', code: 'SAVED_LOGIN_UNREADABLE' });
-    if (!saved) return res.status(400).json({ error: 'The saved login for this app is gone. Type the login again in the chat.', code: 'SAVED_LOGIN_NOT_FOUND' });
+    const saved = savedLoginFor(req, res, appId); if (!saved) return;
     userA = { ...userA, email: saved.email, password: saved.password };
   }
   // Proof of control before any security scan: its findings are a map of
