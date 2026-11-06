@@ -2344,9 +2344,9 @@ app.post('/api/auth/verify', express.urlencoded({ extended: false, limit: '2kb' 
     // Update last login
     await supabase('PATCH', 'users', { last_login: new Date().toISOString() }, `?id=eq.${user.id}`);
 
-    // Set cookie and redirect to app
+    // Set cookie and go to the chat: it is home (welcome back, your apps, tests).
     res.setHeader('Set-Cookie', `tpsession=${sessionToken}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax`);
-    res.redirect('/app');
+    res.redirect('/first-run');
   } catch (e) {
     console.error(`Auth verify error [${reqId}]:`, e.message);
     res.redirect(`/app?error=failed&rid=${reqId}`);
@@ -14597,15 +14597,6 @@ app.post('/api/support', async (req, res) => {
   });
 });
 
-// ── Saved login sessions (per app, per role label) ──────────────────────
-// Log in once, reuse across Learn/Test/Check Everything without retyping
-// credentials or re-driving OAuth/2FA every single run. Keyed by (owner
-// email, appId, role label) so one app can have several roles saved side by
-// side (Owner, Free user, Admin...) — switching role is just picking a
-// different saved slot. Stored encrypted at rest with the same key already
-// used for embed tokens' API keys (embedEncKey/encryptSecret/decryptSecret,
-// server.js:1224) — a Playwright storageState is bearer-equivalent to a live
-// login, same trust level as an API key.
 // ── Saved app logins (the chat's "save this login for next time") ──
 // The test login a client typed for THEIR app, kept only when they said yes:
 // encrypted at rest like saved sessions, never sent back (only the email is
@@ -14614,11 +14605,24 @@ const APP_LOGINS_FILE = './app-logins.json';
 const appLogins = new Map();   // canonicalEmail|appId → { owner, appId, emailEnc, passwordEnc, savedAt }
 const appLoginKey = (owner, appId) => `${canonicalEmail(owner)}|${appId}`;
 async function loadAppLogins() {
-  try { for (const r of JSON.parse(await fs.readFile(APP_LOGINS_FILE, 'utf-8'))) appLogins.set(appLoginKey(r.owner, r.appId), r); }
-  catch { /* none saved yet */ }
+  let raw;
+  try { raw = await fs.readFile(APP_LOGINS_FILE, 'utf-8'); } catch { return; }   // none saved yet
+  try { for (const r of JSON.parse(raw)) appLogins.set(appLoginKey(r.owner, r.appId), r); }
+  catch (e) {
+    // Never treat a damaged file as "none saved": the next save would wipe every login.
+    console.error('[app-logins] app-logins.json could not be read, kept as app-logins.corrupt.json:', e.message);
+    await fs.copyFile(APP_LOGINS_FILE, './app-logins.corrupt.json').catch(() => {});
+  }
 }
+// One write at a time, to a temp file renamed into place: two saves at once
+// cannot interleave into a broken file.
+let appLoginsWrite = Promise.resolve();
 function saveAppLogins() {
-  fs.writeFile(APP_LOGINS_FILE, JSON.stringify([...appLogins.values()])).catch((e) => console.warn('[app-logins] save failed:', e.message));
+  const body = JSON.stringify([...appLogins.values()]);
+  appLoginsWrite = appLoginsWrite
+    .then(() => fs.writeFile('./app-logins.tmp.json', body))
+    .then(() => fs.rename('./app-logins.tmp.json', APP_LOGINS_FILE))
+    .catch((e) => console.warn('[app-logins] save failed:', e.message));
 }
 function resolveAppLogin(owner, appId) {
   if (!owner || !appId) return null;
@@ -14665,6 +14669,15 @@ app.delete('/api/app-login/:appId', (req, res) => {
   res.json({ ok: true });
 });
 
+// ── Saved login sessions (per app, per role label) ──────────────────────
+// Log in once, reuse across Learn/Test/Check Everything without retyping
+// credentials or re-driving OAuth/2FA every single run. Keyed by (owner
+// email, appId, role label) so one app can have several roles saved side by
+// side (Owner, Free user, Admin...) — switching role is just picking a
+// different saved slot. Stored encrypted at rest with the same key already
+// used for embed tokens' API keys (embedEncKey/encryptSecret/decryptSecret,
+// server.js:1224) — a Playwright storageState is bearer-equivalent to a live
+// login, same trust level as an API key.
 const SAVED_SESSIONS_FILE = './saved-sessions.json';
 const savedSessions = new Map(); // `${owner}|${appId}|${role}` -> {owner, appId, role, sessionStateEnc, capturedAt}
 function savedSessionKey(owner, appId, role) { return `${canonicalEmail(owner)}|${appId}|${role}`; }
@@ -15051,6 +15064,16 @@ app.post('/api/security/api-intercept', async (req, res) => {
   const sessionUser = requireUser(req, res);
   if (!sessionUser) return;
   let { appId, userA, userB, apiKey, mode } = req.body;
+  // Account 1 can be the chat's saved app login: resolved here, for a signed-in
+  // session only (as /api/test), so it never goes back to the browser.
+  if (userA?.useSavedLogin && !userA.email) {
+    const who = requesterEmail(req);
+    if (!who) return res.status(401).json({ error: 'Sign in to use a saved login.', code: 'NOT_SIGNED_IN' });
+    const saved = resolveAppLogin(who, appId);
+    if (saved?.unreadable) return res.status(500).json({ error: 'TestPilot could not read the saved login on its side (not your app). Type the login once more, or try again in a few minutes.', code: 'SAVED_LOGIN_UNREADABLE' });
+    if (!saved) return res.status(400).json({ error: 'The saved login for this app is gone. Type the login again in the chat.', code: 'SAVED_LOGIN_NOT_FOUND' });
+    userA = { ...userA, email: saved.email, password: saved.password };
+  }
   // Proof of control before any security scan: its findings are a map of
   // where the app is weak, and anyone can sign up as a normal user of someone
   // else's app. Same meta-tag / file proof as the leak check (siteVerifyToken).

@@ -52,7 +52,7 @@ schedules.json
 embed-tokens.json
 content-engine-results*.json
 saved-sessions.json
-app-logins.json
+app-logins*.json
 
 # ── Ad-hoc gauntlet drivers (contain test credentials) ──
 pp-*

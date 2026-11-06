@@ -60,7 +60,7 @@
 <div class="wrap">
   <div class="topbar">
     <div class="brand">Test<span>Pilot</span></div>
-    <a href="/app" class="signin">Sign in →</a>
+    <a href="#" class="signin" id="signin-link" onclick="askSignIn();return false">Sign in →</a>
   </div>
   <div class="chat" id="chat" aria-live="polite"></div>
 </div>
@@ -185,8 +185,8 @@ async function gotUrl() {
     const { res, data } = await postJson('/api/funnel/start', { userEmail: st.email, url: v, source: attrib?.source || '', medium: attrib?.medium || '', campaign: attrib?.campaign || '' });
     if (!res.ok || !data.ok) {
       if (data.code === 'FREE_RUN_USED' || data.code === 'APP_SLOT_LIMIT') {
-        say(`<p>${esc(data.error)}</p><p>The free test covers your first app. <a href="/app">Sign in</a> to see your report, or get the €15/month plan for unlimited apps.</p>`, 'err');
-        return setReply(`<div class="row"><button onclick="location.href='/app'">Sign in</button></div>`);
+        say(`<p>${esc(data.error)}</p><p>The free test covers your first app. Sign in to see your apps and reports here, or get the €15/month plan for unlimited apps.</p>`, 'err');
+        return setReply(`<div class="row"><button onclick="sendSignInLink(st.email)">Email me a sign-in link</button></div>`);
       }
       if (data.code === 'URL_IS_LOGIN_PAGE' && data.suggestedUrl) {
         say(`<p>That's your app's sign-in page. I'll start from <b>${esc(data.suggestedUrl)}</b> instead. Press Send.</p>`);
@@ -213,6 +213,7 @@ function askPlatform() {
 function gotPlatform(k) {
   st.platform = k; st.platformName = (PLATFORMS.find((p) => p[0] === k) || [])[1] || '';
   me(st.platformName); step('platform', k);
+  try { localStorage.setItem('tp_platform_' + (st.url || ''), k); } catch (e) {}   // remembered for this app's later fixes
   askVerify();
 }
 
@@ -265,13 +266,8 @@ function askLogin() {
   setReply(`<div class="row"><button class="ghost" onclick="gotNoLogin()">No, it's public</button><button class="ghost" onclick="askCreds()">Yes, it has a login</button></div>`);
 }
 function gotNoLogin() { me('No, it\'s public'); step('login', 'none'); learn(); }
-function askCreds() {
-  me('Yes, it has a login');
-  say('<p>Give me a login I can use. Please use a <b>test account</b>, not your real one: I\'ll click around like a customer would.</p>');
-  setReply(`<div class="row"><input id="ae" type="email" name="tp-app-login" autocomplete="off" data-lpignore="true" placeholder="test login email"><input id="ap" type="password" name="tp-app-secret" autocomplete="new-password" data-lpignore="true" placeholder="password" onkeydown="if(event.key==='Enter')gotCreds()"></div>
-    <div class="row"><button onclick="gotCreds()">Send</button></div>
-    <div class="muted">Not your TestPilot account: the login for ${esc(st.origin || 'your app')}.</div>`);
-}
+// One login form (askCredsNow); here with the client's "Yes" echoed first.
+function askCreds() { me('Yes, it has a login'); askCredsNow(); }
 function gotCreds() {
   const e = document.getElementById('ae').value.trim(), p = document.getElementById('ap').value;
   if (!e || !p) return say('<p>I need both the email and the password.</p>', 'err');
@@ -367,6 +363,23 @@ const keyName = () => 'testpilot_api_key_' + (st.email || 'anon');   // the dash
 const claudeKey = () => { try { return localStorage.getItem(keyName()) || ''; } catch (e) { return ''; } };
 const hostOf = (u) => { try { return new URL(u).host; } catch (e) { return u || ''; } };
 
+// ── sign in, inside the chat ──────────────────────────────
+// The link in the email brings them back here (the server sends a verified
+// sign-in to /first-run), never to the old dashboard.
+function askSignIn() {
+  say('<p>What is your TestPilot email? I will send you a sign-in link.</p>');
+  setReply(`<div class="row"><input id="si" type="email" autocomplete="email" placeholder="you@company.com" onkeydown="if(event.key==='Enter')sendSignInLink(document.getElementById('si').value)"><button onclick="sendSignInLink(document.getElementById('si').value)">Send</button></div>`);
+}
+async function sendSignInLink(email) {
+  const e = String(email || '').trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) return say('<p>That does not look like an email address.</p>', 'err');
+  try {
+    const { res, data } = await postJson('/api/auth/request', { email: e });
+    if (res.ok) { say(`<p>📬 Check your inbox at <b>${esc(e)}</b>: click the link and you come back right here.</p>`); setReply(''); }
+    else say(`<p>${esc(data.error || 'I could not send the link.')}</p>`, 'err');
+  } catch (err) { say('<p>' + esc(netErr(err)) + '</p>', 'err'); }
+}
+
 // ── returning clients ─────────────────────────────────────
 // Signed in already: no email question. Back from paying: say so, get the key.
 async function start() {
@@ -374,6 +387,9 @@ async function start() {
   try { const r = await fetch('/api/auth/me'); if (r.ok) who = await r.json(); } catch (e) {}
   if (!who || !who.email) return askEmail();
   st.email = who.email; st.plan = who.plan || 'free'; st.freeUsed = !!who.free_run_used;
+  // Signed in: the header offers the old dashboard only as an advanced extra.
+  const link = document.getElementById('signin-link');
+  if (link) { link.textContent = 'Dashboard'; link.onclick = null; link.href = '/app'; }
   if (new URLSearchParams(location.search).get('upgraded') === '1') {
     history.replaceState({}, '', '/first-run');
     say('<p><b>You are on the €15 plan.</b> 🎉 Unlimited tests, a fix for every problem, and Keep watching.</p>');
@@ -393,11 +409,21 @@ async function welcomeBack() {
   if (!st.apps.length) { say('<p>Welcome back! Let us test an app.</p>'); return askUrl(); }
   menu('<p>Welcome back! Which app shall I test?</p>', [
     ...st.apps.map((a) => ({ label: hostOf(a.url), desc: a.url, act: () => openApp(a) })),
-    { label: 'Another app', desc: 'Add a new one', act: () => askUrl() },
+    { label: 'Another app', desc: 'Add a new one', act: newApp },
   ]);
 }
+// Everything that belongs to one app, reset before another is opened or added.
+function resetApp() {
+  Object.assign(st, { appId: null, url: '', origin: '', appEmail: '', appPw: '', savedLogin: null, loginAnswered: false,
+    secondEmail: '', secondPw: '', platform: 'other', platformName: '', verification: null, lastScenario: '' });
+  picks = [];
+}
+function newApp() { resetApp(); askUrl(); }
 async function openApp(a) {
-  st.appId = a.appId; st.url = a.url; st.appEmail = ''; st.appPw = '';
+  resetApp();
+  st.appId = a.appId; st.url = a.url;
+  try { st.platform = localStorage.getItem('tp_platform_' + a.url) || 'other'; } catch (e) { st.platform = 'other'; }
+  st.platformName = (PLATFORMS.find((p) => p[0] === st.platform) || [])[1] || '';
   try { st.origin = new URL(a.url).origin; } catch (e) { st.origin = a.url; }
   try { const r = await (await fetch('/api/app-login/' + encodeURIComponent(a.appId))).json(); st.savedLogin = r.saved ? r.email : null; } catch (e) { st.savedLogin = null; }
   if (st.savedLogin) say(`<p>I will sign in with your saved login <b>${esc(st.savedLogin)}</b>.</p>`);
@@ -433,6 +459,7 @@ async function saveLogin(yes) {
       if (res.ok) { st.savedLogin = data.email; say('<p>Saved. 🔐</p>'); }
       else say(`<p>${esc(data.error || 'I could not save it.')} I will keep using it while this page is open.</p>`, 'err');
     } catch (e) { say('<p>' + esc(netErr(e)) + '</p>', 'err'); }
+    if (!st.savedLogin && st.afterSaveNo) { const no = st.afterSaveNo; st.afterSave = st.afterSaveNo = null; return no(); }
   }
   const next = st.afterSave; st.afterSave = null;
   (next || suggest)();
@@ -460,7 +487,7 @@ function showChoices() {
   const items = picks.map((p) => ({ label: p.name, desc: p.description || '', act: () => { step('test_chosen', 'suggested'); run(`${p.name}: ${p.description || ''}`.trim()); } }));
   items.push(
     { label: 'Journey test', desc: 'Describe any flow in your own words, e.g. "a customer books a table for Saturday".', act: ownTest },
-    { label: 'Security check', desc: 'Can users see each other’s data?', tag: 'needs 2 test accounts · for now in the dashboard', act: () => toDashboard('security') },
+    { label: 'Security check', desc: 'Can one customer see another customer’s data? I need a second test account for this one.', act: securityCheck },
     { label: 'Click-everything check', desc: 'I click every button and link I can find and tell you which ones are broken.', act: clickEverything },
   );
   const title = picks.length
@@ -484,10 +511,84 @@ function gotOwn() {
   me(v); step('test_chosen', 'own');
   run(v);
 }
-function toDashboard(kind) {
-  step('test_chosen', kind);
-  say('<p>That one still runs in the dashboard for now. Taking you there…</p>');
-  setTimeout(() => { location.href = '/app?learned=' + encodeURIComponent(st.appId || ''); }, 1200);
+// ── Security check, in the chat ───────────────────────────
+// Account 1 is the login the chat already has; only the second account is
+// asked for (kept in this page only). Read-only: nothing is changed or deleted.
+async function securityCheck() {
+  step('test_chosen', 'security');
+  if (!st.appPw && !st.savedLogin) {
+    say('<p>First the login of account 1, the one whose data I try to reach.</p>');
+    st.afterCreds = securityCheck; return askCredsNow();
+  }
+  if (!st.secondEmail) {
+    say(`<p>To see whether one customer can reach another customer's data, I sign in as a <b>second test account</b> (a different user of ${esc(st.origin || 'your app')}) and try to open account 1's records.</p>`);
+    setReply(`<div class="row"><input id="be" type="email" name="tp-app-login-2" autocomplete="off" data-lpignore="true" placeholder="second test account email"><input id="bp" type="password" name="tp-app-secret-2" autocomplete="new-password" data-lpignore="true" placeholder="password" onkeydown="if(event.key==='Enter')gotSecond()"></div>
+      <div class="row"><button onclick="gotSecond()">Send</button></div>
+      <div class="muted">Must be a different user from ${esc(st.appEmail || st.savedLogin || 'account 1')}.</div>`);
+    return;
+  }
+  const userA = { name: 'Account 1' };
+  if (st.appPw) { userA.email = st.appEmail; userA.password = st.appPw; } else userA.useSavedLogin = true;
+  const body = { appId: st.appId, userA, userB: { name: 'Account 2', email: st.secondEmail, password: st.secondPw }, mode: 'read-only' };
+  if (paid()) { if (!claudeKey()) return askKey(securityCheck); body.apiKey = claudeKey(); }
+  setReply('<div class="muted">Checking… usually three to six minutes. Nothing is changed or deleted. You can leave this tab open.</div>');
+  const bubble = say('<p>Signing in as both accounts and trying to open account 1’s data as account 2…</p><p class="live">this takes a few minutes</p>');
+  let res, data;
+  try { ({ res, data } = await postJson('/api/security/api-intercept', body)); }
+  catch (e) { bubble.querySelector('.live').textContent = 'stopped'; say('<p>' + esc(netErr(e)) + '</p>', 'err'); return showChoices(); }
+  bubble.querySelector('.live').textContent = 'done';
+  if (!res.ok) {
+    if (data.code === 'SITE_NOT_VERIFIED' && data.verification) {
+      const v = data.verification;
+      say(`<p>The security check needs proof for the whole site ${esc(v.origin || '')}, not only your app's folder. Add this line inside the <code>&lt;head&gt;</code> of the site's home page, or publish <code>${esc(v.filePath || '')}</code> containing only <code>${esc(v.fileBody || '')}</code>, then pick the security check again.</p><code class="box">${esc(v.metaTag || '')}</code>`, 'err');
+      return showChoices();
+    }
+    if (data.code === 'FREE_SECURITY_USED' || data.code === 'FREE_DAILY_BUDGET_EXCEEDED') { say(`<p>${esc(data.error)}</p>`, 'err'); return upsell(false); }
+    if (data.code === 'SAVED_LOGIN_NOT_FOUND' || data.code === 'SAVED_LOGIN_UNREADABLE') { st.savedLogin = null; say(`<p>${esc(data.error)}</p>`, 'err'); st.afterCreds = securityCheck; return askCredsNow(); }
+    say(`<p>${esc(data.error || 'The security check did not run.')}</p>`, 'err');
+    return showChoices();
+  }
+  securityReport(data);
+}
+function gotSecond() {
+  const e = (document.getElementById('be') || {}).value.trim(), p = (document.getElementById('bp') || {}).value;
+  if (!e || !p) return say('<p>I need both the email and the password of the second account.</p>', 'err');
+  if (e.toLowerCase() === String(st.appEmail || st.savedLogin || '').toLowerCase()) return say('<p>That is the same account as account 1. I need a different user.</p>', 'err');
+  st.secondEmail = e; st.secondPw = p; me(e + ' · ••••••');
+  securityCheck();
+}
+// Plain words: what account 2 could reach, how much was really checked, and one
+// message to paste into the builder's AI that asks for the right fix.
+function securityReport(d) {
+  const NEUTRAL = ['SAFE', 'INCONCLUSIVE', 'UNKNOWN', 'NOT_TESTED', 'SKIPPED', 'INFO'];
+  const leaks = (d.results || []).filter((r) => !NEUTRAL.includes(String(r.verdict || '').toUpperCase()));
+  const what = (r) => r.type === 'idor_direct' ? 'could open account 1’s record directly'
+    : r.type === 'api_replay' ? 'got account 1’s data from the same request'
+    : r.type === 'token_swap' ? 'was let in with account 1’s session'
+    : 'reached something it should not';
+  const c = d.coverage || {};
+  const loginOk = !c.loginVerified || (c.loginVerified.userA && c.loginVerified.userB);
+  const cov = c.dataEndpointsCaptured != null
+    ? `<p class="muted">I tested ${esc(c.crossAccountTested || 0)} of the ${esc(c.dataEndpointsCaptured)} data requests your app makes${c.crossAccountInconclusive ? ` (${esc(c.crossAccountInconclusive)} could not be tested)` : ''}.</p>` : '';
+  const back = [{ label: 'Run it again', desc: 'After you fixed something.', act: securityCheck }, { label: 'Test something else', act: showChoices }, { label: 'Another app', act: welcomeBack }];
+  if (!loginOk) {
+    say(`<p>I could not sign in as ${!c.loginVerified.userA ? 'account 1' : 'account 2'}, so the cross-account checks did not run. Check that login and try again.</p>${cov}`, 'err');
+    if (!c.loginVerified.userB) { st.secondEmail = ''; st.secondPw = ''; }
+    return menu('<p>What next?</p>', back);
+  }
+  if (!leaks.length) {
+    say(`<p><b>Account 2 could not reach account 1’s data.</b> 🛡️</p>${cov}`);
+    return menu('<p>What next?</p>', back);
+  }
+  const lines = leaks.slice(0, 8).map((r) => `${r.method || 'GET'} ${String(r.url || r.note || '').slice(0, 120)}`);
+  say(`<p>⚠ <b>Account 2 reached account 1’s data in ${leaks.length} place${leaks.length === 1 ? '' : 's'}:</b></p>
+    ${leaks.slice(0, 8).map((r, i) => `<div class="problem"><b>${i + 1}.</b> Account 2 ${what(r)}${r.severity && r.severity !== 'none' ? ` <span class="tag">${esc(String(r.severity).toUpperCase())}</span>` : ''}<div class="muted" style="margin-top:4px">${esc(lines[i])}</div></div>`).join('')}
+    ${cov}`);
+  const fix = `In my app, a signed-in user can read another user's data through these requests:\n${lines.join('\n')}\nMake each of them return only records that belong to the signed-in user (check ownership on the server or with row-level security), and change nothing else.`;
+  const b = say(`<p>Paste this into ${esc(st.platformName && st.platform !== 'other' ? st.platformName + '’s AI chat' : 'your builder’s AI chat')}:</p><code class="box"></code><button class="ghost">Copy the fix</button>`);
+  b.querySelector('code').textContent = fix;
+  b.querySelector('button').onclick = function () { copy(fix, this); };
+  menu('<p>What next?</p>', back);
 }
 
 // ── 8. run ────────────────────────────────────────────────
@@ -510,7 +611,7 @@ async function run(scenario) {
       if (data.code === 'SITE_NOT_VERIFIED') { say('<p>I need the ownership check again for this address.</p>', 'err'); return askVerify(); }
       if (data.code === 'SCENARIO_NOT_TESTABLE') { say(`<p>${esc(data.error || 'I cannot test that as written.')}</p>${data.hint ? `<p class="muted">${esc(data.hint)}</p>` : ''}`, 'err'); return ownTest(); }
       if (data.code === 'FREE_RUN_USED' || res.status === 402) { st.freeUsed = true; say(`<p>${esc(data.error || 'Your free test is used.')}</p>`, 'err'); return upsell(false); }
-      if (data.code === 'SAVED_LOGIN_NOT_FOUND') { st.savedLogin = null; say(`<p>${esc(data.error)}</p>`, 'err'); st.afterCreds = () => run(scenario); return askCredsNow(); }
+      if (data.code === 'SAVED_LOGIN_NOT_FOUND' || data.code === 'SAVED_LOGIN_UNREADABLE') { st.savedLogin = null; say(`<p>${esc(data.error)}</p>`, 'err'); st.afterCreds = () => run(scenario); return askCredsNow(); }
       if (data.code === 'API_KEY_REQUIRED' || data.code === 'API_KEY_INVALID') { say(`<p>${esc(data.error || 'I need your Claude API key.')}</p>`, 'err'); return askKey(() => run(scenario)); }
       say(`<p>${esc(data.error || 'The test did not start.')}</p>`, 'err');
       return showChoices();
@@ -560,7 +661,7 @@ async function clickEverything() {
   if (!res.ok || !data.sweepId) {
     if (data.code === 'FREE_SWEEP_USED') { say(`<p>${esc(data.error)}</p>`, 'err'); return upsell(false); }
     if (data.code === 'API_KEY_REQUIRED') return askKey(clickEverything);
-    if (data.code === 'SAVED_LOGIN_NOT_FOUND') { st.savedLogin = null; say(`<p>${esc(data.error)}</p>`, 'err'); st.afterCreds = clickEverything; return askCredsNow(); }
+    if (data.code === 'SAVED_LOGIN_NOT_FOUND' || data.code === 'SAVED_LOGIN_UNREADABLE') { st.savedLogin = null; say(`<p>${esc(data.error)}</p>`, 'err'); st.afterCreds = clickEverything; return askCredsNow(); }
     say(`<p>${esc(data.error || 'The check did not start.')}</p>`, 'err');
     return showChoices();
   }
@@ -702,7 +803,7 @@ function upsell(moreFixes) {
   say(`<p>${moreFixes ? 'Want the fixes for the other problems, and a retest once you have applied them?' : 'Want me to keep testing as you build?'}</p>
     <div class="plan"><b>€15</b><span class="muted"> /month + VAT</span>
       <div class="muted" style="margin-top:4px">Unlimited apps and test runs · a fix prompt for every problem · retest while you fix · keep watching. You connect your own Claude API key (a typical test costs €0.10–€0.50).</div></div>`);
-  setReply(`<div class="row"><button onclick="checkout()">Get the €15 plan</button></div>`);
+  setReply(`<div class="row"><button onclick="checkout()">Get the €15 plan</button><button class="ghost" onclick="showChoices()">Test something else</button></div>`);
 }
 async function checkout() {
   step('upgrade_click');
