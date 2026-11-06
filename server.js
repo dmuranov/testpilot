@@ -12447,7 +12447,15 @@ app.post('/api/test/multirole', async (req, res) => {
     extraRunHold = _gate.hold;
   }
 
-  const { appId, roles, apiKey, freeRun, userEmail } = req.body || {};
+  const { appId, apiKey, freeRun, userEmail } = req.body || {};
+  let { roles } = req.body || {};
+  // A role may sign in with the chat's saved app login (signed-in session only).
+  if (Array.isArray(roles) && roles.some((r) => r?.useSavedLogin && !r.email)) {
+    const saved = resolveAppLogin(requesterEmail(req), appId);
+    if (saved?.unreadable) return res.status(500).json({ error: 'TestPilot could not read the saved login on its side (not your app). Type the login once more, or try again in a few minutes.', code: 'SAVED_LOGIN_UNREADABLE' });
+    if (!saved) return res.status(400).json({ error: 'The saved login for this app is gone. Type the login again in the chat.', code: 'SAVED_LOGIN_NOT_FOUND' });
+    roles = roles.map((r) => (r?.useSavedLogin && !r.email ? { ...r, email: saved.email, password: saved.password } : r));
+  }
   if (await denyUnverifiedApp(res, user.email, appId)) return;
   if (!Array.isArray(roles) || roles.length < 2) {
     return res.status(400).json({ error: 'multirole requires at least 2 roles' });
@@ -12636,7 +12644,15 @@ app.post('/api/test/flow', async (req, res) => {
     extraRunHold = _gate.hold;
   }
 
-  const { appId, scenario, email, password, apiKey, freeRun, sessionState: rawSessionState, savedSessionRole } = req.body || {};
+  const { appId, scenario, apiKey, freeRun, sessionState: rawSessionState, savedSessionRole } = req.body || {};
+  let { email, password } = req.body || {};
+  // The chat's saved app login (signed-in session only), as /api/test.
+  if (!email && req.body?.useSavedLogin && appId) {
+    const saved = resolveAppLogin(requesterEmail(req), appId);
+    if (saved?.unreadable) return res.status(500).json({ error: 'TestPilot could not read the saved login on its side (not your app). Type the login once more, or try again in a few minutes.', code: 'SAVED_LOGIN_UNREADABLE' });
+    if (!saved) return res.status(400).json({ error: 'The saved login for this app is gone. Type the login again in the chat.', code: 'SAVED_LOGIN_NOT_FOUND' });
+    email = saved.email; password = saved.password;
+  }
   if (await denyUnverifiedApp(res, user.email, appId)) return;
   let { paymentMode } = req.body || {};
   paymentMode = FLOW_PAYMENT_MODES.includes(paymentMode) ? paymentMode : 'stop-before-pay';
@@ -14603,21 +14619,30 @@ app.post('/api/support', async (req, res) => {
 // shown), deletable. Runs that pass useSavedLogin resolve it on the server.
 const APP_LOGINS_FILE = './app-logins.json';
 const appLogins = new Map();   // canonicalEmail|appId → { owner, appId, emailEnc, passwordEnc, savedAt }
-const appLoginKey = (owner, appId) => `${canonicalEmail(owner)}|${appId}`;
+// Keyed on the signed-in email exactly (lowercased): canonicalEmail would merge
+// name+a@ and name+b@, which are separate accounts.
+const loginOwner = (e) => String(e || '').trim().toLowerCase();
+const appLoginKey = (owner, appId) => `${loginOwner(owner)}|${appId}`;
 async function loadAppLogins() {
   let raw;
   try { raw = await fs.readFile(APP_LOGINS_FILE, 'utf-8'); } catch { return; }   // none saved yet
   try { for (const r of JSON.parse(raw)) appLogins.set(appLoginKey(r.owner, r.appId), r); }
   catch (e) {
-    // Never treat a damaged file as "none saved": the next save would wipe every login.
-    console.error('[app-logins] app-logins.json could not be read, kept as app-logins.corrupt.json:', e.message);
-    await fs.copyFile(APP_LOGINS_FILE, './app-logins.corrupt.json').catch(() => {});
+    // Never treat a damaged file as "none saved": saving now would wipe every
+    // login. Keep a dated copy, refuse to write until someone looks, and alert.
+    appLoginsBroken = true;
+    const copy = `./app-logins.corrupt-${Date.now()}.json`;
+    await fs.copyFile(APP_LOGINS_FILE, copy).catch(() => {});
+    console.error(`[app-logins] app-logins.json could not be read (copy: ${copy}); saving is off until it is repaired:`, e.message);
+    sendAlert('app-logins-broken', 'saved app logins file is damaged', `app-logins.json could not be parsed (${e.message}). A copy is at ${copy}. Saving logins is switched off until the file is repaired and the server restarted, so nothing is overwritten.`).catch(() => {});
   }
 }
+let appLoginsBroken = false;
 // One write at a time, to a temp file renamed into place: two saves at once
 // cannot interleave into a broken file.
 let appLoginsWrite = Promise.resolve();
 function saveAppLogins() {
+  if (appLoginsBroken) { console.error('[app-logins] not saved: the file on disk is damaged (see the alert)'); return; }
   const body = JSON.stringify([...appLogins.values()]);
   appLoginsWrite = appLoginsWrite
     .then(() => fs.writeFile('./app-logins.tmp.json', body))
@@ -14631,7 +14656,7 @@ function resolveAppLogin(owner, appId) {
   // earlier crawl of that address still belongs to this client and this app.
   if (!r) {
     const url = platformMaps.get(appId)?.url;
-    const me = canonicalEmail(owner);
+    const me = loginOwner(owner);
     if (url) for (const x of appLogins.values()) { if (x.owner === me && platformMaps.get(x.appId)?.url === url) { r = x; break; } }
   }
   if (!r) return null;
@@ -14650,7 +14675,7 @@ app.post('/api/app-login', (req, res) => {
   if (!ownsApp(appId, user.email) && !isSuperAdmin(user.email)) return res.status(403).json({ error: 'This app belongs to another account.', code: 'APP_OWNED_BY_OTHER' });
   try {
     appLogins.set(appLoginKey(user.email, appId), {
-      owner: canonicalEmail(user.email), appId,
+      owner: loginOwner(user.email), appId,
       emailEnc: encryptSecret(String(email).trim().slice(0, 200)),
       passwordEnc: encryptSecret(String(password).slice(0, 200)),
       savedAt: new Date().toISOString(),
@@ -14663,7 +14688,7 @@ app.delete('/api/app-login/:appId', (req, res) => {
   const user = requireUser(req, res); if (!user) return;
   // Every crawl of the same address shares the login (resolveAppLogin): delete it from all.
   const url = platformMaps.get(req.params.appId)?.url;
-  const me = canonicalEmail(user.email);
+  const me = loginOwner(user.email);
   for (const [k, x] of appLogins) { if (x.owner === me && (x.appId === req.params.appId || (url && platformMaps.get(x.appId)?.url === url))) appLogins.delete(k); }
   saveAppLogins();
   res.json({ ok: true });
