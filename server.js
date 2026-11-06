@@ -3387,11 +3387,13 @@ async function hasOAuthSignIn(page) {
   ].join(', ');
   if (await page.locator(sel).first().isVisible({ timeout: 1500 }).catch(() => false)) return true;
   // Any language ("Accedi con Google", "Continuar con Google", "Mit Google
-  // anmelden"…): a button or link naming the provider, minus store badges and
-  // other Google/Apple products a sign-in page may link to.
+  // anmelden"…): a button or link with a sign-in word AND the provider, so a
+  // footer "GitHub" link or an App Store badge does not count.
+  const SIGN_IN = 'sign|log|continu|accedi|accedere|acceder|iniciar|inicia|entrar|anmelden|connexion|connecter|login';
+  const PROVIDER = 'google|github|microsoft|apple';
   return await page.locator('button, a, [role="button"]')
-    .filter({ hasText: /google|github|microsoft|apple/i })
-    .filter({ hasNotText: /play|store|maps|calendar|docs|drive|music|pay|privacy|terms/i })
+    .filter({ hasText: new RegExp(`(${SIGN_IN}).{0,30}(${PROVIDER})|(${PROVIDER}).{0,20}(${SIGN_IN})`, 'i') })
+    .filter({ hasNotText: /play|store|maps|calendar|docs|drive|music|privacy|terms/i })
     .filter({ visible: true })
     .count().then((n) => n > 0).catch(() => false);
 }
@@ -3587,7 +3589,7 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
       // Still asking for a code: it was not accepted (wrong, expired, or the submit
       // did not happen). Saying "logged in" here would crawl the code screen.
       if (await detectOtpField(page)) {
-        return { success: false, cause: 'login_credentials', screenshot: await takeScreenshot(page, 'login-2fa-rejected'), error: 'The verification code was entered, but the app still asks for it: the code may be wrong or expired. Run again and enter the newest code.' };
+        return { success: false, cause: 'login_code', screenshot: await takeScreenshot(page, 'login-2fa-rejected'), error: 'The verification code was entered, but the app still asks for it: the code may be wrong or expired. Run again and enter the newest code.' };
       }
       ctx.emit({ phase: 'login', type: 'info', message: '2FA code submitted — continuing.' });
       return 'handled';
