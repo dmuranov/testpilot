@@ -52,9 +52,11 @@ schedules.json
 embed-tokens.json
 content-engine-results*.json
 saved-sessions.json
+app-logins*.json
 
 # ── Ad-hoc gauntlet drivers (contain test credentials) ──
 pp-*
 
 # free-tier counters (runtime state, not code)
 free-runs-used.json*
+verified-sites.json
