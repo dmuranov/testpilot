@@ -11064,7 +11064,15 @@ function scenarioSuggestion(appId) {
 }
 
 app.post('/api/test', watchOnboarding('test', (req) => ({ email: onboardingEmail(req), url: platformMaps.get(req.body?.appId)?.url || req.body?.appId, detail: req.body?.scenario })), async (req, res) => {
-  const { appId, scenario, email, password, apiKey, freeRun, userEmail, sessionState: rawSessionState, savedSessionRole } = req.body;
+  const { appId, scenario, apiKey, freeRun, userEmail, sessionState: rawSessionState, savedSessionRole } = req.body;
+  let { email, password } = req.body;
+  // The login the client saved in the chat ("save this login for next time"),
+  // resolved here so it never travels back to the browser.
+  if (!email && req.body.useSavedLogin && appId) {
+    const saved = resolveAppLogin(requesterEmail(req) || userEmail, appId);
+    if (!saved) return res.status(400).json({ error: 'The saved login for this app is gone. Type the login again in the chat.', code: 'SAVED_LOGIN_NOT_FOUND' });
+    email = saved.email; password = saved.password;
+  }
   // "Bring your own session" — paste an already-authenticated Playwright
   // storageState (or cookies array) to skip login entirely. Sidesteps
   // SSO/OAuth/MFA/CAPTCHA logins that visionLogin can't handle. NOT persisted.
@@ -14095,7 +14103,7 @@ app.post('/api/billing/checkout', async (req, res) => {
         await stripe.subscriptions.update(live.id, { items: [{ id: item.id, price: PRICE_IDS[plan] }], proration_behavior: 'create_prorations' });
         await applyPlanChange({ email: session.email, userId: user.id, plan, source: 'checkout:switch' });
         console.log('[BILLING] switched', session.email, 'from', item?.price?.id, 'to', plan);
-        return res.json({ url: `${APP_URL}/app?upgraded=1`, switched: true });
+        return res.json({ url: `${APP_URL}/first-run?upgraded=1`, switched: true });
       }
     }
 
@@ -14211,7 +14219,7 @@ app.get('/api/billing/success', async (req, res) => {
         await applyPlanChange({ email, userId, plan, source: 'success-redirect' });
         if (plan === 'onerun') await grantOneRunCredit({ email, userId, sessionId: checkoutSession.id });
       }
-      return res.redirect('/app?upgraded=1');
+      return res.redirect('/first-run?upgraded=1');
     }
     res.redirect('/app');
   } catch (e) {
@@ -14587,6 +14595,54 @@ app.post('/api/support', async (req, res) => {
 // used for embed tokens' API keys (embedEncKey/encryptSecret/decryptSecret,
 // server.js:1224) — a Playwright storageState is bearer-equivalent to a live
 // login, same trust level as an API key.
+// ── Saved app logins (the chat's "save this login for next time") ──
+// The test login a client typed for THEIR app, kept only when they said yes:
+// encrypted at rest like saved sessions, never sent back (only the email is
+// shown), deletable. Runs that pass useSavedLogin resolve it on the server.
+const APP_LOGINS_FILE = './app-logins.json';
+const appLogins = new Map();   // canonicalEmail|appId → { owner, appId, emailEnc, passwordEnc, savedAt }
+const appLoginKey = (owner, appId) => `${canonicalEmail(owner)}|${appId}`;
+async function loadAppLogins() {
+  try { for (const r of JSON.parse(await fs.readFile(APP_LOGINS_FILE, 'utf-8'))) appLogins.set(appLoginKey(r.owner, r.appId), r); }
+  catch { /* none saved yet */ }
+}
+function saveAppLogins() {
+  fs.writeFile(APP_LOGINS_FILE, JSON.stringify([...appLogins.values()])).catch((e) => console.warn('[app-logins] save failed:', e.message));
+}
+function resolveAppLogin(owner, appId) {
+  if (!owner || !appId) return null;
+  const r = appLogins.get(appLoginKey(owner, appId));
+  if (!r) return null;
+  try { return { email: decryptSecret(r.emailEnc), password: decryptSecret(r.passwordEnc) }; } catch { return null; }
+}
+app.get('/api/app-login/:appId', (req, res) => {
+  const user = requireUser(req, res); if (!user) return;
+  const saved = resolveAppLogin(user.email, req.params.appId);
+  res.json(saved ? { saved: true, email: saved.email } : { saved: false });
+});
+app.post('/api/app-login', (req, res) => {
+  const user = requireUser(req, res); if (!user) return;
+  const { appId, email, password } = req.body || {};
+  if (!appId || !email || !password) return res.status(400).json({ error: 'appId, email and password are required' });
+  if (!ownsApp(appId, user.email) && !isSuperAdmin(user.email)) return res.status(403).json({ error: 'This app belongs to another account.', code: 'APP_OWNED_BY_OTHER' });
+  try {
+    appLogins.set(appLoginKey(user.email, appId), {
+      owner: canonicalEmail(user.email), appId,
+      emailEnc: encryptSecret(String(email).trim().slice(0, 200)),
+      passwordEnc: encryptSecret(String(password).slice(0, 200)),
+      savedAt: new Date().toISOString(),
+    });
+  } catch { return res.status(500).json({ error: 'Secret store unavailable' }); }
+  saveAppLogins();
+  res.json({ ok: true, email: String(email).trim() });
+});
+app.delete('/api/app-login/:appId', (req, res) => {
+  const user = requireUser(req, res); if (!user) return;
+  appLogins.delete(appLoginKey(user.email, req.params.appId));
+  saveAppLogins();
+  res.json({ ok: true });
+});
+
 const SAVED_SESSIONS_FILE = './saved-sessions.json';
 const savedSessions = new Map(); // `${owner}|${appId}|${role}` -> {owner, appId, role, sessionStateEnc, capturedAt}
 function savedSessionKey(owner, appId, role) { return `${canonicalEmail(owner)}|${appId}|${role}`; }
@@ -16827,6 +16883,7 @@ await loadFreeSpendToday();
 await loadSessions();
 await loadEmbedTokens();
 await loadSavedSessions();
+await loadAppLogins();
 await loadSweepDecisions();
 await loadFreeSweepUsed();
 console.log(`[freeSpend] monthly ceiling: ${FREE_MONTHLY_TOKEN_BUDGET} weighted tokens (~€${FREE_MONTHLY_BUDGET_EUR} at $${SONNET_INPUT_USD_PER_MTOK}/MTok input, ${USD_PER_EUR} USD/EUR)`);
@@ -16983,7 +17040,7 @@ async function notifySavedLoginProblem(s, why) {
   const appName = platformMaps.get(s.appId)?.url || s.appId;
   const what = why === 'deleted' ? `was deleted` : `no longer signs in (it has probably expired)`;
   try {
-    await mailer({ to, subject: `TestPilot cannot sign in to check ${appName}: save the login again`, text: `Your daily TestPilot check of ${appName} uses the saved login "${s.savedSessionRole}", which ${what}.
+    await mailer({ to, subject: `TestPilot cannot sign in to check ${appName}: save the login again`, text: `Your daily TestPilot check of ${appName} uses ${s.savedSessionRole ? `the saved login "${s.savedSessionRole}"` : 'the login you saved in the chat'}, which ${what}.
 
 This is not a problem with your app. Sign in once more in TestPilot (Saved logins, same name) and the daily check carries on by itself.
 
@@ -17048,8 +17105,15 @@ async function runSchedule(s) {
   let sessionState = null;
   try { if (s.sessionStateEnc) sessionState = JSON.parse(decryptSecret(s.sessionStateEnc)); } catch {}
   let savedIndexedDB = null;
-  const usesSavedLogin = !sessionState && !!s.savedSessionRole;
-  if (usesSavedLogin) {
+  // The chat's saved app login (email + password): typed into the app's own sign-in.
+  let appEmail = null, appPassword = null;
+  if (!sessionState && !s.savedSessionRole && s.savedAppLogin) {
+    const login = resolveAppLogin(s.ownerEmail, s.appId);
+    if (!login) { if (freeHold) freeHold.refund(); await notifySavedLoginProblem(s, 'deleted'); return finish('Skipped: the saved login for this app was deleted. Save it again in the TestPilot chat, then this schedule runs again.'); }
+    appEmail = login.email; appPassword = login.password;
+  }
+  const usesSavedLogin = !sessionState && (!!s.savedSessionRole || !!s.savedAppLogin);
+  if (usesSavedLogin && s.savedSessionRole) {
     const saved = resolveSavedSession(s.appId, s.savedSessionRole, s.ownerEmail);
     if (!saved && savedSessions.has(savedSessionKey(s.ownerEmail, s.appId, s.savedSessionRole))) {
       console.warn('[schedules] saved login could not be read (secret store?)', s.id, s.savedSessionRole);
@@ -17065,7 +17129,7 @@ async function runSchedule(s) {
   await acquireScanSlot();
   try {
     await runWithOurSideRetry(testId, s.appId, s.ownerEmail,
-      (quietError) => runAgentTest(testId, appKnowledge, s.scenario, { ownerEmail: s.ownerEmail, ownerUserId: s.ownerUserId || null, sessionState, indexedDB: savedIndexedDB, savedSessionRole: s.savedSessionRole || null, allowReplay: true, quietError }, apiKey));
+      (quietError) => runAgentTest(testId, appKnowledge, s.scenario, { ownerEmail: s.ownerEmail, ownerUserId: s.ownerUserId || null, sessionState, indexedDB: savedIndexedDB, savedSessionRole: s.savedSessionRole || null, email: appEmail, password: appPassword, allowReplay: true, quietError }, apiKey));
   } catch (e) {
     const r = testResults.get(testId);
     if (r) { r.status = 'error'; r.error = e.message; }
@@ -17086,7 +17150,7 @@ async function runSchedule(s) {
   if (usesSavedLogin && (/^login_/.test(String(result?.blockedReason?.cause || '')) || endedAtSignIn)) {
     s.lastTestId = testId;
     await notifySavedLoginProblem(s, 'expired');
-    return finish(`Skipped: the saved login "${s.savedSessionRole}" no longer signs in (it has probably expired). Save it again in TestPilot.`);
+    return finish(`Skipped: ${s.savedSessionRole ? `the saved login "${s.savedSessionRole}"` : 'the saved login'} no longer signs in (it may have changed or expired). Save it again in TestPilot.`);
   }
   if (usesSavedLogin && CHARGED_RUN_STATUSES.includes(result?.status)) s.loginProblemNotifiedAt = null;   // got through signed in: a later expiry mails again
   const curr = outcomeSignature(result);
@@ -17175,7 +17239,9 @@ app.post('/api/schedules', async (req, res) => {
   const user = requireUser(req, res);
   if (!user) return;
   const ownerEmail = (user.email || '').trim().toLowerCase();
-  const { appId, scenario, intervalHours, apiKey, sessionState: rawSessionState, alertEmail, useSupportKey, savedSessionRole } = req.body || {};
+  const { appId, scenario, intervalHours, apiKey, sessionState: rawSessionState, alertEmail, useSupportKey, savedSessionRole, useSavedLogin } = req.body || {};
+  if (useSavedLogin && !savedSessionRole && !resolveAppLogin(ownerEmail, appId))
+    return res.status(400).json({ error: 'There is no saved login for this app yet. Save it in the chat first.', code: 'SAVED_LOGIN_NOT_FOUND' });
   if (!appId || !scenario) return res.status(400).json({ error: 'appId and scenario are required' });
   const savedRole = savedSessionRole ? String(savedSessionRole).slice(0, 80) : null;
   if (savedRole && rawSessionState) return res.status(400).json({ error: 'Use either a saved login or a pasted session, not both.', code: 'SESSION_CONFLICT' });
@@ -17225,6 +17291,7 @@ app.post('/api/schedules', async (req, res) => {
     ownerEmail, ownerUserId: user.userId || null,
     keyEnc, useSupportKey: wantSupport, freeSchedule, sessionStateEnc,
     savedSessionRole: savedRole,   // resolved at each run, so re-saving the login keeps the schedule working
+    savedAppLogin: !savedRole && !!useSavedLogin,   // the chat's saved email + password, also resolved at each run
     intervalHours: interval,
     alertEmail: (alertEmail || ownerEmail || '').trim().toLowerCase() || null,
     active: true, createdAt: new Date().toISOString(),

@@ -78,7 +78,8 @@
 // plain-words report, the first problem's fix prompt. Every step calls the
 // same endpoints the dashboard uses; nothing here is a separate engine.
 const TERMS_VERSION = '1.0';
-const st = { email: '', url: '', origin: '', platform: 'other', platformName: '', appId: null, appEmail: '', appPw: '', testId: null, verification: null };
+const st = { email: '', url: '', origin: '', platform: 'other', platformName: '', appId: null, appEmail: '', appPw: '', testId: null, verification: null,
+  plan: 'free', freeUsed: false, savedLogin: null, apps: [], lastScenario: '', menu: [], afterCreds: null, afterSave: null };
 const PLATFORMS = [['base44', 'Base44'], ['lovable', 'Lovable'], ['bolt', 'Bolt'], ['replit', 'Replit'], ['v0', 'v0'], ['other', 'Something else / my own code']];
 
 const $chat = document.getElementById('chat');
@@ -267,7 +268,7 @@ function gotNoLogin() { me('No, it\'s public'); step('login', 'none'); learn(); 
 function askCreds() {
   me('Yes, it has a login');
   say('<p>Give me a login I can use. Please use a <b>test account</b>, not your real one: I\'ll click around like a customer would.</p>');
-  setReply(`<div class="row"><input id="ae" type="email" autocomplete="off" placeholder="test login email"><input id="ap" type="password" autocomplete="off" placeholder="password" onkeydown="if(event.key==='Enter')gotCreds()"></div>
+  setReply(`<div class="row"><input id="ae" type="email" name="tp-app-login" autocomplete="off" data-lpignore="true" placeholder="test login email"><input id="ap" type="password" name="tp-app-secret" autocomplete="new-password" data-lpignore="true" placeholder="password" onkeydown="if(event.key==='Enter')gotCreds()"></div>
     <div class="row"><button onclick="gotCreds()">Send</button></div>
     <div class="muted">Not your TestPilot account: the login for ${esc(st.origin || 'your app')}.</div>`);
 }
@@ -275,6 +276,11 @@ function gotCreds() {
   const e = document.getElementById('ae').value.trim(), p = document.getElementById('ap').value;
   if (!e || !p) return say('<p>I need both the email and the password.</p>', 'err');
   st.appEmail = e; st.appPw = p; me(e + ' · ••••••'); step('login', 'creds');
+  // Asked for in the middle of something (an app picked from the list, Keep
+  // watching): offer to save it, then carry on there. Otherwise it is for the
+  // first crawl, and the save offer comes once the app is known.
+  const next = st.afterCreds; st.afterCreds = null;
+  if (next) return askSaveLogin(next);
   learn();
 }
 
@@ -303,10 +309,10 @@ async function learn() {
           try { window.tpReportSignal && window.tpReportSignal({ type: 'stream_error', name: ev.category || 'unknown', message: ev.message, path: '/api/learn' }); } catch (e) {}
           return learnFailed(ev.message, ev.next);
         }
-        if (ev.phase === 'done') { endLive(); if (live) live.textContent = 'done'; step('learned'); return suggest(); }
+        if (ev.phase === 'done') { endLive(); if (live) live.textContent = 'done'; step('learned'); return afterLearn(); }
       }
     }
-    if (st.appId) return suggest();
+    if (st.appId) return afterLearn();
     learnFailed('The crawl stopped without finishing.', null);
   } catch (e) { learnFailed(netErr(e), null); }
 }
@@ -329,59 +335,179 @@ async function suggest() {
   } catch (e) {}
   showChoices();
 }
-function showChoices() {
-  const sug = picks.length
-    ? `<p>I looked at your app. Here's what I'd test. Your free test covers <b>one</b> of these:</p>
-       <div class="choices">${picks.map((p, i) => `<button class="choice" onclick="pick(${i})"><span>✅</span><span><b>${esc(p.name)}</b>${esc(p.description || '')}</span></button>`).join('')}</div>`
-    : `<p>I couldn't see much to suggest${st.appEmail ? '' : ' without logging in'}. Pick a test below${st.appEmail ? '' : ', or give me a test login and I\'ll look again'}.</p>`;
-  say(`${sug}
-    <div class="divider">─── or pick a test yourself ───</div>
-    <div class="choices">
-      <button class="choice" onclick="ownTest()"><span>🧭</span><span><b>Journey test</b>Describe any flow in your own words, e.g. "a customer books a table for Saturday".</span></button>
-      <button class="choice" onclick="toDashboard('security')"><span>🔒</span><span><b>Security check</b>Can users see each other's data? <span class="tag">needs 2 test accounts · opens in your dashboard</span></span></button>
-      <button class="choice" onclick="toDashboard('sweep')"><span>🖱️</span><span><b>Click-everything check</b>Find buttons and links that are broken. <span class="tag">opens in your dashboard</span></span></button>
-      <div class="choice locked"><span>👀</span><span><b>Keep watching</b>Rerun daily and tell me when something breaks. <span class="tag">€15/month plan</span></span></div>
-    </div>`);
-  setReply(st.appEmail ? '' : `<div class="row"><button class="ghost" onclick="askCreds()">Give a test login and look again</button></div>`);
+// ── numbered choices ──────────────────────────────────────
+// Every list in the chat is numbered: the client clicks an item or types its
+// number, the way they would answer a person.
+let numberHandler = null;
+function menu(title, items, extra) {
+  st.menu = items;
+  say(`${title}
+    <div class="choices">${items.map((it, i) => `<button class="choice${it.locked ? ' locked' : ''}" onclick="choose(${i + 1})"><span>${i + 1}.</span><span><b>${esc(it.label)}</b>${esc(it.desc || '')}${it.tag ? ` <span class="tag">${esc(it.tag)}</span>` : ''}</span></button>`).join('')}</div>`);
+  numberHandler = (n) => { const it = st.menu[n - 1]; if (it) { numberHandler = null; me(`${n}. ${it.label}`); it.act(); } };
+  setReply(`<div class="row"><input id="num" inputmode="numeric" placeholder="Type a number (1–${items.length})" onkeydown="if(event.key==='Enter')gotNumber()"><button onclick="gotNumber()">Send</button></div>${extra || ''}`);
 }
-function pick(i) {
-  const p = picks[i]; if (!p) return;
-  me(p.name); step('test_chosen', 'suggested');
-  run(`${p.name}: ${p.description || ''}`.trim());
+function choose(n) { if (numberHandler) numberHandler(n); }
+function gotNumber() {
+  const n = parseInt((document.getElementById('num') || {}).value, 10);
+  if (!(n >= 1 && n <= st.menu.length)) return say(`<p>Type a number from 1 to ${st.menu.length}.</p>`, 'err');
+  choose(n);
+}
+
+const paid = () => !!st.plan && !['free', 'onerun'].includes(st.plan);
+const keyName = () => 'testpilot_api_key_' + (st.email || 'anon');   // the dashboard keeps the key under the same name
+const claudeKey = () => { try { return localStorage.getItem(keyName()) || ''; } catch (e) { return ''; } };
+const hostOf = (u) => { try { return new URL(u).host; } catch (e) { return u || ''; } };
+
+// ── returning clients ─────────────────────────────────────
+// Signed in already: no email question. Back from paying: say so, get the key.
+async function start() {
+  let who = null;
+  try { const r = await fetch('/api/auth/me'); if (r.ok) who = await r.json(); } catch (e) {}
+  if (!who || !who.email) return askEmail();
+  st.email = who.email; st.plan = who.plan || 'free'; st.freeUsed = !!who.free_run_used;
+  if (new URLSearchParams(location.search).get('upgraded') === '1') {
+    history.replaceState({}, '', '/first-run');
+    say('<p><b>You are on the €15 plan.</b> 🎉 Unlimited tests, a fix for every problem, and Keep watching.</p>');
+    if (!claudeKey()) return askKey(welcomeBack);
+  }
+  welcomeBack();
+}
+async function welcomeBack() {
+  let apps = [];
+  try { apps = await (await fetch('/api/apps')).json(); } catch (e) {}
+  // One entry per address: a re-crawled app has an older map too; keep the newest.
+  const byUrl = new Map();
+  for (const a of (Array.isArray(apps) ? apps : []).sort((x, y) => String(y.crawledAt || '').localeCompare(String(x.crawledAt || '')))) {
+    if (!byUrl.has(a.url)) byUrl.set(a.url, a);
+  }
+  st.apps = [...byUrl.values()];
+  if (!st.apps.length) { say('<p>Welcome back! Let us test an app.</p>'); return askUrl(); }
+  menu('<p>Welcome back! Which app shall I test?</p>', [
+    ...st.apps.map((a) => ({ label: hostOf(a.url), desc: a.url, act: () => openApp(a) })),
+    { label: 'Another app', desc: 'Add a new one', act: () => askUrl() },
+  ]);
+}
+async function openApp(a) {
+  st.appId = a.appId; st.url = a.url; st.appEmail = ''; st.appPw = '';
+  try { st.origin = new URL(a.url).origin; } catch (e) { st.origin = a.url; }
+  try { const r = await (await fetch('/api/app-login/' + encodeURIComponent(a.appId))).json(); st.savedLogin = r.saved ? r.email : null; } catch (e) { st.savedLogin = null; }
+  if (st.savedLogin) say(`<p>I will sign in with your saved login <b>${esc(st.savedLogin)}</b>.</p>`);
+  else if (a.loginRequired) { st.afterCreds = suggest; say('<p>This app has a login. Which test account should I use?</p>'); return askCredsNow(); }
+  suggest();
+}
+// The login question without the "Yes, it has a login" echo (asked by the chat itself).
+function askCredsNow() {
+  say('<p>Please use a <b>test account</b>, not your real one: I click around like a customer would.</p>');
+  setReply(`<div class="row"><input id="ae" type="email" name="tp-app-login" autocomplete="off" data-lpignore="true" placeholder="test login email"><input id="ap" type="password" name="tp-app-secret" autocomplete="new-password" data-lpignore="true" placeholder="password" onkeydown="if(event.key==='Enter')gotCreds()"></div>
+    <div class="row"><button onclick="gotCreds()">Send</button></div>
+    <div class="muted">Not your TestPilot account: the login for ${esc(st.origin || 'your app')}.</div>`);
+}
+
+// ── save the login once ───────────────────────────────────
+function afterLearn() {
+  if (st.appPw && !st.savedLogin) return askSaveLogin(suggest);
+  suggest();
+}
+function askSaveLogin(next) {
+  st.afterSave = next;
+  say(`<p>Save this login for next time? Then I will not ask again for ${esc(st.origin || 'this app')}. It is stored encrypted, only used to test your app, and you can delete it any time.</p>`);
+  setReply(`<div class="row"><button onclick="saveLogin(true)">Yes, save it</button><button class="ghost" onclick="saveLogin(false)">No, ask me each time</button></div>`);
+}
+async function saveLogin(yes) {
+  me(yes ? 'Yes, save it' : 'No, ask me each time');
+  if (yes) {
+    try {
+      const { res, data } = await postJson('/api/app-login', { appId: st.appId, email: st.appEmail, password: st.appPw });
+      if (res.ok) { st.savedLogin = data.email; say('<p>Saved. 🔐</p>'); }
+      else say(`<p>${esc(data.error || 'I could not save it.')} I will keep using it while this page is open.</p>`, 'err');
+    } catch (e) { say('<p>' + esc(netErr(e)) + '</p>', 'err'); }
+  }
+  const next = st.afterSave; st.afterSave = null;
+  (next || suggest)();
+}
+
+// ── the Claude key, asked once ────────────────────────────
+function askKey(next) {
+  st.afterKey = next;
+  say('<p>Paste your Claude API key (it starts with <code>sk-ant-</code>). Your tests run on it, so you pay Anthropic directly: a typical test costs €0.10–€0.50. Tip: set a monthly limit at console.anthropic.com.</p>');
+  setReply(`<div class="row"><input id="key" type="password" name="tp-claude-key" autocomplete="new-password" placeholder="sk-ant-…" onkeydown="if(event.key==='Enter')gotKey()"><button onclick="gotKey()">Save</button></div>
+    <div class="muted">Kept in this browser only. Get one at <a href="https://console.anthropic.com/settings/keys" target="_blank" style="color:#c8f040">console.anthropic.com</a>.</div>`);
+}
+function gotKey() {
+  const k = (document.getElementById('key') || {}).value.trim();
+  if (!/^sk-ant-/.test(k)) return say('<p>That does not look like a Claude API key. It starts with <code>sk-ant-</code>.</p>', 'err');
+  try { localStorage.setItem(keyName(), k); } catch (e) {}
+  me('sk-ant-••••••');
+  const next = st.afterKey; st.afterKey = null;
+  if (next) next();
+}
+
+// ── 7b. pick a test (numbered) ────────────────────────────
+function showChoices() {
+  const freeLeft = !paid() && !st.freeUsed;
+  const items = picks.map((p) => ({ label: p.name, desc: p.description || '', act: () => { step('test_chosen', 'suggested'); run(`${p.name}: ${p.description || ''}`.trim()); } }));
+  items.push(
+    { label: 'Journey test', desc: 'Describe any flow in your own words, e.g. "a customer books a table for Saturday".', act: ownTest },
+    { label: 'Security check', desc: 'Can users see each other’s data?', tag: 'needs 2 test accounts · for now in the dashboard', act: () => toDashboard('security') },
+    { label: 'Click-everything check', desc: 'Find buttons and links that are broken.', tag: 'for now in the dashboard', act: () => toDashboard('sweep') },
+  );
+  const title = picks.length
+    ? `<p>I looked at your app. Which test do you want to run?${freeLeft ? ' Your free test covers <b>one</b>.' : ''}</p>`
+    : `<p>I could not see much to suggest${st.appEmail || st.savedLogin ? '' : ' without logging in'}. Which test do you want to run?</p>`;
+  menu(title, items, (st.appEmail || st.savedLogin) ? '' : `<div class="row"><button class="ghost" onclick="st.afterCreds=suggest;askCredsNow()">Give a test login and look again</button></div>`);
 }
 function ownTest() {
-  me('Journey test');
-  say('<p>What should a customer be able to do? One or two sentences, and say what should be true at the end.</p><p class="muted">Example: "Sign up, add an item called Test, and check it appears in the list."</p>');
-  setReply(`<div class="row"><textarea id="sc" rows="2" maxlength="600" placeholder="A customer can…"></textarea><button onclick="gotOwn()">Run</button></div>`);
+  say('<p>Please describe the flow you want to test: what a customer does, step by step, and what should be true at the end.</p><p class="muted">Example: "Open the shop, add the Ciotola in maiolica to the cart, go to checkout and check the total is €24."</p>');
+  setReply(`<div class="row"><textarea id="sc" rows="3" maxlength="600" placeholder="A customer…"></textarea><button onclick="gotOwn()">Run</button></div>`);
 }
+// Checked before it runs, so a vague request does not burn a run: long enough to
+// have steps, short enough for one flow, and something to check at the end.
 function gotOwn() {
-  const v = document.getElementById('sc').value.trim();
+  const v = (document.getElementById('sc') || {}).value.trim();
   if (!v) return;
-  if (v.split(/\s+/).filter(Boolean).length > 100) return say('<p>The free test takes up to 100 words. Can you make it shorter?</p>', 'err');
+  const words = v.split(/\s+/).filter(Boolean).length;
+  if (words < 6) return say('<p>Tell me a bit more: the steps a customer takes and what should happen at the end.</p>', 'err');
+  if (!paid() && words > 100) return say('<p>The free test takes up to 100 words. Can you make it shorter?</p>', 'err');
+  if (/\b(everything|every (button|page|link)|whole app|entire app|all (buttons|pages|links))\b/i.test(v)) return say('<p>That is the whole app, not one flow. Pick <b>Click-everything check</b> for that, or describe one flow.</p>', 'err');
   me(v); step('test_chosen', 'own');
   run(v);
 }
 function toDashboard(kind) {
-  me(kind === 'security' ? 'Security check' : 'Click-everything check'); step('test_chosen', kind);
-  say('<p>That one runs in your dashboard. Taking you there now…</p>');
+  step('test_chosen', kind);
+  say('<p>That one still runs in the dashboard for now. Taking you there…</p>');
   setTimeout(() => { location.href = '/app?learned=' + encodeURIComponent(st.appId || ''); }, 1200);
 }
 
 // ── 8. run ────────────────────────────────────────────────
+// Signs in with what it already has: the login typed on this page, else the
+// saved one. Paid runs go on the client's key (asked once, here in the chat).
 async function run(scenario) {
+  st.lastScenario = scenario;
+  const body = { appId: st.appId, scenario, userEmail: st.email, liveOffers: true, freeRun: !paid() && !st.freeUsed };
+  if (st.appPw) { body.email = st.appEmail; body.password = st.appPw; }
+  else if (st.savedLogin) body.useSavedLogin = true;
+  if (paid()) {
+    if (!claudeKey()) return askKey(() => run(scenario));
+    body.apiKey = claudeKey();
+  }
   setReply('<div class="muted">Testing… usually two to four minutes. You can leave this tab open.</div>');
   try {
     // Not retried on purpose: a second POST could spend the free run twice.
-    const { res, data } = await postJson('/api/test', { appId: st.appId, scenario, email: st.appEmail, password: st.appPw, freeRun: true, userEmail: st.email, liveOffers: true });
+    const { res, data } = await postJson('/api/test', body);
     if (!res.ok || !data.testId) {
       if (data.code === 'SITE_NOT_VERIFIED') { say('<p>I need the ownership check again for this address.</p>', 'err'); return askVerify(); }
+      if (data.code === 'SCENARIO_NOT_TESTABLE') { say(`<p>${esc(data.error || 'I cannot test that as written.')}</p>${data.hint ? `<p class="muted">${esc(data.hint)}</p>` : ''}`, 'err'); return ownTest(); }
+      if (data.code === 'FREE_RUN_USED' || res.status === 402) { st.freeUsed = true; say(`<p>${esc(data.error || 'Your free test is used.')}</p>`, 'err'); return upsell(false); }
+      if (data.code === 'SAVED_LOGIN_NOT_FOUND') { st.savedLogin = null; say(`<p>${esc(data.error)}</p>`, 'err'); st.afterCreds = () => run(scenario); return askCredsNow(); }
+      if (data.code === 'API_KEY_REQUIRED' || data.code === 'API_KEY_INVALID') { say(`<p>${esc(data.error || 'I need your Claude API key.')}</p>`, 'err'); return askKey(() => run(scenario)); }
       say(`<p>${esc(data.error || 'The test did not start.')}</p>`, 'err');
-      return setReply(`<div class="row"><button onclick="showChoices()">Pick again</button></div>`);
+      return showChoices();
     }
+    if (!paid()) st.freeUsed = true;
     st.testId = data.testId; step('run_started');
     const bubble = say('<p>Testing your app now, step by step…</p><p class="live" id="run-live">starting</p>');
     stream(data.testId, bubble.querySelector('#run-live'));
-  } catch (e) { say('<p>' + esc(netErr(e)) + '</p>', 'err'); setReply(`<div class="row"><button onclick="showChoices()">Pick again</button></div>`); }
+  } catch (e) { say('<p>' + esc(netErr(e)) + '</p>', 'err'); showChoices(); }
 }
 function stream(testId, live) {
   let finished = false;
@@ -404,39 +530,73 @@ function stream(testId, live) {
   };
 }
 
-// ── 9. report + taster fix ────────────────────────────────
+// ── 9. report: problems, fixes, what next ─────────────────
 async function report(testId) {
   let r = {};
   try { r = await (await fetch('/api/test/' + testId)).json(); } catch (e) {}
   step('report', r.status || '');
   const bugs = Array.isArray(r.bugs) ? r.bugs : [];
   const status = r.status || '';
-  if (!bugs.length && status === 'completed') {
-    say(`<p><b>Everything in this test worked.</b> ✅ ${esc((r.steps || []).length)} steps, no problems found.</p>`);
-    return upsell(false);
+  // completed_with_unverified is a pass too: the flow worked, one check could not
+  // be fully confirmed (it used to read as "stopped before a verdict").
+  if (!bugs.length && ['completed', 'completed_with_unverified'].includes(status)) {
+    say(`<p><b>Everything in this test worked.</b> ✅ ${esc((r.steps || []).length)} steps, no problems found.</p>${status === 'completed_with_unverified' ? '<p class="muted">One check could not be fully confirmed from the page, so take a quick look yourself if it matters.</p>' : ''}`);
+    return paid() ? whatNext(r, true) : upsell(false);
   }
   if (!bugs.length) {
-    say(`<p>The test stopped before it could give a verdict${r.error ? ` (${esc(String(r.error).slice(0, 300))})` : ''}.</p><p>When that's on our side, your free test isn't used up, so you can run it again.</p>`, 'err');
-    return setReply(`<div class="row"><button onclick="showChoices()">Run again</button><button class="ghost" onclick="location.href='/app'">Open dashboard</button></div>`);
+    say(`<p>The test stopped before it could give a verdict${r.error ? ` (${esc(String(r.error).slice(0, 300))})` : ''}.</p><p>When that is on our side, it does not count, so you can run it again.</p>`, 'err');
+    return menu('<p>What next?</p>', [
+      { label: 'Run it again', act: () => run(st.lastScenario) },
+      { label: 'Test something else', act: showChoices },
+    ]);
   }
+  const all = paid();
   say(`<p>I found <b>${bugs.length} problem${bugs.length === 1 ? '' : 's'}</b>:</p>
-    ${bugs.map((b, i) => `<div class="problem${i ? ' locked' : ''}"><b>${i + 1}.</b> ${esc(String(b.description || b).slice(0, 300))}${i ? '<div class="muted" style="margin-top:4px">🔒 Fix prompt included in the €15/month plan</div>' : ''}</div>`).join('')}`);
-  const bubble = say(`<p>Here's the fix for problem 1. Paste it into ${esc(st.platformName && st.platform !== 'other' ? st.platformName + '\'s AI chat' : 'your builder\'s AI chat')}:</p><p class="live" id="fix-live">writing it…</p>`);
+    ${bugs.map((b, i) => `<div class="problem${!all && i ? ' locked' : ''}"><b>${i + 1}.</b> ${esc(String(b.description || b).slice(0, 300))}${!all && i ? '<div class="muted" style="margin-top:4px">🔒 Fix prompt included in the €15/month plan</div>' : ''}</div>`).join('')}`);
+  const where = esc(st.platformName && st.platform !== 'other' ? st.platformName + '’s AI chat' : 'your builder’s AI chat');
+  for (let i = 0; i < (all ? bugs.length : 1); i++) {
+    const bubble = say(`<p>The fix for problem ${i + 1}. Paste it into ${where}:</p><p class="live" id="fix-live-${i}">writing it…</p>`);
+    try {
+      const { res, data } = await postJson('/api/fix-prompt', { testId, index: i, platform: st.platform, apiKey: all ? claudeKey() : undefined });
+      const live = bubble.querySelector('#fix-live-' + i);
+      if (res.ok && data.prompt) {
+        live.outerHTML = `<code class="box" id="fix-box-${i}">${esc(data.prompt)}</code><button class="ghost" onclick="copy(document.getElementById('fix-box-${i}').textContent,this)">Copy the fix</button>`;
+        step('fix_shown');
+      } else live.textContent = data.error || 'I could not write the fix right now.';
+    } catch (e) { bubble.querySelector('#fix-live-' + i).textContent = netErr(e); }
+  }
+  return all ? whatNext(r, false) : upsell(bugs.length > 1);
+}
+function whatNext(r, clean) {
+  const items = [];
+  if (!clean) items.push({ label: 'Retest', desc: 'After you pasted the fix and published your app: the same test again.', act: () => run(st.lastScenario) });
+  if (clean) {
+    const month = r.costEur ? `about €${Math.max(0.01, r.costEur * 30).toFixed(2)}/month on your Claude key` : 'usually €3–€15/month on your Claude key';
+    items.push({ label: 'Keep watching it daily', desc: `I rerun it every day and only message you when it breaks, with the fix. ${month}.`, act: keepWatching });
+  }
+  items.push({ label: 'Test something else', desc: '', act: showChoices });
+  items.push({ label: 'Another app', desc: '', act: welcomeBack });
+  menu('<p>What next?</p>', items);
+}
+async function keepWatching() {
+  if (!claudeKey()) return askKey(keepWatching);
+  // A typed login that was not saved cannot be reused by a daily run.
+  if (st.appPw && !st.savedLogin) { say('<p>The daily check signs in on its own, so it needs the login saved.</p>'); return askSaveLogin(keepWatching); }
   try {
-    const { res, data } = await postJson('/api/fix-prompt', { testId, index: 0, platform: st.platform });
-    const live = bubble.querySelector('#fix-live');
-    if (res.ok && data.prompt) {
-      live.outerHTML = `<code class="box" id="fix-box">${esc(data.prompt)}</code><button class="ghost" onclick="copy(document.getElementById('fix-box').textContent,this)">Copy the fix</button>`;
-      step('fix_shown');
-    } else live.textContent = data.error || 'I could not write the fix right now.';
-  } catch (e) { bubble.querySelector('#fix-live').textContent = netErr(e); }
-  upsell(bugs.length > 1);
+    const { res, data } = await postJson('/api/schedules', { appId: st.appId, scenario: st.lastScenario, intervalHours: 24, apiKey: claudeKey(), useSavedLogin: !!st.savedLogin || undefined });
+    if (res.ok) say('<p>👀 Watching it daily. You only hear from me if it breaks, with the fix ready to paste.</p>');
+    else say(`<p>${esc(data.error || 'I could not set that up.')}</p>`, 'err');
+  } catch (e) { say('<p>' + esc(netErr(e)) + '</p>', 'err'); }
+  menu('<p>What next?</p>', [
+    { label: 'Test something else', act: showChoices },
+    { label: 'Another app', act: welcomeBack },
+  ]);
 }
 function upsell(moreFixes) {
-  say(`<p>${moreFixes ? 'Want the fixes for the other problems, and a retest once you\'ve applied them?' : 'Want me to keep testing as you build?'}</p>
+  say(`<p>${moreFixes ? 'Want the fixes for the other problems, and a retest once you have applied them?' : 'Want me to keep testing as you build?'}</p>
     <div class="plan"><b>€15</b><span class="muted"> /month + VAT</span>
       <div class="muted" style="margin-top:4px">Unlimited apps and test runs · a fix prompt for every problem · retest while you fix · keep watching. You connect your own Claude API key (a typical test costs €0.10–€0.50).</div></div>`);
-  setReply(`<div class="row"><button onclick="checkout()">Get the €15 plan</button><button class="ghost" onclick="location.href='/app'">Open my dashboard</button></div>`);
+  setReply(`<div class="row"><button onclick="checkout()">Get the €15 plan</button></div>`);
 }
 async function checkout() {
   step('upgrade_click');
@@ -447,7 +607,7 @@ async function checkout() {
   } catch (e) { say('<p>' + esc(netErr(e)) + '</p>', 'err'); }
 }
 
-askEmail();
+start();
 </script>
 </body>
 </html>
