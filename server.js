@@ -4117,6 +4117,17 @@ async function probeInteraction(page, action, target, opts = {}) {
 
 // Select from dropdown — comprehensive strategy
 async function selectFromDropdown(page, triggerText, optionText) {
+  // "Qty [Ciotola in maiolica]": one select per item (a cart line, a table row).
+  // The bracket names the item; the native fast path below picks that item's select.
+  const entTrigger = splitEntityTarget(triggerText);
+  let triggerCtx = null;
+  if (entTrigger) {
+    triggerText = entTrigger.base;
+    await tagEntityContext(page);
+    const r = await page.evaluate(pickEntityControlInPage, { ...entTrigger, selects: true }).catch(() => ({ ok: false, items: [] }));
+    if (r.ok) triggerCtx = entTrigger.ctx;   // that item's select carries data-tp-pick
+    else if (r.items && r.items.length) return { success: false, reason: `No dropdown for "${entTrigger.ctx}". Items with one: ${r.items.map((x) => `"${x}"`).join(', ')}.` };
+  }
   // These searchable-combobox controls (radix Popover + cmdk) render their
   // trigger, search input, and options ASYNC and hydrate late — so fixed waits
   // race them. Define the selectors up front and POLL for the popover instead
@@ -4144,11 +4155,13 @@ async function selectFromDropdown(page, triggerText, optionText) {
   // matching <select> and drive it directly before any custom-dropdown logic.
   {
     const wantsAnyN = !(optionText || '').trim() || /^(any|first|the first|whichever|some|cualquier|primer|el primero|alg[uú]n|alguno)\b/i.test((optionText || '').trim());
-    const picked = await page.evaluate(({ label, want, anyMode }) => {
+    const picked = await page.evaluate(({ label, want, anyMode, ctx }) => {
       const STOP = new Set(['select','selecciona','seleccionar','seleccione','choose','elegir','elige','elija','escoge','escoger','wählen','auswählen','scegli','choisir','sélectionner','the','a','an','un','una','el','la','los','las','de','del','dropdown','field','campo','menu','list','lista','please','por','favor','from','to','in']);
       const toks = s => (s || '').toLowerCase().replace(/[^a-záéíóúñü\s]/gi,' ').split(/\s+/).filter(w => w && !STOP.has(w));
       const isPlaceholder = (o) => o.value === '' || /seleccion|select|choose|choisir|--|elij|elig|escog|auswäh/i.test((o.textContent||'').trim());
-      const selects = [...document.querySelectorAll('select')].filter(s => !s.disabled && s.offsetParent !== null && s.options.length);
+      let selects = [...document.querySelectorAll('select')].filter(s => !s.disabled && s.offsetParent !== null && s.options.length);
+      // A named item ("[Ciotola in maiolica]"): only the select picked for it.
+      if (ctx) { const mine = selects.filter((s) => s.hasAttribute('data-tp-pick')); if (mine.length) selects = mine; }
       if (!selects.length) return null;
       const wantToks = toks(label);
       let best = null, bestScore = -1;
@@ -4187,7 +4200,7 @@ async function selectFromDropdown(page, triggerText, optionText) {
       if (!chosen) return { available: real.map(o => (o.textContent || '').trim()).filter(Boolean).slice(0, 25) };
       best.setAttribute('data-tp-nselect', '1');
       return { value: chosen.value || null, text: (chosen.textContent || '').trim() };
-    }, { label: triggerText, want: optionText, anyMode: wantsAnyN }).catch(() => null);
+    }, { label: triggerText, want: optionText, anyMode: wantsAnyN, ctx: triggerCtx }).catch(() => null);
 
     if (picked && (picked.value !== undefined && picked.value !== null || picked.text)) {
       const nsel = page.locator('[data-tp-nselect]').first();
@@ -4660,6 +4673,91 @@ function describeToggles(toggles) {
   return ` This page has toggle controls that are NOT plain buttons — click one by its name: ${list}.`;
 }
 
+// Several controls with the same label ("Add to cart" on every product, "Edit"
+// on every row, one quantity select per cart line): each is tagged with the name
+// of the item it belongs to (data-tp-ctx), so the agent can say which one it
+// means ("Add to cart [Tagliere in ulivo]") and the click lands on that one.
+// The item is the largest ancestor that holds only this control of its kind;
+// its name is that block's heading/title, else its first line of text.
+// Returns the tagged controls [{ label, ctx, select, value }] (empty when no label
+// repeats). Each tagged element also carries data-tp-label: the label exactly as
+// capturePageKnowledge names buttons (icons stripped, then aria-label/title), so
+// the Buttons list, the bracket target and the click all agree on one name.
+async function tagEntityContext(page) {
+  return page.evaluate(() => {
+    const ICON_SEL = 'mat-icon, .mat-icon, .material-icons, .material-icons-outlined, .material-symbols-outlined, svg, i[class*="fa" i], [aria-hidden="true"]';
+    const visible = (el) => el.offsetParent !== null || el.getClientRects().length > 0;
+    const textLabel = (el) => {
+      const clone = el.cloneNode(true);
+      clone.querySelectorAll(ICON_SEL).forEach((n) => n.remove());
+      const t = (clone.textContent || '').replace(/\s+/g, ' ').trim() || (el.value || '').trim();
+      return (t || (el.getAttribute('aria-label') || el.getAttribute('title') || '').trim()).slice(0, 60);
+    };
+    // Selects group by their options, so a per-row quantity select repeats but a
+    // country select and a sort select do not join it.
+    const groupKey = (el) => el.tagName === 'SELECT'
+      ? 'select:' + [...el.options].slice(0, 6).map((o) => (o.textContent || '').trim()).join('|')
+      : textLabel(el);
+    const BAD_NAME = /^[\d\s.,€$£%:+-]*$|^(new|sale|hot|nuevo|novedad|oferta|nuovo|neu)$/i;
+    const nameOf = (c, el, label) => {
+      for (const sel of ['h1,h2,h3,h4,h5,h6,[itemprop="name"],[class*="title" i],[class*="name" i]', 'strong,b,td,th,label']) {
+        for (const h of c.querySelectorAll(sel)) {
+          if (h === el || el.contains(h) || h.contains(el)) continue;
+          const t = (h.innerText || '').trim().replace(/\s+/g, ' ');
+          if (t && t !== label && t.length >= 2 && t.length <= 60 && !BAD_NAME.test(t)) return t;
+        }
+      }
+      return (c.innerText || '').split('\n').map((s) => s.trim()).find((s) => s && s !== label && s.length >= 2 && !BAD_NAME.test(s)) || '';
+    };
+    document.querySelectorAll('[data-tp-ctx]').forEach((e) => { e.removeAttribute('data-tp-ctx'); e.removeAttribute('data-tp-label'); });
+    const els = [...document.querySelectorAll('button, [role="button"], a, input[type="submit"], input[type="button"], select')].filter(visible);
+    const groups = new Map();
+    for (const el of els) { const k = groupKey(el); if (!k) continue; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(el); }
+    const out = [];
+    for (const peers of groups.values()) {
+      if (peers.length < 2 || peers.length > 60) continue;
+      for (const el of peers) {
+        let c = el;
+        while (c.parentElement && c.parentElement !== document.body && peers.filter((p) => c.parentElement.contains(p)).length === 1) c = c.parentElement;
+        if (c === el) continue;
+        const isSelect = el.tagName === 'SELECT';
+        const label = isSelect ? '' : textLabel(el);
+        const name = nameOf(c, el, label).slice(0, 40);
+        if (!name) continue;
+        el.setAttribute('data-tp-ctx', name);
+        el.setAttribute('data-tp-label', label);
+        out.push({ label, ctx: name, select: isSelect, value: isSelect ? ((el.options[el.selectedIndex] || {}).text || '').trim() : '' });
+      }
+    }
+    return out;
+  }).catch(() => []);
+}
+// "Add to cart [Tagliere in ulivo]" → { base: 'Add to cart', ctx: 'Tagliere in ulivo' };
+// null for a plain label. A bracket holding a count or a shortcut ("Cart [3]",
+// "Save [Ctrl+S]") is part of the label, not an item.
+function splitEntityTarget(label) {
+  const m = /^(.+?)\s*\[(.+)\]\s*$/.exec(String(label || ''));
+  if (!m) return null;
+  const ctx = m[2].trim();
+  if (/^\d+$|^(ctrl|cmd|alt|shift|⌘|⌥)\b/i.test(ctx)) return null;
+  return { base: m[1].trim(), ctx };
+}
+// Of the tagged controls with this label, the one for the named item: an exact
+// item name first, then a name that contains it, then one it contains (longest).
+// Runs in the page, so it has no access to anything above.
+function pickEntityControlInPage({ base, ctx, selects }) {
+  const norm = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const want = norm(base), wc = norm(ctx);
+  const els = [...document.querySelectorAll('[data-tp-ctx]')].filter((el) => (el.tagName === 'SELECT') === !!selects && (selects || norm(el.getAttribute('data-tp-label')) === want));
+  const score = (el) => { const c = norm(el.getAttribute('data-tp-ctx')); return c === wc ? 3e3 : c.includes(wc) ? 2e3 - c.length : wc.includes(c) ? 1e3 + c.length : -1; };
+  let best = null, bs = -1;
+  for (const el of els) { const s = score(el); if (s > bs) { bs = s; best = el; } }
+  document.querySelectorAll('[data-tp-pick]').forEach((e) => e.removeAttribute('data-tp-pick'));
+  if (!best || bs < 0) return { ok: false, items: [...new Set(els.map((el) => el.getAttribute('data-tp-ctx')))].slice(0, 12) };
+  best.setAttribute('data-tp-pick', '1');
+  return { ok: true };
+}
+
 async function clickButton(page, label, { skipEscape = false, frame = null } = {}) {
   // Frame-scoped resolution: the target lives inside an <iframe> (capture tagged
   // it with a frame selector). A FrameLocator lets Playwright reach into the
@@ -4721,6 +4819,28 @@ async function clickButton(page, label, { skipEscape = false, frame = null } = {
   }
 
   const urlBefore = page.url();
+
+  // Strategy 0: "label [item]" — the same label on many items (tagEntityContext):
+  // click the one inside the named item. No such item → the plain label below.
+  const ent = splitEntityTarget(label);
+  if (ent) {
+    await tagEntityContext(page);
+    const r = await page.evaluate(pickEntityControlInPage, { ...ent, selects: false }).catch(() => ({ ok: false, items: [] }));
+    if (r.ok) {
+      const loc = page.locator('[data-tp-pick]').first();
+      try {
+        await loc.scrollIntoViewIfNeeded({ timeout: 1500 }).catch(() => {});
+        await loc.click({ timeout: 5000 });
+        await page.waitForTimeout(1200);
+        return { success: true, navigated: page.url() !== urlBefore, url: page.url() };
+      } catch {
+        return { success: false, reason: `"${ent.base}" for "${ent.ctx}" could not be clicked (it may be covered or disabled).` };
+      }
+    }
+    // The label repeats but not on that item: never fall back to the first one.
+    if (r.items && r.items.length) return { success: false, reason: `No "${ent.base}" for "${ent.ctx}". Items with that button: ${r.items.map((x) => `"${x}"`).join(', ')}.` };
+    label = ent.base;   // the label no longer repeats: there is only one to click
+  }
 
   // Strategy 1: JavaScript DOM walk — find the MOST SPECIFIC clickable
   // element with this text, then click it via Playwright's mouse API.
@@ -8125,7 +8245,7 @@ RULES:
     • reject / decline / deny / dismiss
     • cancel / undo / revert / back out
     When the literal verb from the scenario is not present as a button label on screen, SCAN the visible buttons for any synonym in the same intent family BEFORE concluding "the button is missing". A button labelled "Finalizar trabajo" satisfies a scenario step that says "close the job". A button labelled "Emitir factura" satisfies "send the invoice". Reporting "no [literal-verb] button found" as an app bug is wrong if a synonym button exists — apps choose their own terminology and that is not a defect.
-19. THE LIVE TURN IS THE GROUND TRUTH — Every turn you receive a FRESH screenshot of the current page AND a text list of visible Buttons / Fields / Dropdowns / Status badges / Clickable elements. This is the LIVE state of the page right now, not what was there 5 turns ago and not what your initial crawl memory shows. Before deciding your next action, READ this turn's Buttons list. The button you need is almost always somewhere in it. Decisions made against stale memory ("I remember a Cerrar button being here") instead of the live snapshot ("the visible button is Finalizar") are how the agent gets stuck declaring "missing" things that are right there. When you cannot find an action button you expected, the answer is almost never "it's missing" — it's "look more carefully at this turn's Buttons list, scroll, or check a synonym (rule 18)".
+19. THE LIVE TURN IS THE GROUND TRUTH — Every turn you receive a FRESH screenshot of the current page AND a text list of visible Buttons / Fields / Dropdowns / Status badges / Clickable elements. This is the LIVE state of the page right now, not what was there 5 turns ago and not what your initial crawl memory shows. Before deciding your next action, READ this turn's Buttons list. The button you need is almost always somewhere in it. Decisions made against stale memory ("I remember a Cerrar button being here") instead of the live snapshot ("the visible button is Finalizar") are how the agent gets stuck declaring "missing" things that are right there. When you cannot find an action button you expected, the answer is almost never "it's missing" — it's "look more carefully at this turn's Buttons list, scroll, or check a synonym (rule 18)". SAME LABEL ON SEVERAL ITEMS: when one label belongs to many items (an "Add to cart" on every product, an "Edit" on every row), the Buttons list shows it once per item with the item in brackets — "Add to cart [Tagliere in ulivo]". Use exactly that as the click target to act on that item; a bare "Add to cart" only ever reaches the first one. Dropdowns that repeat per item are listed the same way — use "dropdown [Ciotola in maiolica]" as the select_dropdown trigger.
 20. FILL → SAVE — After filling all required inputs on a form, your next action is the commit button (Save / Guardar / Submit / Enviar / Crear / Confirmar / Aceptar / Update / Actualizar). Use \`scroll_to\` if it's below the fold. Don't navigate, verify, or move on to the next scenario step until you've clicked save AND seen confirmation (URL change to a detail page, success toast, badge change, redirect). See HOW WEB FORMS BEHAVE above for the full reasoning — silence after a fill is not failure; the next action is save, not another fill.
 16. FORM COMPLETENESS — Fill every required input before saving (see HOW WEB FORMS BEHAVE above). The Fields list annotates pre-populated values like \`<field name> [currently="X" — overwrite if your scenario needs a different value]\`. Numeric defaults of 0 or 1 on a data-capture form almost always need overwriting. If the scenario doesn't pin exact values but the field is clearly required, substitute realistic ones (qty 2-5, price 10-100). Reports of "zero total / empty saved record" are valid bugs ONLY if every field was filled with non-default values AND the save still produced zero — otherwise it's your missing input, not an app defect.
 15. STATE-CHANGE vs ANCILLARY ACTIONS — Many apps have multiple buttons that LOOK like a state change but aren't. Common confusions:
@@ -8890,7 +9010,9 @@ What is your first action?`,
                 status = tg.now === null || tg.was !== tg.now ? 'pass' : 'retry';
                 break;
               }
-              outcome = `Could not find "${action.target}" on screen.` + describeToggles(tg.toggles);
+              outcome = clickResult.reason
+                ? `Could not click "${action.target}": ${clickResult.reason}`   // a named item that does not have this button
+                : `Could not find "${action.target}" on screen.` + describeToggles(tg.toggles);
               status = 'retry';
               const k = tgtRaw.toLowerCase().slice(0, 50);
               const prev = recentFailedClicks.get(k);
@@ -10060,6 +10182,28 @@ RESPOND ONLY JSON: {"confirmed":true,"actual":"the visible failure, plainly","de
           return name;
         }).filter(Boolean).slice(0, 24);
         const visibleDropdowns = liveState.dropdowns.map(d => `"${d.currentValue || d.label}"`).slice(0, 5);
+        // Same label on several items: list it once per item with the item in
+        // brackets ("Add to cart [Tagliere in ulivo]"), which is also the click
+        // target — a bare "Add to cart" can only ever reach the first one.
+        try {
+          const perItem = await tagEntityContext(page);
+          if (perItem.length) {
+            // Every other button stays listed; a repeated label shows at most 8
+            // of its items, so a long catalog cannot push "Checkout" out of view.
+            const dupLabels = new Set(perItem.filter((p) => !p.select).map((p) => p.label));
+            const expanded = [];
+            for (const b of visibleBtns) {
+              if (!dupLabels.has(b)) { expanded.push(b); continue; }
+              if (expanded.some((x) => x.startsWith(b + ' ['))) continue;
+              const mine = perItem.filter((p) => !p.select && p.label === b);
+              for (const p of mine.slice(0, 8)) expanded.push(`${b} [${p.ctx}]`);
+              if (mine.length > 8) expanded.push(`${b} [… ${mine.length - 8} more items: name the item in brackets]`);
+            }
+            visibleBtns.splice(0, visibleBtns.length, ...expanded.slice(0, 40));
+            const sel = perItem.filter((p) => p.select);
+            if (sel.length) visibleDropdowns.push(...sel.slice(0, 8).map((p) => `"dropdown [${p.ctx}]" (now "${p.value}")`));
+          }
+        } catch { /* the plain lists still stand */ }
         const visibleLinks = (liveState.links || []).map(l => l.text).filter(t => t && t.length > 2 && t.length < 60).slice(0, 10);
         
         // Also get clickable text elements (cards, divs with onclick, etc.)
