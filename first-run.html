@@ -423,7 +423,7 @@ async function welcomeBack() {
 // Everything that belongs to one app, reset before another is opened or added.
 function resetApp() {
   Object.assign(st, { appId: null, url: '', origin: '', appEmail: '', appPw: '', savedLogin: null, loginAnswered: false,
-    secondEmail: '', secondPw: '', platform: 'other', platformName: '', verification: null, lastScenario: '', lastKind: 'journey',
+    secondEmail: '', secondPw: '', peerEmail: '', peerPw: '', platform: 'other', platformName: '', verification: null, lastScenario: '', lastKind: 'journey',
     afterCreds: null, afterVerify: null, afterSecond: null, afterKey: null, afterSave: null, afterSaveNo: null });
   picks = [];
 }
@@ -545,10 +545,11 @@ async function securityCheck() {
     say('<p>First the login of account 1, the one whose data I try to reach.</p>');
     st.afterCreds = securityCheck; return askCredsNow();
   }
-  if (!st.secondEmail) return askSecondAccount(`To see whether one customer can reach another customer's data, I sign in as a <b>second test account</b> (a different user of ${esc(st.origin || 'your app')}) and try to open account 1's records.`, securityCheck);
+  // Another CUSTOMER, never Multi-role's admin: an admin may read every order by design.
+  if (!st.peerEmail) return askSecondAccount(`To see whether one customer can reach another customer's data, I sign in as a <b>second customer account</b> (an ordinary user of ${esc(st.origin || 'your app')} like account 1, not an admin) and try to open account 1's records.`, securityCheck, 'peer');
   const userA = { name: 'Account 1' };
   if (st.appPw) { userA.email = st.appEmail; userA.password = st.appPw; } else userA.useSavedLogin = true;
-  const body = { appId: st.appId, userA, userB: { name: 'Account 2', email: st.secondEmail, password: st.secondPw }, mode: 'read-only' };
+  const body = { appId: st.appId, userA, userB: { name: 'Account 2', email: st.peerEmail, password: st.peerPw }, mode: 'read-only' };
   if (paid()) { if (!claudeKey()) return askKey(securityCheck); body.apiKey = claudeKey(); }
   lockMenus();
   setReply('<div class="muted">Checking… usually three to six minutes. Nothing is changed or deleted. You can leave this tab open.</div>');
@@ -574,13 +575,15 @@ function gotSecond() {
   const e = (document.getElementById('be') || {}).value.trim(), p = (document.getElementById('bp') || {}).value;
   if (!e || !p) return say('<p>I need both the email and the password of the second account.</p>', 'err');
   if (e.toLowerCase() === String(st.appEmail || st.savedLogin || '').toLowerCase()) return say('<p>That is the same account as account 1. I need a different user.</p>', 'err');
-  st.secondEmail = e; st.secondPw = p; me(e + ' · ••••••');
-  const next = st.afterSecond || securityCheck; st.afterSecond = null;
+  const slot = st.secondSlot || 'second';
+  st[slot + 'Email'] = e; st[slot + 'Pw'] = p; me(e + ' · ••••••');
+  const next = st.afterSecond || securityCheck; st.afterSecond = null; st.secondSlot = null;
   next();
 }
-// The second account form (Security check and Multi-role share it).
-function askSecondAccount(why, next) {
-  st.afterSecond = next;
+// The second account form. slot 'second' = Multi-role's other user (any role),
+// 'peer' = the security check's other customer.
+function askSecondAccount(why, next, slot = 'second') {
+  st.afterSecond = next; st.secondSlot = slot;
   say(`<p>${why}</p>`);
   setReply(`<div class="row"><input id="be" type="email" name="tp-app-login-2" autocomplete="off" data-lpignore="true" placeholder="second test account email"><input id="bp" type="password" name="tp-app-secret-2" autocomplete="new-password" data-lpignore="true" placeholder="password" onkeydown="if(event.key==='Enter')gotSecond()"></div>
     <div class="row"><button onclick="gotSecond()">Send</button></div>
@@ -648,7 +651,7 @@ function securityReport(d) {
   const back = [{ label: 'Run it again', desc: 'After you fixed something.', act: securityCheck }, { label: 'Test something else', act: showChoices }, { label: 'Another app', act: welcomeBack }];
   if (!loginOk) {
     say(`<p>I could not sign in as ${!c.loginVerified.userA ? 'account 1' : 'account 2'}, so the cross-account checks did not run. Check that login and try again.</p>${cov}`, 'err');
-    if (!c.loginVerified.userB) { st.secondEmail = ''; st.secondPw = ''; }
+    if (!c.loginVerified.userB) { st.peerEmail = ''; st.peerPw = ''; }
     if (!c.loginVerified.userA) { if (st.appPw) { st.appEmail = ''; st.appPw = ''; } else if (st.savedLogin) say('<p>Account 1 is your saved login: if its password changed, pick <b>Forget this login</b> in the test list and type the new one.</p>'); }
     return menu('<p>What next?</p>', back);
   }
@@ -682,8 +685,12 @@ async function run(scenario, kind = 'journey') {
   if (kind === 'multirole') {
     url = '/api/test/multirole';
     body = { appId: st.appId, userEmail: st.email, freeRun, roles: [
-      { name: 'Account 1', scenario, ...login },
-      { name: 'Account 2', scenario, email: st.secondEmail, password: st.secondPw },
+      { name: 'Account 1', scenario: `${scenario}
+
+(You are signed in as Account 1. Check only what Account 1 should see or be allowed to do. Never sign out or sign in as another account.)`, ...login },
+      { name: 'Account 2', scenario: `${scenario}
+
+(You are signed in as Account 2. Check only what Account 2 should see or be allowed to do. Never sign out or sign in as another account.)`, email: st.secondEmail, password: st.secondPw },
     ] };
   } else {
     body = { appId: st.appId, scenario, userEmail: st.email, liveOffers: true, freeRun, ...login };
