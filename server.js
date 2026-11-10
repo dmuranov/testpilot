@@ -2679,7 +2679,9 @@ async function loadPlatformMaps() {
 // SCREENSHOTS
 // ═══════════════════════════════════════════════════════════════
 async function takeScreenshot(page, prefix, fullPage = false) {
-  const filename = `${prefix}-${Date.now()}.png`;
+  // A multi-role run's id is "<uuid>::Account 1": ":" is not allowed in a file
+  // name on Windows, so every screenshot of a local multi-role run failed.
+  const filename = `${String(prefix).replace(/[^\w.-]+/g, '_')}-${Date.now()}.png`;
   const filepath = path.join(SCREENSHOT_DIR, filename);
   // Never throw: a screenshot is telemetry, not a test step. If the page or
   // browser died mid-run (tab closed by the app, context crash), a throw here
@@ -7683,14 +7685,22 @@ async function evaluateStateAssertion(assert, page, diag) {
 // that distinction isn't lost even where it isn't shown. wentRed:null with
 // exempt:false covers the other non-applicable cases (unknown assert type,
 // invalid regex).
+const LOOK_ONLY_ACTIONS = new Set(['navigate', 'scroll', 'scroll_to', 'wait', 'hover', 'retry_hint']);
 async function negativeControlCheck(assert, preActionState, diag) {
   const type = assert?.type;
   const expectChange = assert?.expectChange !== false;
   const haveBefore = !!preActionState;
+  // "Did the action cause this?" is only a fair question after an action that
+  // changes something (a click, a form). After merely opening or scrolling a
+  // page, the check is "does this page show X" — and X being on the previous
+  // page too (a menu label, the same page opened again) says nothing against
+  // it. Seen 2026-11-10: 6 of 16 runs ended "one check could not be fully
+  // confirmed" this way, all of them plain "open the page and check it shows…".
+  const lookedOnly = haveBefore && LOOK_ONLY_ACTIONS.has(preActionState.action);
   const baseline = haveBefore ? 'the state before this step\'s action' : 'an empty/blank state (no prior action to compare against this run)';
 
   if (type === 'url_matches') {
-    if (!expectChange) return { wentRed: null, note: '', exempt: true };
+    if (!expectChange || lookedOnly) return { wentRed: null, note: '', exempt: true };
     const re = safeRegex(assert.pattern);
     if (!re) return { wentRed: null, note: '', exempt: false };
     const testUrl = haveBefore ? preActionState.url : '';
@@ -7700,7 +7710,7 @@ async function negativeControlCheck(assert, preActionState, diag) {
   }
 
   if (type === 'dom_text_contains') {
-    if (!expectChange) return { wentRed: null, note: '', exempt: true };
+    if (!expectChange || lookedOnly) return { wentRed: null, note: '', exempt: true };
     const testText = haveBefore ? preActionState.text : '';
     return matchesText(assert.value, testText)
       ? { wentRed: false, note: `this text check also matches ${baseline} — it may already have been true before the action ran.` }
@@ -8605,6 +8615,7 @@ What is your first action?`,
 
       if (action.action !== 'verify' && action.action !== 'done') {
         preActionState = {
+          action: action.action,
           url: page.url(),
           text: await page.textContent('body').catch(() => '') || '',
           apiCallCount: diag.apiCalls.length,
@@ -13884,7 +13895,7 @@ app.delete('/api/account', async (req, res) => {
   if (myTestIds.length) {
     try {
       for (const f of await fs.readdir(SCREENSHOT_DIR).catch(() => [])) {
-        if (myTestIds.some(t => f.startsWith(t + '-') || f.startsWith(t + '::'))) {
+        if (myTestIds.some(t => f.startsWith(t + '-') || f.startsWith(t + '::') || f.startsWith(t + '_'))) {
           await fs.unlink(path.join(SCREENSHOT_DIR, f)).catch(() => {}); summary.screenshots++;
         }
       }
