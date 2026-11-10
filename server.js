@@ -14364,7 +14364,7 @@ app.post('/api/billing/checkout', async (req, res) => {
       // onerun buyers also get a proper downloadable invoice (not just a receipt).
       ...(isOneTime ? { invoice_creation: { enabled: true } } : {}),
       success_url: `${APP_URL}/api/billing/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${APP_URL}/app`,
+      cancel_url: `${APP_URL}/first-run`,
       metadata: { userId: user.id, plan, email: session.email }
     });
 
@@ -14439,7 +14439,7 @@ async function applyPlanChange({ email, userId, plan, source }) {
 // "upgraded=1" flag in the URL.
 app.get('/api/billing/success', async (req, res) => {
   const { session_id } = req.query;
-  if (!session_id) return res.redirect('/app');
+  if (!session_id) return res.redirect('/first-run');
   try {
     const checkoutSession = await stripe.checkout.sessions.retrieve(session_id);
     if (checkoutSession.payment_status === 'paid' || checkoutSession.status === 'complete') {
@@ -14452,10 +14452,10 @@ app.get('/api/billing/success', async (req, res) => {
       }
       return res.redirect('/first-run?upgraded=1');
     }
-    res.redirect('/app');
+    res.redirect('/first-run');   // not paid: back to the chat, never the old dashboard
   } catch (e) {
     console.error('[BILLING] success lookup failed:', e.message);
-    res.redirect('/app?error=payment_lookup_failed');
+    res.redirect('/first-run');   // the webhook still upgrades them; the chat reads the plan itself
   }
 });
 
