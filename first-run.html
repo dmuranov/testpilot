@@ -329,7 +329,7 @@ async function suggest() {
     const { res, data } = await postJson(`/api/v1/apps/${encodeURIComponent(st.appId)}/scenarios/suggest`, {});
     if (res.ok && Array.isArray(data.scenarios)) {
       const rank = { ai_suggested: 0, crawl_recipe: 1 };
-      picks = data.scenarios.filter(Boolean).sort((a, b) => (rank[a.source] ?? 2) - (rank[b.source] ?? 2)).slice(0, 3);
+      picks = [...data.scenarios, ...(Array.isArray(data.existing) ? data.existing : [])].filter(Boolean).sort((a, b) => (rank[a.source] ?? 2) - (rank[b.source] ?? 2)).slice(0, 3);
     }
   } catch (e) {}
   showChoices();
@@ -644,12 +644,33 @@ function securityReport(d) {
   const all = (d.results || []).filter((r) => !NEUTRAL.includes(verdict(r)));
   const leaks = all.filter((r) => CROSS.includes(r.type) && verdict(r) !== 'SUSPICIOUS');
   const possible = all.filter((r) => CROSS.includes(r.type) && verdict(r) === 'SUSPICIOUS');
-  const other = all.filter((r) => !CROSS.includes(r.type));
+  // Missing security headers are small hardening notes: one quiet line, never
+  // numbered next to an open database table.
+  const headers = all.filter((r) => r.type === 'headers');
+  const rank = (r) => (verdict(r) === 'VULNERABLE' && ['rls_exposure', 'secret_exposure'].includes(r.type) ? 0 : 1);
+  const other = all.filter((r) => !CROSS.includes(r.type) && r.type !== 'headers').sort((a, b) => rank(a) - rank(b));
   const otherFix = (r) => r.type === 'secret_exposure' ? 'a secret key is visible to anyone in your app’s code: create a new key, delete the old one, and keep it on the server'
-    : r.type === 'rls_exposure' ? 'a database table can be read without the right permissions: turn on row-level security for it'
+    : r.type === 'rls_exposure' ? 'turn on row-level security for ' + (Array.isArray(r.tables) && r.tables.length === 1 ? 'this table' : 'these tables') + ', so each user can read only their own rows'
+    : r.type === 'no_auth' ? 'if this data is private, make the app require a sign-in to read it. If it is meant to be public (a product list, for example), there is nothing to fix'
     : 'worth a look';
-  const otherHtml = (other.length || possible.length) ? `
-    ${other.length ? `<p><b>Other risks I found:</b></p>${other.slice(0, 6).map((r, i) => `<div class="problem"><b>${i + 1}.</b> ${esc(String(r.note || r.url || r.type || '').slice(0, 200))}<div class="muted" style="margin-top:4px">Fix: ${esc(otherFix(r))}.</div></div>`).join('')}` : ''}
+  // The scanner's own wording is for engineers; say the same thing plainly.
+  const otherText = (r) => {
+    if (r.type === 'rls_exposure' && Array.isArray(r.tables) && r.tables.length) {
+      const fields = (String(r.note || '').match(/Sensitive field\(s\): ([^.]*)\./) || [])[1];
+      const names = r.tables.slice(0, 6).join(', ');
+      return verdict(r) === 'VULNERABLE'
+        ? `Anyone on the internet can read your database table${r.tables.length === 1 ? '' : 's'} ${names}, without signing in.${fields ? ` It holds private details (${fields}).` : ''}`
+        : `Your database table${r.tables.length === 1 ? '' : 's'} ${names} can be read without signing in. I saw no private details in ${r.tables.length === 1 ? 'it' : 'them'}.`;
+    }
+    if (r.type === 'no_auth' && r.url) {
+      let name = r.url; try { name = new URL(r.url).pathname.split('/').filter(Boolean).pop() || r.url; } catch (e) {}
+      return `The app’s "${name}" data can be read without signing in.`;
+    }
+    return String(r.note || r.url || r.type || '').slice(0, 200);
+  };
+  const otherHtml = (other.length || possible.length || headers.length) ? `
+    ${other.length ? `<p><b>Other risks I found:</b></p>${other.slice(0, 6).map((r, i) => `<div class="problem"><b>${i + 1}.</b> ${esc(otherText(r))}<div class="muted" style="margin-top:4px">Fix: ${esc(otherFix(r))}.</div></div>`).join('')}` : ''}
+    ${headers.length ? `<p class="muted">Small extra: ${headers.length} basic browser protection setting${headers.length === 1 ? ' is' : 's are'} not switched on (${headers.slice(0, 6).map((r) => esc(r.test || 'header')).join(', ')}). Low risk; your builder’s AI can add ${headers.length === 1 ? 'it' : 'them'} if you ask.</p>` : ''}
     ${possible.length ? `<p class="muted">${possible.length} more request${possible.length === 1 ? ' looked' : 's looked'} suspicious but could not be confirmed: ${possible.slice(0, 4).map((r) => esc(`${r.method || 'GET'} ${String(r.url || '').slice(0, 80)}`)).join(', ')}.</p>` : ''}` : '';
   const what = (r) => r.type === 'idor_direct' ? 'could open account 1’s record directly'
     : r.type === 'api_replay' ? 'got account 1’s data from the same request'
@@ -671,6 +692,13 @@ function securityReport(d) {
   const serious = other.filter((r) => verdict(r) === 'VULNERABLE' && ['rls_exposure', 'secret_exposure'].includes(r.type));
   if (!leaks.length && serious.length) {
     say(`<p>⚠ <b>Private data in your app is open to anyone</b>, even people who are not signed in:</p>${otherHtml}<p class="muted">Account 2 could not reach account 1’s data through the app’s own pages, but the database itself is open: fix that first.</p>${cov}`, 'err');
+    const tables = [...new Set(serious.filter((r) => r.type === 'rls_exposure').flatMap((r) => r.tables || []))];
+    if (tables.length) {
+      const fix = `In my app's database, the table${tables.length === 1 ? '' : 's'} ${tables.join(', ')} can be read by anyone on the internet, without signing in. Turn on row-level security for ${tables.length === 1 ? 'it' : 'them'} and add a policy so that each signed-in user can read only their own rows. Change nothing else.`;
+      const b = say(`<p>Paste this into ${esc(st.platformName && st.platform !== 'other' ? st.platformName + '’s AI chat' : 'your builder’s AI chat')}:</p><code class="box"></code><button class="ghost">Copy the fix</button>`);
+      b.querySelector('code').textContent = fix;
+      b.querySelector('button').onclick = function () { copy(fix, this); };
+    }
     return menu('<p>What next?</p>', back);
   }
   if (!leaks.length) {
@@ -847,6 +875,9 @@ async function sweepReport(sweepId) {
 }
 
 // ── 9. report: problems, fixes, what next ─────────────────
+// The tester's own bookkeeping ("1. Step 2 (verify) — ", "Verify (assert): ")
+// is not part of the problem the client reads.
+const plainProblem = (d) => String(d || '').replace(/^\s*\d+\.\s+/, '').replace(/^(?:Account \d+\s+)?Step \d+\s*(\([^)]*\))?\s*[—–:-]\s*/i, '').replace(/^Verify \(assert\):\s*/i, '').slice(0, 300);
 async function report(testId) {
   let r = {};
   try { r = await (await fetch('/api/test/' + testId)).json(); } catch (e) {}
@@ -857,7 +888,7 @@ async function report(testId) {
   // completed_with_unverified is a pass too: the flow worked, one check could not
   // be fully confirmed (it used to read as "stopped before a verdict").
   if (!bugs.length && ['completed', 'completed_with_unverified'].includes(status)) {
-    say(`<p><b>Everything in this test worked.</b> ✅ ${esc((r.steps || []).length)} steps, no problems found.</p>${status === 'completed_with_unverified' ? '<p class="muted">One check could not be fully confirmed from the page, so take a quick look yourself if it matters.</p>' : ''}`);
+    say(`<p><b>Everything in this test worked.</b> ✅ ${esc((r.steps || []).length || (r.roles || []).reduce((n, x) => n + ((x.result || {}).steps || []).length, 0))} steps, no problems found.</p>${status === 'completed_with_unverified' ? '<p class="muted">One check could not be fully confirmed from the page, so take a quick look yourself if it matters.</p>' : ''}`);
     return paid() ? whatNext(r, true) : upsell(false);
   }
   if (!bugs.length) {
@@ -869,7 +900,7 @@ async function report(testId) {
   }
   const all = paid();
   say(`<p>I found <b>${bugs.length} problem${bugs.length === 1 ? '' : 's'}</b>:</p>
-    ${bugs.map((b, i) => `<div class="problem${!all && i ? ' locked' : ''}"><b>${i + 1}.</b> ${b.role ? `<span class="tag">${esc(b.role)}</span> ` : ''}${esc(String(b.description || b).slice(0, 300))}${!all && i ? '<div class="muted" style="margin-top:4px">🔒 Fix prompt included in the €15/month plan</div>' : ''}</div>`).join('')}`);
+    ${bugs.map((b, i) => `<div class="problem${!all && i ? ' locked' : ''}"><b>${i + 1}.</b> ${b.role ? `<span class="tag">${esc(b.role)}</span> ` : ''}${esc(plainProblem(b.description || b))}${!all && i ? '<div class="muted" style="margin-top:4px">🔒 Fix prompt included in the €15/month plan</div>' : ''}</div>`).join('')}`);
   const where = esc(st.platformName && st.platform !== 'other' ? st.platformName + '’s AI chat' : 'your builder’s AI chat');
   // Every fix gets its bubble now, in order; at most three are written at a
   // time (they run on the client's key, under its rate limit).

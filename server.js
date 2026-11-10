@@ -7586,6 +7586,16 @@ async function matchNetworkCall(assert, apiCalls) {
   return { matched: true, call, body };
 }
 
+// The problem as the client reads it in the report: what was checked and what
+// was wrong, in plain words. The raw expected/actual (with the page text) stay
+// on the finding for the fix prompt.
+function plainAssertProblem(check, assert, sa) {
+  const what = String(check || 'A check').trim().replace(/[.\s]+$/, '');
+  if (assert?.type === 'dom_text_contains') return `${what}. The page should show "${assert.value}", but it does not.`;
+  if (assert?.type === 'url_matches') return `${what}. The app should have opened another page, but it was on ${sa.actual}.`;
+  return `${what}. Expected ${sa.expected}, but got ${sa.actual}.`;
+}
+
 // Structured, deterministic alternative to the vision judge for a verify
 // step that names a real state signature (action.assert — see the action
 // schema in runAgentTest's system prompt) instead of asking a model to
@@ -7607,7 +7617,10 @@ async function evaluateStateAssertion(assert, page, diag) {
     const text = (await page.textContent('body').catch(() => '')) || '';
     const expected = `page contains "${assert.value}"`;
     if (matchesText(assert.value, text)) return { status: 'WORKS', expected, actual: 'found on the page' };
-    const snippet = text.replace(/\s+/g, ' ').trim().slice(0, 400);
+    // What a person sees (innerText), not textContent: that one carries the
+    // source of inline <script> tags into the report.
+    const visible = (await page.innerText('body').catch(() => '')) || text;
+    const snippet = visible.replace(/\s+/g, ' ').trim().slice(0, 400);
     return { status: 'BROKEN', expected, actual: `not found — page text was: "${snippet}"` };
   }
 
@@ -9612,7 +9625,7 @@ Look at this turn's screenshot and the Buttons / Fields lists. Pick something el
                     cause: 'state_assertion_failed',
                     step: stepNum,
                     check: action.check,
-                    description: `Verify (assert): ${action.check} — expected ${sa.expected}, got ${sa.actual}`,
+                    description: plainAssertProblem(action.check, action.assert, sa),
                     expected: sa.expected,
                     actual: sa.actual,
                     severity: 'medium',
@@ -12696,7 +12709,12 @@ app.post('/api/test/multirole', async (req, res) => {
     const scopedId = `${testId}::${roleTag}`;
     // Wrap emitStep so per-role events include the role tag.
     const originalEmit = emitStep;
-    const taggedEmit = (id, evt) => originalEmit(testId, { ...evt, role: roleTag, message: `[${roleTag}] ${evt.message || ''}` });
+    // One role finishing is not the test finishing: its closing event goes out
+    // as plain progress, or a listener that stops at the first "summary" reads
+    // the result while the other role is still running (seen in the chat:
+    // "stopped before a verdict" on a run that then found the bug).
+    const ROLE_END = ['summary', 'done', 'complete', 'error'];
+    const taggedEmit = (id, evt) => originalEmit(testId, { ...evt, type: ROLE_END.includes(evt.type) ? 'info' : evt.type, role: roleTag, message: `[${roleTag}] ${evt.message || ''}` });
     // Light monkey-patch via per-call indirection: instead of replacing the
     // global, we pass the scoped ID and rebroadcast. runAgentTest emits to
     // testStreams[scopedId], and we relay to testStreams[testId].
@@ -12735,12 +12753,16 @@ app.post('/api/test/multirole', async (req, res) => {
     // are NOT failures and must not read as "this role found problems".
     const blockedRoles = roleResults.filter(r => r.result?.status === 'blocked' || r.result?.status === 'error');
     const possibleIssues = roleResults.reduce((n, r) => n + (r.result?.summary?.possibleIssues || 0), 0);
-    const allDone = roleResults.every(r => r.result?.status === 'completed' || r.result?.status === 'completed_with_bugs');
+    // completed_with_unverified is a finished role too (the flow worked, one check
+    // could not be fully confirmed): it used to turn a clean two-role run into
+    // 'incomplete', which the chat reads as 'stopped before a verdict'.
+    const allDone = roleResults.every(r => ['completed', 'completed_with_bugs', 'completed_with_unverified'].includes(r.result?.status));
+    const anyUnverified = roleResults.some(r => r.result?.status === 'completed_with_unverified');
     aggregate.status = aggregate.bugs.length > 0
       ? (allDone ? 'completed_with_bugs' : 'partial_with_bugs')
-      : (allDone ? 'completed' : (blockedRoles.length ? 'blocked' : 'incomplete'));
+      : (allDone ? (anyUnverified ? 'completed_with_unverified' : 'completed') : (blockedRoles.length ? 'blocked' : 'incomplete'));
     aggregate.completedAt = new Date().toISOString();
-    const _mrCharged = ['completed', 'completed_with_bugs', 'partial_with_bugs'].includes(aggregate.status);
+    const _mrCharged = ['completed', 'completed_with_bugs', 'completed_with_unverified', 'partial_with_bugs'].includes(aggregate.status);
     if (_mrCredit.reserved && !_mrCharged) refundRunCredit(user.email);
     if (extraRunHold && !_mrCharged) extraRunHold.refund();
     if (freeRunBurned && !extraRunHold && !_mrCharged) {
@@ -12754,7 +12776,7 @@ app.post('/api/test/multirole', async (req, res) => {
       bugs: aggregate.bugs.length,
       possibleIssues,
       blocked_roles: blockedRoles.length,
-      passed_roles: roleResults.filter(r => r.result?.status === 'completed').length,
+      passed_roles: roleResults.filter(r => ['completed', 'completed_with_unverified'].includes(r.result?.status)).length,
     };
     testResults.set(testId, aggregate);
     saveTestResult(testId, aggregate);
@@ -13077,6 +13099,9 @@ app.post('/api/v1/apps/:appId/scenarios/suggest', async (req, res) => {
   for (const s of sections) {
     const entity = String(s.entity || '').trim();
     if (PLACEHOLDER_ENTITY.test(entity)) continue;
+    // Nothing seen to create it with (a shop's product, an order list): a
+    // "Create new product" test for a customer is a guess, so no suggestion.
+    if (!s.createFlow?.steps?.length) continue;
     const sectionName = s.name || entity;
     candidates.push({
       name: `Create new ${entity}`,
@@ -13169,9 +13194,11 @@ app.post('/api/v1/apps/:appId/scenarios/suggest', async (req, res) => {
 
   // Avoid creating duplicates of scenarios that already exist for this app.
   let existingNames = new Set();
+  let existingRows = [];
   try {
     const existing = await supabase('GET', 'scenarios', null,
-      `?app_id=eq.${encodeURIComponent(appId)}&select=name`);
+      `?app_id=eq.${encodeURIComponent(appId)}&select=scenario_id,name,description,source`);
+    existingRows = existing || [];
     existingNames = new Set((existing || []).map(r => r.name?.toLowerCase().trim()).filter(Boolean));
   } catch {}
 
@@ -13211,6 +13238,9 @@ app.post('/api/v1/apps/:appId/scenarios/suggest', async (req, res) => {
       nav_targets: navEntries.length,
     },
     scenarios: created,
+    // Suggested on an earlier visit and still suggested now: a returning
+    // client gets the same ideas again instead of "nothing to suggest".
+    existing: existingRows.filter(r => seen.has(String(r.name || '').toLowerCase().trim())),
   });
 });
 
