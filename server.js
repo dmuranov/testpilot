@@ -8281,7 +8281,7 @@ RULES:
 16. STAY LOGGED IN — NEVER click a logout / "Cerrar sesión" / "Salir" / "Sign out" / "Cerrar sesión y salir" / account-exit control. You must remain authenticated for the WHOLE run; logging out drops your session and forces a re-login that wastes budget and can lose your place. If you think the scenario is finished, call \`done\` — do NOT sign out to "finish". (The system will also refuse logout clicks.)
 
 CREDENTIALS: email="${credentials?.email || 'none'}", password="${credentials?.password || 'none'}".
-${credentials?.email && credentials?.password ? `Use these exact credentials when the app asks you to log in. If login fails, report it as a finding — never invent credentials or sign up as a new user.` : `No credentials provided — the app is public. Do not attempt to log in, just test the public flows.`}
+${credentials?.email && credentials?.password ? `Use these exact credentials when the app asks you to log in. If login fails, report it as a finding — never invent credentials or sign up as a new user.` : `No login email or password was given to you. Test only what you can reach as you are now. NEVER type an email or password you were not given, never guess one ("password", "admin", the user's name…) and never sign up: guessing logins on someone's app is not testing. If the scenario cannot go on without signing in, call done at once with a summary that starts "BLOCKED: this test needs a login and none was given". A sign-in you could not do without credentials is NEVER a bug in the app — do not report it as one.`}
 
 What is your first action?`,
       // Prompt caching: this whole user message (18 screenshots + the rules
@@ -13113,11 +13113,17 @@ app.post('/api/v1/apps/:appId/scenarios/suggest', async (req, res) => {
 
   // Source 2: AI summary cross-section flows (multi-step business workflows)
   const flows = Array.isArray(map.summary?.crossSectionFlows) ? map.summary.crossSectionFlows : [];
+  // The crawl's summary sometimes labels a flow "(currently broken)" from one
+  // click that did nothing. That is a guess, not a test result: the suggestion
+  // is the flow itself, and the test decides whether it works.
+  const GUESS = /\s*\([^)]*\b(broken|non-?functional|no-?op|not working)\b[^)]*\)/ig;
+  const cleanName = (n) => { const s = String(n).replace(GUESS, '').replace(/^attempts?\s+(to\s+)?/i, '').trim(); return s.charAt(0).toUpperCase() + s.slice(1); };
+  const cleanDesc = (d) => String(d || '').replace(GUESS, '').replace(/[;.]?\s*note:?[^.]*\b(broken|non-?functional|no-?op|not working)\b[^.]*\.?/ig, '.').replace(/\.\.+/g, '.').trim();
   for (const f of flows) {
     if (!f?.name) continue;
     candidates.push({
-      name: f.name,
-      description: f.description || (Array.isArray(f.steps) ? f.steps.join(' → ') : ''),
+      name: cleanName(f.name),
+      description: cleanDesc(f.description) || (Array.isArray(f.steps) ? f.steps.join(' → ') : ''),
       steps: Array.isArray(f.steps) ? f.steps : [],
       source: 'ai_suggested',
     });

@@ -422,7 +422,7 @@ async function welcomeBack() {
 }
 // Everything that belongs to one app, reset before another is opened or added.
 function resetApp() {
-  Object.assign(st, { appId: null, url: '', origin: '', appEmail: '', appPw: '', savedLogin: null, loginAnswered: false,
+  Object.assign(st, { appId: null, url: '', origin: '', appEmail: '', appPw: '', savedLogin: null, loginAnswered: false, hasLogin: false,
     secondEmail: '', secondPw: '', peerEmail: '', peerPw: '', platform: 'other', platformName: '', verification: null, lastScenario: '', lastKind: 'journey',
     afterCreds: null, afterVerify: null, afterSecond: null, afterKey: null, afterSave: null, afterSaveNo: null });
   picks = [];
@@ -435,6 +435,7 @@ async function openApp(a) {
   st.platformName = (PLATFORMS.find((p) => p[0] === st.platform) || [])[1] || '';
   try { st.origin = new URL(a.url).origin; } catch (e) { st.origin = a.url; }
   try { const r = await (await fetch('/api/app-login/' + encodeURIComponent(a.appId))).json(); st.savedLogin = r.saved ? r.email : null; } catch (e) { st.savedLogin = null; }
+  st.hasLogin = !!a.loginRequired || !!st.savedLogin;   // so a forgotten login is asked for again before a test, not skipped
   if (st.savedLogin) say(`<p>I will sign in with your saved login <b>${esc(st.savedLogin)}</b>.</p>`);
   else if (a.loginRequired) { st.afterCreds = suggest; say('<p>This app has a login. Which test account should I use?</p>'); return askCredsNow(); }
   suggest();
@@ -518,6 +519,15 @@ async function forgetLogin() {
     say('<p>Done: the saved login for this app is deleted. I will ask for it when a test needs it.</p>');
   } catch (e) { say('<p>I could not delete it right now (' + esc(e.message) + '). Try again in a moment.</p>', 'err'); }
   showChoices();
+}
+// The app has a login and there is none to use (it was just forgotten): ask
+// before the test, or the tester wanders around signed out and finds nothing.
+function needLogin(next) {
+  if (!st.hasLogin || st.appPw || st.savedLogin) return false;
+  st.afterCreds = next;
+  say('<p>This app has a login. Which test account should I use?</p>');
+  askCredsNow();
+  return true;
 }
 function ownTest() {
   say('<p>Please describe the flow you want to test: what a customer does, step by step, and what should be true at the end.</p><p class="muted">Example: "Open the shop, add the Ciotola in maiolica to the cart, go to checkout and check the total is €24."</p>');
@@ -723,6 +733,7 @@ function securityReport(d) {
 // (account 1 + account 2, one report).
 async function run(scenario, kind = 'journey') {
   st.lastScenario = scenario; st.lastKind = kind;
+  if (needLogin(() => run(scenario, kind))) return;
   const freeRun = !paid() && !onerun() && !st.freeUsed;
   const login = {};
   if (st.appPw) { login.email = st.appEmail; login.password = st.appPw; }
@@ -791,6 +802,7 @@ function stream(testId, live) {
 // Clicks every button and link it can find and reports what is dead. Anything
 // that could delete or commit something real is asked here first, in the chat.
 async function clickEverything() {
+  if (needLogin(clickEverything)) return;
   step('test_chosen', 'sweep');
   const body = { appId: st.appId };
   if (st.appPw) { body.email = st.appEmail; body.password = st.appPw; }
