@@ -396,11 +396,17 @@ async function sendSignInLink(email) {
 async function start() {
   let who = null;
   try { const r = await fetch('/api/auth/me'); if (r.ok) who = await r.json(); } catch (e) {}
+  // A sign-in link that failed lands here (it used to open the old login box).
+  const linkErr = new URLSearchParams(location.search).get('error');
+  if (linkErr) history.replaceState({}, '', '/first-run');
+  if (linkErr && (!who || !who.email)) {
+    say('<p>' + (linkErr === 'expired' ? 'That sign-in link has expired.' : linkErr === 'used' ? 'That sign-in link was already used.' : 'That sign-in link did not work.') + ' Type your email and I will send you a new one.</p>');
+  }
   if (!who || !who.email) return askEmail();
   st.email = who.email; st.plan = who.plan || 'free'; st.freeUsed = !!who.free_run_used;
   // Signed in: the header offers the old dashboard only as an advanced extra.
   const link = document.getElementById('signin-link');
-  if (link) { link.textContent = 'Dashboard'; link.onclick = null; link.href = '/app'; }
+  if (link) { link.textContent = 'Advanced tools'; link.onclick = null; link.href = '/classic'; }
   if (new URLSearchParams(location.search).get('upgraded') === '1') {
     history.replaceState({}, '', '/first-run');
     if (paid()) {

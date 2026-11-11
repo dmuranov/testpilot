@@ -1245,6 +1245,14 @@ app.use((req, res, next) => {
   next();
 });
 
+// Old addresses (bookmarks, old mail links, campaign links) open the chat.
+// Before express.static, which would otherwise hand out index.html itself.
+function toChat(req, res) {
+  const i = req.originalUrl.indexOf('?');
+  res.redirect('/first-run' + (i >= 0 ? req.originalUrl.slice(i) : ''));
+}
+app.get(['/app', '/index.html'], toChat);
+
 app.use(express.static('./', {
   index: false,
   setHeaders: (res, filePath) => {
@@ -2017,94 +2025,11 @@ app.post('/api/funnel/start', watchOnboarding('signup', (req) => ({ email: onboa
     return res.status(500).json({ ok: false, error: 'Server error' });
   }
 });
-app.get('/app', (req, res) => {
+// The old dashboard. The chat (/first-run) is the product; this stays only for
+// the few tools the chat does not have yet (Staging Safe, widget, billing portal).
+app.get('/classic', (req, res) => {
   const token = req.cookies?.tpsession;
-  if (!token || !sessions.has(token)) {
-    return res.send(`<!DOCTYPE html><html><head><title>TestPilot</title>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link rel="icon" type="image/png" href="/brand/favicon-32.png">
-    <link rel="apple-touch-icon" href="/brand/apple-touch-icon.png">
-    <style>
-      *{margin:0;padding:0;box-sizing:border-box}
-      body{background:#080808;color:#f4f2ee;font-family:sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px}
-      .box{text-align:center;padding:48px 40px;border:1px solid rgba(200,240,64,0.12);max-width:400px;width:90%;background:#111}
-      h1{font-size:26px;font-weight:800;margin-bottom:6px}h1 span{color:#c8f040}
-      p{font-size:12px;color:#d8d8d8;margin-bottom:28px;font-family:monospace;letter-spacing:0.5px}
-      input{width:100%;background:#080808;border:1px solid rgba(200,240,64,0.25);color:#fff;padding:13px 16px;font-size:14px;font-family:monospace;outline:none;margin-bottom:10px;border-radius:2px;-webkit-appearance:none}
-      input:focus{border-color:#c8f040}
-      button{width:100%;background:#c8f040;color:#080808;font-weight:800;font-size:14px;padding:13px;border:none;cursor:pointer;border-radius:2px;font-family:inherit;touch-action:manipulation}
-      button:hover{opacity:0.9}
-      .msg{font-size:12px;color:#c8f040;margin-top:14px;font-family:monospace;display:none}
-      .err{color:#ef4444}
-      @media(max-width:600px){
-        input{font-size:16px;padding:16px}
-        button{font-size:16px;padding:16px}
-      }
-    </style></head><body>
-    <div class="box">
-      <h1>Test<span>Pilot</span></h1>
-      <p>// enter your email to receive a login link</p>
-      <input type="email" id="email" placeholder="your@email.com" autocomplete="email" inputmode="email" />
-      <button onclick="requestLink()">Send Login Link →</button>
-      <div class="msg" id="msg"></div>
-    </div>
-    <script>
-      ${req.query.error ? `document.getElementById('msg').style.display='block';document.getElementById('msg').className='msg err';document.getElementById('msg').textContent='${req.query.error === 'expired' ? 'Link expired — request a new one' : req.query.error === 'used' ? 'Link already used — request a new one' : 'Invalid link — request a new one'}';` : ''}
-      async function requestLink() {
-        const email = document.getElementById('email').value;
-        if (!email) return;
-        const btn = document.querySelector('button');
-        btn.textContent = 'Sending...';
-        btn.disabled = true;
-        // First-touch attribution, written by /attrib.js on the landing page.
-        // This page doesn't load that script, so read the key directly.
-        var attrib = {};
-        try { attrib = JSON.parse(localStorage.getItem('tp_attrib') || '{}') || {}; } catch (e) {}
-        // A campaign link can point straight at /app: nothing has stored a
-        // first touch yet, so fall back to utm_* on this page's own URL and
-        // store it, first-touch style, consistent with attrib.js.
-        if (!attrib.source) {
-          try {
-            var q = new URLSearchParams(location.search);
-            if (q.get('utm_source')) {
-              attrib = { source: q.get('utm_source'), medium: q.get('utm_medium') || 'unknown', campaign: q.get('utm_campaign') || 'none' };
-              localStorage.setItem('tp_attrib', JSON.stringify(attrib));
-            }
-          } catch (e) {}
-        }
-        const res = await fetch('/api/auth/request', {
-          method: 'POST',
-          headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({
-            email,
-            source: attrib.source || '',
-            medium: attrib.medium || '',
-            campaign: attrib.campaign || ''
-          })
-        });
-        const msg = document.getElementById('msg');
-        msg.style.display = 'block';
-        if (res.ok) {
-          msg.className = 'msg';
-          msg.textContent = '✓ Check your email — link sent';
-          btn.textContent = 'Link Sent ✓';
-        } else {
-          const data = await res.json().catch(() => ({}));
-          msg.className = 'msg err';
-          if (data.error === 'not_approved') {
-            msg.textContent = 'Access by invitation only — apply at testpilotapp.dev';
-          } else {
-            msg.textContent = 'Something went wrong — try again';
-          }
-          btn.textContent = 'Send Login Link →';
-          btn.disabled = false;
-        }
-      }
-      document.getElementById('email').addEventListener('keydown', e => { if(e.key==='Enter') requestLink(); });
-    </script>
-    </body></html>`);
-  }
+  if (!token || !sessions.has(token)) return toChat(req, res);
   // Match the static-middleware behavior for HTML — without this, sendFile
   // skips the no-cache header and browsers can keep stale index.html across
   // deploys, requiring users to Ctrl+F5 to pick up frontend changes.
@@ -2302,17 +2227,17 @@ app.post('/api/auth/request', async (req, res) => {
 app.get('/api/auth/verify', async (req, res) => {
   const { token } = req.query;
   const reqId = randomUUID().slice(0, 8);
-  if (!token) return res.redirect(`/app?error=invalid&rid=${reqId}`);
+  if (!token) return res.redirect(`/first-run?error=invalid&rid=${reqId}`);
   const tk = pgFilter(token);
-  if (!tk) return res.redirect(`/app?error=invalid&rid=${reqId}`);
+  if (!tk) return res.redirect(`/first-run?error=invalid&rid=${reqId}`);
   try {
     const links = await supabase('GET', 'magic_links', null, `?token=eq.${tk}&select=used,expires_at`);
-    if (!links || links.length === 0) return res.redirect(`/app?error=invalid&rid=${reqId}`);
-    if (links[0].used) return res.redirect(`/app?error=used&rid=${reqId}`);
-    if (new Date(links[0].expires_at) < new Date()) return res.redirect(`/app?error=expired&rid=${reqId}`);
+    if (!links || links.length === 0) return res.redirect(`/first-run?error=invalid&rid=${reqId}`);
+    if (links[0].used) return res.redirect(`/first-run?error=used&rid=${reqId}`);
+    if (new Date(links[0].expires_at) < new Date()) return res.redirect(`/first-run?error=expired&rid=${reqId}`);
   } catch (e) {
     console.error(`Auth verify (confirm page) error [${reqId}]:`, e.message);
-    return res.redirect(`/app?error=failed&rid=${reqId}`);
+    return res.redirect(`/first-run?error=failed&rid=${reqId}`);
   }
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Referrer-Policy', 'no-referrer');
@@ -2328,17 +2253,17 @@ button{width:100%;background:#c8f040;color:#080808;border:0;border-radius:4px;pa
 app.post('/api/auth/verify', express.urlencoded({ extended: false, limit: '2kb' }), async (req, res) => {
   const token = req.body?.token;
   const reqId = randomUUID().slice(0, 8);
-  if (!token) return res.redirect(303, `/app?error=invalid&rid=${reqId}`);
+  if (!token) return res.redirect(303, `/first-run?error=invalid&rid=${reqId}`);
   const tk = pgFilter(token);
-  if (!tk) return res.redirect(303, `/app?error=invalid&rid=${reqId}`);
+  if (!tk) return res.redirect(303, `/first-run?error=invalid&rid=${reqId}`);
 
   try {
     const links = await supabase('GET', 'magic_links', null, `?token=eq.${tk}&select=*`);
-    if (!links || links.length === 0) return res.redirect(303, `/app?error=invalid&rid=${reqId}`);
+    if (!links || links.length === 0) return res.redirect(303, `/first-run?error=invalid&rid=${reqId}`);
 
     const link = links[0];
-    if (link.used) return res.redirect(303, `/app?error=used&rid=${reqId}`);
-    if (new Date(link.expires_at) < new Date()) return res.redirect(303, `/app?error=expired&rid=${reqId}`);
+    if (link.used) return res.redirect(303, `/first-run?error=used&rid=${reqId}`);
+    if (new Date(link.expires_at) < new Date()) return res.redirect(303, `/first-run?error=expired&rid=${reqId}`);
 
     // Mark as used
     await supabase('PATCH', 'magic_links', { used: true }, `?token=eq.${tk}`);
@@ -2360,7 +2285,7 @@ app.post('/api/auth/verify', express.urlencoded({ extended: false, limit: '2kb' 
     res.redirect('/first-run');
   } catch (e) {
     console.error(`Auth verify error [${reqId}]:`, e.message);
-    res.redirect(`/app?error=failed&rid=${reqId}`);
+    res.redirect(`/first-run?error=failed&rid=${reqId}`);
   }
 });
 
@@ -14488,7 +14413,7 @@ app.post('/api/billing/portal', async (req, res) => {
     const rows = await supabase('GET', 'users', null, `?email=eq.${encodeURIComponent((user.email || '').toLowerCase())}&select=stripe_customer_id`);
     const customerId = rows && rows[0] && rows[0].stripe_customer_id;
     if (!customerId) return res.status(400).json({ error: 'No billing account yet — your invoices appear here after your first purchase.' });
-    const portal = await stripe.billingPortal.sessions.create({ customer: customerId, return_url: `${APP_URL}/app` });
+    const portal = await stripe.billingPortal.sessions.create({ customer: customerId, return_url: `${APP_URL}/classic` });
     res.json({ url: portal.url });
   } catch (e) {
     console.error('Portal error:', e.message);
