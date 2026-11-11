@@ -193,6 +193,8 @@ async function gotUrl() {
         setReply(`<div class="row"><input id="in" type="url" value="${esc(data.suggestedUrl)}" onkeydown="if(event.key==='Enter')gotUrl()"><button onclick="gotUrl()">Send</button></div>`);
         return;
       }
+      // Our side, not their link: no "check it opens in a private window".
+      if (data.code === 'FREE_TESTS_PAUSED' || data.code === 'FREE_DAILY_BUDGET_EXCEEDED') { say(`<p>${esc(data.error)}</p>`, 'err'); return askUrlAgain(); }
       say(`<p>${esc(data.error || 'I could not open that link.')} Check it opens in a private browser window, then paste it again.</p>`, 'err');
       return askUrlAgain();
     }
@@ -250,13 +252,16 @@ async function askVerify() {
 // (verification lapsed mid-test) goes back to the test that asked for it.
 function afterVerified() { const next = st.afterVerify; st.afterVerify = null; return next ? next() : askLogin(); }
 async function checkVerify() {
-  me("Check"); setReply('<div class="muted">Looking for the tag…</div>');
+  // A folder app proves ownership with a file, not a tag: say what is looked for.
+  const byFile = !!(st.verification && st.verification.folder);
+  me("Check"); setReply(`<div class="muted">Looking for the ${byFile ? 'file' : 'tag'}…</div>`);
   try {
     const { res, data } = await postJson('/api/verify/url', { url: st.url, check: true });
     if (res.ok && data.verified) { say('<p>Verified, thanks! ✅</p>'); step('verified'); return afterVerified(); }
     const why = !res.ok ? (data.error || 'The check did not work.')
       : data.reason === 'other_token' ? 'Your app has a TestPilot tag, but with a different code (maybe from another email). Ask the AI chat to replace the old tag with the one above, then publish.'
       : data.reason === 'unreachable' ? `I couldn't open ${data.origin}. Check the app is published and public.`
+      : byFile ? `I don't see the file at ${data.origin}${st.verification.filePath} yet. Is it published, with exactly that name? It can take a minute after publishing.`
       : `I don't see the tag on ${data.origin} yet. Did your builder publish the change? It can take a minute after publishing.`;
     say(`<p>${esc(why)}</p>`, 'err');
     setReply(`<div class="row"><button onclick="checkVerify()">Check again</button></div>`);
@@ -436,6 +441,14 @@ async function openApp(a) {
   try { st.origin = new URL(a.url).origin; } catch (e) { st.origin = a.url; }
   try { const r = await (await fetch('/api/app-login/' + encodeURIComponent(a.appId))).json(); st.savedLogin = r.saved ? r.email : null; } catch (e) { st.savedLogin = null; }
   st.hasLogin = !!a.loginRequired || !!st.savedLogin;   // so a forgotten login is asked for again before a test, not skipped
+  // The first look at this app never finished (it failed on our side, or the
+  // login was wrong): look around now, instead of offering tests on an app I
+  // never saw ("I could not see much to suggest").
+  if (!a.pages || !a.summary) {
+    say('<p>I did not finish looking around this app last time, so I will do that first.</p>');
+    if (a.loginRequired || st.savedLogin) { st.afterCreds = null; say('<p>This app has a login. Which test account should I use?</p>'); return askCredsNow(); }
+    return askLogin();
+  }
   if (st.savedLogin) say(`<p>I will sign in with your saved login <b>${esc(st.savedLogin)}</b>.</p>`);
   else if (a.loginRequired) { st.afterCreds = suggest; say('<p>This app has a login. Which test account should I use?</p>'); return askCredsNow(); }
   suggest();
@@ -644,6 +657,24 @@ function gotMultiRole() {
 }
 // Plain words: what account 2 could reach, how much was really checked, and one
 // message to paste into the builder's AI that asks for the right fix.
+// Each kind of risk in plain words: [what it means, what to ask the builder's AI for].
+const PLAIN_RISK = {
+  cors: ['Other websites are allowed to read your app’s public data from a visitor’s browser.', 'fine for data anyone may see. If your app has private data behind a login, ask your builder’s AI to allow only your own domain'],
+  rate_limit: ['Someone can try many passwords in a row on your sign-in without being slowed down.', 'ask your builder’s AI to limit failed sign-in attempts, for example 5 per minute'],
+  broken_resource: ['Some files or requests your pages ask for are missing: they come back as "not found".', 'ask your builder’s AI to open the browser console, find the failed requests and fix or remove them'],
+  cookie: ['The cookie that keeps a user signed in is not fully protected.', 'ask your builder’s AI to set the sign-in cookie as Secure, HttpOnly and SameSite'],
+  logout_invalidation: ['After signing out, the old session can still be used.', 'ask your builder’s AI to end the session on the server when a user signs out'],
+  session: ['The sign-in session is weaker than it should be.', 'ask your builder’s AI to review how sign-in sessions are created and ended'],
+  session_fixation: ['The sign-in session is weaker than it should be.', 'ask your builder’s AI to issue a new session each time a user signs in'],
+  jwt: ['The sign-in token is weaker than it should be.', 'ask your builder’s AI to review how sign-in tokens are signed and how long they last'],
+  xss_reflected: ['Text typed into your app can run as code in another visitor’s browser.', 'ask your builder’s AI to escape everything users type before it is shown on a page'],
+  info_disclosure: ['Your app shows technical details that help an attacker.', 'ask your builder’s AI to hide error details and server information from visitors'],
+  data_exposure: ['A request returns more personal data than the page shows.', 'ask your builder’s AI to send only the fields the page displays'],
+  mutation: ['A signed-in user can change data they should not be able to change.', 'ask your builder’s AI to check on the server, for every change, that it belongs to the signed-in user'],
+  mass_assignment: ['A signed-in user can set fields they should not be able to set.', 'ask your builder’s AI to accept only the fields a user is allowed to change'],
+  open_redirect: ['A link on your app can send visitors to any other website.', 'ask your builder’s AI to allow redirects only to your own pages'],
+  privacy_tracking: ['Your app loads tracking tools from other companies.', 'make sure your privacy notice mentions them'],
+};
 function securityReport(d) {
   const NEUTRAL = ['SAFE', 'INCONCLUSIVE', 'UNKNOWN', 'NOT_TESTED', 'SKIPPED', 'INFO'];
   // Only the cross-account checks say "account 2 reached account 1's data";
@@ -662,6 +693,7 @@ function securityReport(d) {
   const otherFix = (r) => r.type === 'secret_exposure' ? 'a secret key is visible to anyone in your app’s code: create a new key, delete the old one, and keep it on the server'
     : r.type === 'rls_exposure' ? 'turn on row-level security for ' + (Array.isArray(r.tables) && r.tables.length === 1 ? 'this table' : 'these tables') + ', so each user can read only their own rows'
     : r.type === 'no_auth' ? 'if this data is private, make the app require a sign-in to read it. If it is meant to be public (a product list, for example), there is nothing to fix'
+    : PLAIN_RISK[r.type] ? PLAIN_RISK[r.type][1]
     : 'worth a look';
   // The scanner's own wording is for engineers; say the same thing plainly.
   const otherText = (r) => {
@@ -676,6 +708,8 @@ function securityReport(d) {
       let name = r.url; try { name = new URL(r.url).pathname.split('/').filter(Boolean).pop() || r.url; } catch (e) {}
       return `The app’s "${name}" data can be read without signing in.`;
     }
+    const p = PLAIN_RISK[r.type];
+    if (p) return p[0] + (verdict(r) === 'SUSPICIOUS' ? ' (Possible, not confirmed.)' : '');
     return String(r.note || r.url || r.type || '').slice(0, 200);
   };
   const otherHtml = (other.length || possible.length || headers.length) ? `
@@ -744,10 +778,10 @@ async function run(scenario, kind = 'journey') {
     body = { appId: st.appId, userEmail: st.email, freeRun, roles: [
       { name: 'Account 1', scenario: `${scenario}
 
-(You are signed in as Account 1. Check only what Account 1 should see or be allowed to do. Never sign out or sign in as another account.)`, ...login },
+(You are signed in as Account 1. Check only what Account 1 should see or be allowed to do. Never sign out or sign in as another account. The other account is checked separately at the same time: it is not your job, so do not mention it or say that you could not check it.)`, ...login },
       { name: 'Account 2', scenario: `${scenario}
 
-(You are signed in as Account 2. Check only what Account 2 should see or be allowed to do. Never sign out or sign in as another account.)`, email: st.secondEmail, password: st.secondPw },
+(You are signed in as Account 2. Check only what Account 2 should see or be allowed to do. Never sign out or sign in as another account. The other account is checked separately at the same time: it is not your job, so do not mention it or say that you could not check it.)`, email: st.secondEmail, password: st.secondPw },
     ] };
   } else {
     body = { appId: st.appId, scenario, userEmail: st.email, liveOffers: true, freeRun, ...login };
@@ -872,17 +906,36 @@ async function sweepReport(sweepId) {
     say(`<p>The check stopped before it clicked anything${r.error ? ` (${esc(String(r.error).slice(0, 300))})` : ''}.</p>`, 'err');
     return menu('<p>What next?</p>', again);
   }
-  const broken = items.filter((i) => i.verdict === 'broken');
+  const broken = items.filter((i) => i.verdict === 'broken' || i.verdict === 'crashed');
   const defects = Array.isArray(r.defects) ? r.defects : [];
   const cov = r.coverage;
-  say(`<p>I clicked <b>${items.length}</b> buttons and links: <b>${count('works')}</b> work${broken.length ? `, <b>${broken.length}</b> broken` : ''}${count('no_effect') ? `, ${count('no_effect')} did nothing` : ''}${count('crashed') ? `, <b>${count('crashed')}</b> crashed the page` : ''}${count('skipped') ? `, ${count('skipped')} skipped` : ''}${count('unreachable') ? `, ${count('unreachable')} I could not reach` : ''}.</p>
+  // A link in the menu does nothing on the page it points to and works on every
+  // other page. Only a control that did nothing wherever it was clicked is
+  // worth the client's attention: that is a dead button.
+  const bare = (l) => String(l || '').replace(/\(\d+\)/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const alive = new Set(items.filter((i) => i.verdict === 'works').map((i) => bare(i.label)));
+  const dead = [];
+  for (const i of items) if (i.verdict === 'no_effect' && !alive.has(bare(i.label)) && !dead.some((x) => bare(x.label) === bare(i.label))) dead.push(i);
+  const named = (d) => items.filter((i) => (i.verdict === 'broken' || i.verdict === 'crashed') && i.detail === d.detail).map((i) => `"${i.label}" on ${i.page}`);
+  say(`<p>I clicked <b>${items.length}</b> buttons and links: <b>${count('works') + count('no_effect') - dead.length}</b> work${broken.length ? `, <b>${broken.length}</b> broken` : ''}${dead.length ? `, <b>${dead.length}</b> did nothing` : ''}${count('skipped') ? `, ${count('skipped')} skipped` : ''}${count('unreachable') ? `, ${count('unreachable')} I could not reach` : ''}.</p>
     ${defects.length
-      ? defects.map((d, i) => `<div class="problem"><b>${i + 1}.</b> ${esc(d.detail || '')}<div class="muted" style="margin-top:4px">On ${esc(d.controls)} control${d.controls === 1 ? '' : 's'}: ${esc((d.pages || []).join(', '))}</div></div>`).join('')
+      ? defects.map((d, i) => `<div class="problem"><b>${i + 1}.</b> ${esc(d.detail || '')}<div class="muted" style="margin-top:4px">${esc(named(d).slice(0, 4).join(', ') || (d.pages || []).join(', '))}${d.evidence ? ` · ${esc(String(d.evidence).slice(0, 160))}` : ''}</div></div>`).join('')
       : broken.length
         ? broken.slice(0, 10).map((i, k) => `<div class="problem"><b>${k + 1}.</b> "${esc(i.label)}" on ${esc(i.page)} is broken${i.detail ? `: ${esc(String(i.detail).slice(0, 160))}` : ''}</div>`).join('')
-        : '<p>Nothing broken. ✅</p>'}
-    ${count('no_effect') ? `<p class="muted">"Did nothing" means I clicked and nothing visible changed: often fine (a link to the same page), sometimes a dead button. ${items.filter((i) => i.verdict === 'no_effect').slice(0, 5).map((i) => `"${esc(i.label)}"`).join(', ')}</p>` : ''}
+        : dead.length ? '' : '<p>Nothing broken. ✅</p>'}
+    ${dead.length ? dead.slice(0, 8).map((i, k) => `<div class="problem"><b>${defects.length + k + 1}.</b> "${esc(i.label)}" on ${esc(i.page)} does nothing when clicked. I clicked it twice and nothing on the page changed.</div>`).join('') : ''}
     ${cov && cov.pagesChecked < cov.pagesInApp ? `<p class="muted">This covered ${esc(cov.pagesChecked)} of ${esc(cov.pagesInApp)} pages (${esc(cov.stoppedBecause || '')}). The other pages were not opened.</p>` : ''}`);
+  // One message to paste: every broken and every dead control, by name and page.
+  const lines = [
+    ...broken.slice(0, 8).map((i) => `On ${i.page}, clicking "${i.label}" causes an error${i.detail ? `: ${String(i.detail).slice(0, 160)}` : ''}${i.evidence ? ` (${String(i.evidence).slice(0, 160)})` : ''}`),
+    ...dead.slice(0, 8).map((i) => `On ${i.page}, clicking "${i.label}" does nothing at all: no page opens and nothing changes`),
+  ];
+  if (lines.length) {
+    const fix = `An automated tester clicked every button and link in my app and found ${lines.length === 1 ? 'this problem' : 'these problems'}:${'\n'}${lines.map((l, k) => `${k + 1}. ${l}.`).join('\n')}${'\n'}Please fix ${lines.length === 1 ? 'it' : 'them'} so each one does what its label says, and change nothing else.`;
+    const fb = say(`<p>Paste this into ${esc(st.platformName && st.platform !== 'other' ? st.platformName + '’s AI chat' : 'your builder’s AI chat')}:</p><code class="box"></code><button class="ghost">Copy the fix</button>`);
+    fb.querySelector('code').textContent = fix;
+    fb.querySelector('button').onclick = function () { copy(fix, this); };
+  }
   menu('<p>What next?</p>', again);
 }
 
@@ -904,7 +957,16 @@ async function report(testId) {
     return paid() ? whatNext(r, true) : upsell(false);
   }
   if (!bugs.length) {
-    say(`<p>The test stopped before it could give a verdict${r.error ? ` (${esc(String(r.error).slice(0, 300))})` : ''}.</p><p>When that is on our side, it does not count, so you can run it again.</p>`, 'err');
+    // What the tester itself said when it stopped (its closing step), so the
+    // client is not left with "stopped" and no reason.
+    const lastStep = (r.steps || []).slice(-1)[0] || {};
+    const said = String(lastStep.action === 'done' ? (lastStep.outcome || '') : '').replace(/^BLOCKED:\s*/i, '');
+    if (/needs a login and none was given/i.test(said)) {
+      say('<p>This test needs someone signed in to your app, and I have no login for it yet.</p>');
+      st.hasLogin = true; st.appEmail = ''; st.appPw = '';
+      if (needLogin(() => run(st.lastScenario, st.lastKind))) return;
+    }
+    say(`<p>The test stopped before it could give a verdict${r.error ? ` (${esc(String(r.error).slice(0, 300))})` : ''}.</p>${!r.error && said ? `<p class="muted">Where it stopped: ${esc(said.slice(0, 300))}</p>` : ''}<p>When that is on our side, it does not count, so you can run it again.</p>`, 'err');
     return menu('<p>What next?</p>', [
       { label: 'Run it again', act: () => run(st.lastScenario, st.lastKind) },
       { label: 'Test something else', act: showChoices },

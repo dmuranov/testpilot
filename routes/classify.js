@@ -129,8 +129,14 @@ export function promoteIfConfirmed(finding, confirmed) {
 // Bucket a list of findings for headline display. `bugs` (the only count
 // that should ever be shown as "defects found") = confirmed app bugs.
 export function summarizeFindings(findings = []) {
-  const out = { bugs: 0, possible: 0, toolLimitations: 0, environment: 0, uncertain: 0 };
+  const out = { bugs: 0, possible: 0, toolLimitations: 0, environment: 0, uncertain: 0, weakChecks: 0 };
   for (const f of findings) {
+    // A check that PASSED, whose wording would also have passed before the
+    // action ("Ciotola in maiolica" is on the shop page and on the cart page).
+    // That is a note about how sharp the check was, kept on the finding for
+    // our own review. It is not doubt about the result: it used to turn a
+    // clean pass into "one check could not be fully confirmed" for the client.
+    if (f.cause === 'state_assertion_unproven') { out.weakChecks++; continue; }
     if (isConfirmedAppBug(f)) out.bugs++;
     else if (f.category === Category.APP_BUG) out.possible++;     // low-confidence app bug
     else if (f.category === Category.TOOL_LIMITATION) out.toolLimitations++;

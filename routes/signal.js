@@ -421,6 +421,15 @@ router.post('/', express.json({ limit: '32kb' }), async (req, res) => {
         );
       }
 
+      // A 4xx is the app answering "that input is not right" (a mistyped
+      // link, a used-up free test) and the page has just said so in its own
+      // words. Popping "Something went wrong here — this page hit an error"
+      // on top of that tells a new visitor the product is broken, on their
+      // first typo. If they really are stuck, the stuck_after_error signal
+      // above still offers help.
+      const inputProblem = typeof ev.status === 'number' && ev.status >= 400 && ev.status < 500;
+      if (inputProblem) continue;
+
       if (['queued', 'fix_in_progress'].includes(row.out_status)) {
         if (canOffer()) {
           reply.offerHelp = true;
