@@ -11,6 +11,7 @@ import { loadRecipe, saveRecipe, shouldCaptureRun, isReplayableAction, replaySte
 import { assertPublicUrl } from './routes/ssrf.js';
 import { alertOnboardingIssue, watchOnboarding, onOnboardingFailure, isInternal as isInternalEmail } from './lib/onboarding-alert.js';
 import { RUN_MODE, isInternalAddress } from './lib/local-run.js';
+import { matchesText } from './lib/text-match.js';
 import { userScenarioWords, FREE_RUN_WORD_LIMIT } from './lib/scenario-words.js';
 import { sendResend, canSend } from './lib/resend.js';
 import { createFreeRunAllowance } from './lib/free-runs.js';
@@ -1924,6 +1925,16 @@ app.post('/api/funnel/start', watchOnboarding('signup', (req) => ({ email: onboa
     // account may touch is decided by ownsApp() on its own appIds.
     const existingApp = await getAppByNormalized(norm.normalized);
 
+    // Our own Claude key is failing: say so now, before the visitor does the
+    // ownership proof and the login for a crawl that cannot run. A paying
+    // client runs on their own key and is not affected.
+    if (await freeTestsPaused()) {
+      const known = await getUserByEmail(userEmail).catch(() => null);
+      if (!known || (known.plan || 'free') === 'free') {
+        return res.status(503).json({ ok: false, error: FREE_TESTS_PAUSED_MESSAGE, code: 'FREE_TESTS_PAUSED' });
+      }
+    }
+
     // Resolve / create user. plan defaults to 'free' on first visit.
     const dbUser = await createOrGetUser(userEmail);
     if (!dbUser) {
@@ -3756,7 +3767,10 @@ async function visionLogin(page, credentials, apiKey, ctx = {}) {
         const host = (() => { try { return new URL(page.url()).hostname; } catch { return 'this app'; } })();
         const handoffResult = await tryOAuthHandoff(page, {
           ...ctx, loginHasError: hasError, loginOurMiss: ourMiss, loginFormReset: formReset,
-          ...(offerOnRejection ? { offerMessage: `${host} did not accept the login${loginErrorQuote ? ` (it said: “${loginErrorQuote.replace(/[“”]/g, '"')}”)` : ''}. Want to sign in yourself in a live window? TestPilot then continues the run with your session.` } : {}),
+          // The app said why it refused: quote it. With a Google-style button on
+          // the page that is one possible reason, not the headline — a plain
+          // wrong password used to read "this account may only work that way".
+          ...((offerOnRejection || (hasError && loginErrorQuote && !ourMiss && !formReset)) ? { offerMessage: `${host} did not accept the login${loginErrorQuote ? ` (it said: “${loginErrorQuote.replace(/[“”]/g, '"')}”)` : ''}.${oauthVisible ? ' If the password is right, the account may only work with the Google-style sign-in button on that page.' : ''} Want to sign in yourself in a live window? TestPilot then continues the run with your session.` } : {}),
         });
         if (handoffResult) return handoffResult;
       }
@@ -5682,6 +5696,11 @@ App description: ${appKnowledge.description || '(none)'}`;
         // never moves when an embedded app re-renders).
         const sizeRoot = frame ? page.frameLocator(frame).locator('body') : page.locator('body');
         const domSizeBefore = (await sizeRoot.innerHTML().catch(() => '')).length;
+        // The words on the page, for small changes the size test below cannot
+        // see: "Cart (0)" → "Cart (1)" is the same length, so a working "Add to
+        // cart" was written down as "does nothing" and the client was then
+        // told their button is broken.
+        const textBefore = await sizeRoot.innerText().catch(() => '');
         const ovBefore = await probeOverlays();
 
         const result = await clickButton(page, label, { frame });
@@ -5717,7 +5736,9 @@ App description: ${appKnowledge.description || '(none)'}`;
         const ovAfter = await probeOverlays();
         const domDelta = Math.abs(domSizeAfter - domSizeBefore);
         const ovChanged = overlayChanged(ovBefore, ovAfter);
-        if (domDelta > 500 || ovChanged) {
+        const textAfter = await sizeRoot.innerText().catch(() => '');
+        const textChanged = !!textBefore && !!textAfter && textAfter.replace(/\s+/g, ' ') !== textBefore.replace(/\s+/g, ' ');
+        if (domDelta > 500 || ovChanged || textChanged) {
           const subtype = ovChanged ? classifyInPlace(ovBefore, ovAfter) : 'content_changed';
           appKnowledge.interactions[key] = { result: 'dom_changed', subtype, label, frame, delta: domDelta };
           learnButtonBehavior(label, 'dom_changed');
@@ -6849,7 +6870,7 @@ ${Object.entries(appKnowledge.navigation).map(([text, info]) => `  "${text}" →
 OBSERVED INTERACTIONS (what buttons do when clicked):
 ${Object.entries(appKnowledge.interactions || {}).filter(([, v]) => v.result === 'navigated').map(([key, v]) => `  "${v.label}" on ${v.from} → navigates to ${v.to}`).join('\n')}
 
-FAILED INTERACTIONS (buttons that didn't work):
+CLICKS WHERE NO CHANGE WAS NOTICED DURING THIS QUICK LOOK (NOT proof of a bug: the look is fast and can miss an effect. Never describe a button, link or flow as broken, non-functional, a "noop" or "not working" anywhere in your answer — name and describe each flow as what a user does, e.g. "Add a product to the cart". Whether it works is for the test to find out):
 ${Object.entries(appKnowledge.interactions || {}).filter(([, v]) => v.result === 'click_failed' || v.result === 'noop').map(([key, v]) => `  "${v.label}" → ${v.result}`).join('\n').substring(0, 500)}
 
 Based on this data, generate a complete JSON knowledge base:
@@ -7376,6 +7397,51 @@ async function runWithOurSideRetryInner(testId, appId, owner, run) {
   return res;
 }
 
+// ── TestPilot's own Claude key: known state ─────────────────────
+// Every free signup runs on this key. When it ran out of credit, the first
+// client to arrive found out for us — after typing their email and link,
+// publishing the ownership proof and giving a login (seen again 2026-11-11).
+// Now the key is checked on a timer in production, the owner is mailed the
+// moment it fails, /api/health shows it, and a new visitor is told at the
+// first step instead of the fifth.
+const supportKey = { ok: null, checkedAt: 0, reason: '', alertedAt: 0 };
+const OWN_KEY_DEAD = /credit balance is too low|invalid x-api-key|authentication_error/i;
+function markSupportKeyDown(reason) {
+  const wasOk = supportKey.ok !== false;
+  supportKey.ok = false; supportKey.reason = String(reason || '').slice(0, 300); supportKey.checkedAt = Date.now();
+  // Mail on the change, then a reminder every 6 hours while it stays down.
+  if (wasOk || Date.now() - supportKey.alertedAt > 6 * 3600_000) {
+    supportKey.alertedAt = Date.now();
+    sendAlert('own-key', 'Free tests are DOWN: TestPilot\'s own Claude key is failing',
+      `Every free signup fails until this is fixed. New visitors are now told at the first step that free tests are paused.\n\nAnthropic said: ${supportKey.reason}\n\nTop up at console.anthropic.com → Plans & Billing and switch on auto-reload (or check ANTHROPIC_SUPPORT_KEY in .env). Free tests reopen by themselves within two minutes of the key working again.`).catch(() => {});
+  }
+}
+async function probeSupportKey() {
+  const key = process.env.ANTHROPIC_SUPPORT_KEY;
+  if (!key) { markSupportKeyDown('ANTHROPIC_SUPPORT_KEY is not set'); return supportKey; }
+  try {
+    await new Anthropic({ apiKey: key }).messages.create({ model: 'claude-haiku-4-5', max_tokens: 1, messages: [{ role: 'user', content: 'ok' }] });
+    if (supportKey.ok === false) console.log('[own-key] working again: free tests reopened');
+    supportKey.ok = true; supportKey.reason = ''; supportKey.checkedAt = Date.now();
+  } catch (e) {
+    // Only a credit or key problem pauses free tests; a network blip or a
+    // rate limit says nothing about the key.
+    const m = String(e?.message || e);
+    if (OWN_KEY_DEAD.test(m)) markSupportKeyDown(m);
+  }
+  return supportKey;
+}
+// True while free tests cannot run. Re-checks at most every two minutes, so a
+// top-up reopens them without a restart.
+async function freeTestsPaused() {
+  if (supportKey.ok !== false) return false;
+  if (Date.now() - supportKey.checkedAt > 2 * 60_000) await probeSupportKey();
+  return supportKey.ok === false;
+}
+const FREE_TESTS_PAUSED_MESSAGE = 'Free tests are paused right now because of a problem on our side. It has nothing to do with your app, and we have been alerted. Please try again in a few hours.';
+setTimeout(() => probeSupportKey().catch(() => {}), 5_000);   // once at boot everywhere (one token); mail is off on a local run
+if (PROD_JOBS) setInterval(() => probeSupportKey().catch(() => {}), 30 * 60_000);
+
 // Distinguish "the user's account/key is misconfigured" from "the engine
 // broke". Both used to land as status:'error' with a raw API JSON blob in the
 // message, so paying users couldn't tell a TestPilot bug from their own
@@ -7387,7 +7453,7 @@ function classifyConfigError(msg, key) {
   const m = String(msg || '');
   const ours = !!key && (key === process.env.ANTHROPIC_SUPPORT_KEY || key === process.env.ANTHROPIC_PAID_KEY);
   if (ours && /credit balance is too low|invalid x-api-key|authentication_error/i.test(m)) {
-    sendAlert('own-key', 'TestPilot\'s own Claude key is failing', `Free/One Run calls on TestPilot's key fail: ${m.slice(0, 300)}\n\nTop up at console.anthropic.com → Plans & Billing (or check the key in .env).`).catch(() => {});
+    markSupportKeyDown(m);
     return { friendly: 'TestPilot could not run this: our own Claude account is out of credit. That is on our side, not your app, and your free test is untouched. We have been alerted; please try again a little later.' };
   }
   if (/credit balance is too low/i.test(m)) {
@@ -7561,12 +7627,16 @@ function safeRegex(pattern) {
   try { return new RegExp(pattern, 'i'); } catch { return null; }
 }
 
-// Pure text/pattern match — plain substring if the pattern doesn't compile
-// as a regex (or is empty), regex test otherwise. Shared by the live check
-// and the negative control so they can never drift apart on semantics.
-function matchesText(valueOrPattern, text) {
-  const re = safeRegex(valueOrPattern);
-  return re ? re.test(text) : String(text).includes(String(valueOrPattern || ''));
+// matchesText (lib/text-match.js): the words as written first, a pattern only
+// if that fails. Shared by the live check and the negative control.
+
+// The text a person can see on the page. textContent also carries the source
+// of inline <script> and <style> tags, so a check for "Order placed" passed
+// on any page whose own code merely contains those words; innerText is what
+// is actually displayed. Falls back to textContent if innerText is empty.
+async function visiblePageText(page) {
+  const seen = (await page.innerText('body').catch(() => '')) || '';
+  return seen.trim() ? seen : ((await page.textContent('body').catch(() => '')) || '');
 }
 
 // Find the most recent call in `apiCalls` matching assert's urlPattern(+method),
@@ -7616,13 +7686,10 @@ async function evaluateStateAssertion(assert, page, diag) {
   }
 
   if (type === 'dom_text_contains') {
-    const text = (await page.textContent('body').catch(() => '')) || '';
+    const text = await visiblePageText(page);
     const expected = `page contains "${assert.value}"`;
     if (matchesText(assert.value, text)) return { status: 'WORKS', expected, actual: 'found on the page' };
-    // What a person sees (innerText), not textContent: that one carries the
-    // source of inline <script> tags into the report.
-    const visible = (await page.innerText('body').catch(() => '')) || text;
-    const snippet = visible.replace(/\s+/g, ' ').trim().slice(0, 400);
+    const snippet = text.replace(/\s+/g, ' ').trim().slice(0, 400);
     return { status: 'BROKEN', expected, actual: `not found — page text was: "${snippet}"` };
   }
 
@@ -8380,6 +8447,7 @@ What is your first action?`,
     let currentEntity = null; // identity (card ID/title) of the item currently being acted on; drives commit dedup so multiple actions on ONE card count once
     let renameNudges = 0;     // done-gate 1 (Rule 11): how many times we've pushed the agent to disclose an entity rename
     let verifyNudges = 0;     // done-gate 2: how many times we've pushed the agent to run a missing terminal-state verify
+    let earlyDoneNudges = 0;  // "too early to give up": pushed once, never in a loop
 
     // STEP-REPLAY MEMORY (routes/recipes.js): if a saved recipe exists for this
     // (app, scenario), the loop replays its recorded actions — skipping the slow
@@ -8617,7 +8685,7 @@ What is your first action?`,
         preActionState = {
           action: action.action,
           url: page.url(),
-          text: await page.textContent('body').catch(() => '') || '',
+          text: await visiblePageText(page),
           apiCallCount: diag.apiCalls.length,
         };
       }
@@ -9834,7 +9902,13 @@ RESPOND ONLY JSON: {"confirmed":true,"actual":"the visible failure, plainly","de
             // summary reports completion; only a give-up-ish/empty early 'done'
             // is pushed to keep trying.
             const giveUpish = /couldn'?t|could not|unable|stuck|blocked|not found|no encontr|gave? ?up|cannot|can'?t (find|complete|do)/i.test(action.summary || '');
-            if (stepNum < 12 && scenario.length > 100 && (giveUpish || !(action.summary || '').trim())) {
+            // Pushed ONCE, and never when a problem is already confirmed: a short
+            // check that ends "…the button should NOT be shown; could not check
+            // the other account here" is a finished report, not giving up. It
+            // used to be refused five times in a row (seen 2026-11-11: 3 steps
+            // became 12, with an Opus rescue, and the role ended "blocked").
+            if (stepNum < 12 && scenario.length > 100 && earlyDoneNudges < 1 && !result.bugs.length && (giveUpish || !(action.summary || '').trim())) {
+              earlyDoneNudges++;
               outcome = 'Too early to give up — keep trying. Look at the visible buttons and fields in the feedback.';
               status = 'retry';
               // Override the action so it doesn't break the loop
@@ -10793,6 +10867,7 @@ async function getSystemHealth() {
   const status = (connectivity !== 'ok' || rssMB > 450) ? 'warning' : 'ok';
   return {
     runMode: LOCAL_RUN ? 'local' : 'production',
+    freeTests: supportKey.ok === false ? 'paused' : 'ok',   // paused = TestPilot's own Claude key is failing (see probeSupportKey)
     status,
     connectivity,
     version: '2.0',
@@ -11606,7 +11681,12 @@ function sweepGateReason(label) {
   if (SWEEP_LOGOUT_RE.test(raw)) return 'session';
   const bare = raw.replace(/[\u{1F5D1}\u{FE0F}✕✖×]/gu, ' ').replace(/\s+/g, ' ').trim();
   if (SWEEP_DESTRUCTIVE_RE.test(bare)) return 'destructive';
-  if (SWEEP_COMMIT_RE.test(bare)) return 'commit';
+  // "order" as a thing to look at, not something to place: "Track my order",
+  // "View order", "Order history". Asking "this could order something for real"
+  // about those is a question nobody can answer sensibly. Any other commit
+  // word in the same label still asks.
+  const lookAtOrder = /\b(track|view|see|show|find|check|my|your)\b[^.]{0,20}\border\b|\border\s+(history|details|status|summary|tracking|number|confirmation)\b/i.test(bare);
+  if (SWEEP_COMMIT_RE.test(lookAtOrder ? bare.replace(/\border\b/ig, ' ') : bare)) return 'commit';
   // Nothing but symbols/punctuation left: we cannot read what it does, so it
   // gets the same question as a control with no label at all.
   if (!/[\p{L}\p{N}]/u.test(bare)) return 'unnamed';
@@ -13129,9 +13209,20 @@ app.post('/api/v1/apps/:appId/scenarios/suggest', async (req, res) => {
   // is the flow itself, and the test decides whether it works.
   const GUESS = /\s*\([^)]*\b(broken|non-?functional|no-?op|not working)\b[^)]*\)/ig;
   const cleanName = (n) => { const s = String(n).replace(GUESS, '').replace(/^attempts?\s+(to\s+)?/i, '').trim(); return s.charAt(0).toUpperCase() + s.slice(1); };
-  const cleanDesc = (d) => String(d || '').replace(GUESS, '').replace(/[;.]?\s*note:?[^.]*\b(broken|non-?functional|no-?op|not working)\b[^.]*\.?/ig, '.').replace(/\.\.+/g, '.').trim();
+  // Whole sentences that claim something is broken go too: the suggestion's
+  // text becomes the test's scenario, so "currently the button is a noop" was
+  // both shown to the client and fed to the tester as a premise.
+  const CLAIM = /\b(broken|non-?functional|no-?op|not working|does(n't| not) (work|add|navigate|respond|update|do)|d(oes|id) nothing|performs? no)\b/i;
+  const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+  const cleanDesc = (d) => cap(String(d || '').replace(GUESS, '')
+    .split(/(?<=[.;])\s+/).filter((s) => !CLAIM.test(s)).join(' ')
+    .replace(/^attempted flow where\s+/i, '').replace(/^(the\s+)?user attempts to\s+/i, 'A user tries to ').replace(/[;\s]+$/, '').trim());
+  // A first test must never be one that deletes or cancels something in the
+  // client's real app. They can still ask for it in their own words.
+  const DESTRUCTIVE = /\b(delete|deletes|deleting|remove|removes|cancel|cancels|erase|wipe|destroy|deactivate|close (the |my |an )?account|unsubscribe)\b/i;
   for (const f of flows) {
     if (!f?.name) continue;
+    if (DESTRUCTIVE.test(f.name) || DESTRUCTIVE.test(f.description || '')) continue;
     candidates.push({
       name: cleanName(f.name),
       description: cleanDesc(f.description) || (Array.isArray(f.steps) ? f.steps.join(' → ') : ''),
@@ -17338,7 +17429,7 @@ async function notifySavedLoginProblem(s, why) {
 
 This is not a problem with your app. ${s.savedSessionRole ? 'Sign in once more in TestPilot (Saved logins, same name)' : 'Open the TestPilot chat, pick this app, type the login again and save it'}, and the daily check carries on by itself.
 
-${APP_URL}/app` });
+${APP_URL}/${s.savedSessionRole ? 'app' : 'first-run'}` });
     s.loginProblemNotifiedAt = new Date().toISOString();   // saved by the caller's finish()
   } catch (e) { console.warn('[schedules] saved-login mail failed:', e.message); }
 }
@@ -17487,7 +17578,7 @@ async function regressionFixText(s, result, apiKey) {
   if (!parts.length) return '';
   const left = bugs.length - parts.length;
   const more = left > 0 ? `\n(${left} more problem${left === 1 ? '' : 's'} in the report${ownKey ? '' : ': the €15 plan gives a fix for every one'}.)` : '';
-  return `\nHow to fix it:\n\n${parts.join('\n\n')}${more}\n\nThen publish your app and press Retest on this test in TestPilot: ${APP_URL}/app\n`;
+  return `\nHow to fix it:\n\n${parts.join('\n\n')}${more}\n\nThen publish your app and open TestPilot to retest: ${APP_URL}/first-run\n`;
 }
 
 async function sendRegressionAlert(s, prev, curr, result, apiKey) {
@@ -17502,12 +17593,14 @@ async function sendRegressionAlert(s, prev, curr, result, apiKey) {
     ...((result?.diagnostics?.httpErrors) || []).filter(e => e.firstParty).slice(0, 3).map(e => `• HTTP ${e.status} ${e.method} ${e.url}`),
     ...((result?.diagnostics?.consoleErrors) || []).filter(e => e.firstParty).slice(0, 3).map(e => `• console: ${e.text}`),
   ].join('\n');
-  const wasNow = prev
-    ? `Was: ${prev.ok ? 'PASSING' : prev.status} (${prev.bugs} bugs) → Now: ${curr.ok ? 'passing' : curr.status} (${curr.bugs} bugs)`
-    : `Now: ${curr.status} (${curr.bugs} bugs)`;
-  const text = `TestPilot found a regression on a scheduled run.\n\nApp: ${appName}\nScenario: ${s.scenario}\n${wasNow}\n\n${fails ? 'Failing steps:\n' + fails + '\n' : ''}${errLines ? '\nRuntime errors:\n' + errLines + '\n' : ''}${fixText}\nTest ID: ${s.lastTestId}\nAutomated alert from your TestPilot schedule (every ${s.intervalHours}h). Delete the schedule in the app to stop these.`;
+  // The owner of the app reads this, not an engineer: what is watched, what is
+  // wrong now, how to fix it. The technical lines go last, for their builder.
+  const host = (() => { try { return new URL(appName).host; } catch { return appName; } })();
+  const problems = (result?.bugs || []).slice(0, 5).map((b, i) => `${i + 1}. ${String(b.description || b).slice(0, 300)}`).join('\n');
+  const technical = `${fails ? 'Steps that failed:\n' + fails + '\n' : ''}${errLines ? 'Errors the app reported:\n' + errLines + '\n' : ''}`;
+  const text = `A test that TestPilot watches for you ${prev && prev.ok ? 'passed before and fails now' : 'is failing'}.${'\n\n'}App: ${appName}${'\n'}What it checks: ${s.scenario}${'\n'}${problems ? `${'\n'}What is wrong now:${'\n'}${problems}${'\n'}` : ''}${fixText || `${'\n'}Open TestPilot to see the report and retest: ${APP_URL}/first-run${'\n'}`}${technical ? `${'\n'}Technical details, if your builder asks for them:${'\n'}${technical}` : ''}${'\n'}Test ID: ${s.lastTestId}${'\n'}You get this mail because TestPilot checks this test every ${s.intervalHours === 24 ? 'day' : s.intervalHours + ' hours'}. To stop it, open TestPilot and stop watching this test.`;
   try {
-    await mailer({ to, subject: `⚠ TestPilot regression: ${appName}`, text });
+    await mailer({ to, subject: `⚠ Something stopped working in ${host}`, text });
     s.lastNotifiedAt = new Date().toISOString();
     saveSchedules();
   } catch (e) { console.warn('[schedules] alert email failed:', e.message); }
