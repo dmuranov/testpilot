@@ -216,12 +216,12 @@ router.get('/auth/github', async (req, res) => {
 router.get('/auth/github/callback', async (req, res) => {
   const { code, state, error } = req.query;
 
-  if (error) return res.redirect(`${BASE_URL}/app?error=github_denied`);
+  if (error) return res.redirect(`${BASE_URL}/classic?error=github_denied`);
 
   // 1. The nonce must be one we issued, unexpired and unused. app_id comes from
   //    our own store, never from the query string.
   const pending = takeOAuthState(state);
-  if (!pending) return res.redirect(`${BASE_URL}/app?error=invalid_state`);
+  if (!pending) return res.redirect(`${BASE_URL}/classic?error=invalid_state`);
   const { app_id } = pending;
 
   // 2. The browser coming back must be the same TestPilot session that started
@@ -229,7 +229,7 @@ router.get('/auth/github/callback', async (req, res) => {
   //    GET, so the cookie is present here (see Set-Cookie in server.js).
   const email = sessionEmail(req);
   if (!email || email !== pending.email) {
-    return res.redirect(`${BASE_URL}/app?error=session_mismatch`);
+    return res.redirect(`${BASE_URL}/classic?error=session_mismatch`);
   }
 
   // 3. Re-check ownership at write time — the app could have changed hands or
@@ -237,10 +237,10 @@ router.get('/auth/github/callback', async (req, res) => {
   const { data: ownerRow } = await supabaseClient
     .from('apps').select('user_email').eq('app_id', app_id).maybeSingle();
   if (!ownerRow || (ownerRow.user_email || '').toLowerCase() !== email) {
-    return res.redirect(`${BASE_URL}/app?error=ownership_mismatch`);
+    return res.redirect(`${BASE_URL}/classic?error=ownership_mismatch`);
   }
 
-  if (!code) return res.redirect(`${BASE_URL}/app?error=github_auth_failed`);
+  if (!code) return res.redirect(`${BASE_URL}/classic?error=github_auth_failed`);
 
   try {
     const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
@@ -274,11 +274,11 @@ router.get('/auth/github/callback', async (req, res) => {
 
     if (updateError) throw updateError;
 
-    res.redirect(`${BASE_URL}/app?github_connected=true&app_id=${app_id}`);
+    res.redirect(`${BASE_URL}/classic?github_connected=true&app_id=${app_id}`);
 
   } catch (err) {
     console.error('GitHub OAuth callback error:', err);
-    res.redirect(`${BASE_URL}/app?error=github_auth_failed`);
+    res.redirect(`${BASE_URL}/classic?error=github_auth_failed`);
   }
 });
 

@@ -126,7 +126,7 @@ export async function runStagingSafeTests(
             <h2 style="font-size:18px;margin:0 0 12px">Staging Safe is paused</h2>
             <p>Commit <code>${String(commitSha).slice(0, 7)}</code> was deployed to your staging site, but it was <strong>not tested</strong>: Staging Safe runs on your own Claude API key${ownerPaid ? ', and none is saved for this app yet' : ', and your free run is already used'}.</p>
             <p>To turn it back on: open TestPilot, paste your Claude API key in the sidebar (bottom left), then open Staging Safe and press <strong>Run Baseline</strong>. That saves the key for automatic runs and resumes monitoring. You can get a key at console.anthropic.com.</p>
-            <p style="font-size:12px;color:#888">TestPilot Staging Safe · https://testpilotapp.dev/app</p></div>`,
+            <p style="font-size:12px;color:#888">TestPilot Staging Safe · https://testpilotapp.dev/classic</p></div>`,
         }).catch((e) => console.error('Failed to send paused email:', e.message));
       }
       return { skipped: true, reason: 'no_key' };
@@ -446,7 +446,7 @@ export async function runStagingSafeTests(
             </div>
 
             <p style="font-size:12px;color:#aaa;margin-top:24px">
-              TestPilot Staging Safe · <a href="https://testpilotapp.dev/app" style="color:#aaa">View full report</a>
+              TestPilot Staging Safe · <a href="https://testpilotapp.dev/classic" style="color:#aaa">View full report</a>
             </p>
           </div>
         `

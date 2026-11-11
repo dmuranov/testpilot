@@ -844,7 +844,7 @@ async function ssLoadReports() {
       window._pendingGithubConnect = appId;
     }
     // Clean URL
-    window.history.replaceState({}, '', '/app');
+    window.history.replaceState({}, '', '/classic');
   }
 })();
 
@@ -2028,10 +2028,10 @@ async function initAuth() {
     if (res.ok) {
       currentUser = await res.json();
     } else {
-      window.location.href = '/app';
+      window.location.href = '/first-run';
     }
   } catch {
-    window.location.href = '/app';
+    window.location.href = '/first-run';
   }
 }
 
@@ -7881,7 +7881,7 @@ async function init() {
   // clean test, where the Keep watching offer sits, and say the one thing to do
   // first. Without a Claude key nothing on the plan runs, so that comes first.
   if (new URLSearchParams(window.location.search).get('upgraded') === '1') {
-    window.history.replaceState({}, '', '/app');
+    window.history.replaceState({}, '', '/classic');
     const clean = (state.tests || [])
       .filter(t => t.status === 'completed' && !t.bugs)
       .sort((a, b) => String(b.completedAt || b.startedAt || '').localeCompare(String(a.completedAt || a.startedAt || '')))[0];
