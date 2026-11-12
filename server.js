@@ -7716,6 +7716,23 @@ async function hollowPass(page, pre, diag, check) {
   const noCalls = (diag.apiCalls || []).length === (pre.apiCallCount || 0);
   const noNewTab = page.context().pages().length === (pre.tabCount || 1);   // a link that opens a new tab did something
   if (sameUrl && sameText && noCalls && noNewTab) {
+    // The menu entry of the page already open, or the tab already selected,
+    // rightly changes nothing. A placeholder link (href="#") is not that.
+    const alreadyThere = await page.evaluate((t) => {
+      const norm = (v) => String(v || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const want = norm(t).replace(/\s*\[[^\]]*\]$/, '');
+      if (!want) return false;
+      for (const el of document.querySelectorAll('a[href], [role="tab"], [role="link"], [aria-current], [aria-selected]')) {
+        if (norm(el.innerText) !== want) continue;
+        const cur = el.getAttribute('aria-current');
+        if (cur && cur !== 'false') return true;
+        if (el.getAttribute('aria-selected') === 'true') return true;
+        const raw = (el.getAttribute('href') || '').trim();
+        if (el.tagName === 'A' && raw && raw !== '#' && !/^javascript:/i.test(raw) && el.href === location.href) return true;
+      }
+      return false;
+    }, pre.target).catch(() => false);
+    if (alreadyThere) return null;
     return { cause: 'action_no_effect', actual: 'The page stayed exactly the same after the click.',
       description: `Clicking ${what} did nothing: the page stayed exactly the same. Expected: ${want}` };
   }
@@ -9785,6 +9802,23 @@ RESPOND ONLY JSON (one of):
                 vStatus = vResult.passed ? 'WORKS' : 'UNCERTAIN';
               }
               if (vStatus !== 'WORKS' && vStatus !== 'BROKEN' && vStatus !== 'UNCERTAIN') vStatus = 'UNCERTAIN';
+              // The screenshot does not show the expected result. If the click left
+              // the page exactly as it was, or the app threw an error, that is the
+              // finding: the same rule as for text checks (see hollowPass).
+              if (vStatus !== 'WORKS') {
+                const hollow = await hollowPass(page, preActionState, diag, action.check);
+                if (hollow) {
+                  const finding = classifyFailure({
+                    cause: hollow.cause, step: stepNum, check: action.check,
+                    description: hollow.description, expected: vResult.expected, actual: hollow.actual,
+                    severity: 'medium', screenshot: verifyScreenshot,
+                  });
+                  result.findings.push(finding);
+                  result.bugs.push(finding);
+                  outcome = `❌ ${hollow.description}`;
+                  break;
+                }
+              }
 
               if (vStatus === 'WORKS') {
                 outcome = `✅ ${vResult.detail}`;
@@ -10572,7 +10606,7 @@ Then the JSON action object on the next line.`;
     // (an app that SHOULD show them together and didn't). Confirmed bugs still
     // take priority in the status label.
     const doneCalled = result.steps.some(s => s.action === 'done');
-    result.status = blockedDone ? 'blocked'
+    result.status = blockedDone && bugs === 0 ? 'blocked'
       : doneCalled && bugs > 0 ? 'completed_with_bugs'
       : doneCalled && fsum.uncertain > 0 ? 'completed_with_unverified'
       : doneCalled ? 'completed'
@@ -10712,7 +10746,7 @@ Output structure (exact sections, max 220 words total):
       syncDoneLine();
       if (reconciled) {
         result.summary.bugs = bugs;
-        result.status = blockedDone ? 'blocked'
+        result.status = blockedDone && bugs === 0 ? 'blocked'
           : doneCalled && bugs > 0 ? 'completed_with_bugs'
           : doneCalled && fsum.uncertain > 0 ? 'completed_with_unverified'
           : doneCalled ? 'completed'
@@ -13338,7 +13372,12 @@ app.post('/api/v1/apps/:appId/scenarios/suggest', async (req, res) => {
     scenarios: created,
     // Suggested on an earlier visit and still suggested now: a returning
     // client gets the same ideas again instead of "nothing to suggest".
-    existing: existingRows.filter(r => seen.has(String(r.name || '').toLowerCase().trim())),
+    // Their saved text may be older than today's rules (a guess that something
+    // is broken, clumsy wording): show the name and description as written now.
+    existing: existingRows.filter(r => seen.has(String(r.name || '').toLowerCase().trim())).map((r) => {
+      const now = deduped.find((c) => c.name.toLowerCase().trim() === String(r.name || '').toLowerCase().trim());
+      return now ? { ...r, name: now.name, description: now.description } : r;
+    }),
   });
 });
 
