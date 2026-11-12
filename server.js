@@ -649,7 +649,10 @@ const clientCache = new Map();
 function getClient(apiKey) {
   if (!apiKey) throw new Error('API key required');
   if (clientCache.has(apiKey)) return clientCache.get(apiKey);
-  const raw = new Anthropic({ apiKey });
+  // The SDK's own defaults are a 10-minute wait and 2 retries: one stalled
+  // connection could hold a run for half an hour. No call here needs more
+  // than three minutes (the largest reply is 4000 tokens).
+  const raw = new Anthropic({ apiKey, timeout: 180_000, maxRetries: 1 });
   // For the shared support key we instrument every messages.create response
   // so all free-tier spend (learn, test, multirole, vision crawls,
   // analysis calls — every call site that uses getClient) flows through the
@@ -10645,6 +10648,9 @@ Then the JSON action object on the next line.`;
             : `${base}${base ? ' — ' : ''}(${passedBeforeDone} passed, ${retries} retries, ${bugs} confirmed bug${bugs === 1 ? '' : 's'})`;
         }
     };
+    // Seen 2026-11-12: the connection dropped here and the chat sat on
+    // "Generating analysis..." for minutes although the verdict was in. The
+    // call below now gives up after 30 s (two tries) and the run completes.
     emitStep(testId, { type: 'info', message: 'Generating analysis...' });
     try {
       const analysisResp = await withRetry(() => getClient(apiKey).messages.create({
@@ -10692,7 +10698,7 @@ Output structure (exact sections, max 220 words total):
 - Tool limitations: app interaction issues that aren't bugs but aren't TestPilot guardrails either (e.g. selector instability, dynamic element loading). Only if relevant.
 - Recommendation: 1 sentence`
         }]
-      }), { label: 'analysis' });
+      }, { timeout: 30_000, maxRetries: 0 }), { label: 'analysis', retries: 2 });
       result.analysis = analysisResp.content[0].text;
       // RECONCILIATION (bidirectional) — observed defect: the structured
       // per-step check (state_assertion_failed → immediately-CONFIRMED app_bug,
