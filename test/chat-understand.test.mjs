@@ -96,3 +96,11 @@ test('refersToKnown does not fire on ordinary sentences', () => {
   assert.equal(refersToKnown('a customer books a table'), false);
   assert.equal(refersToKnown('the same as before'), true);
 });
+
+test('yes and no only answer a list that is a yes/no list', () => {
+  const watch = [{ label: 'Keep watching' }, { label: 'Stop watching' }];
+  assert.equal(quickRead('menu', 'no', { options: watch }), null);
+  assert.equal(quickRead('menu', 'yes', { options: watch }), null);
+  assert.deepEqual(quickRead('menu', 'yes', { options: [{ label: 'Yes, send it' }, { label: 'Another email' }] }), { action: 'choose', index: 1 });
+  assert.deepEqual(quickRead('menu', 'stop watching', { options: watch }), { action: 'choose', index: 2 });
+});

@@ -1065,7 +1065,11 @@ async function sweepReport(sweepId) {
 // ── 9. report: problems, fixes, what next ─────────────────
 // The tester's own bookkeeping ("1. Step 2 (verify) — ", "Verify (assert): ")
 // is not part of the problem the client reads.
-const plainProblem = (d) => String(d || '').replace(/^\s*\d+\.\s+/, '').replace(/^(?:Account \d+\s+)?Step \d+\s*(\([^)]*\))?\s*[—–:-]\s*/i, '').replace(/^Verify \(assert\):\s*/i, '').slice(0, 300);
+const plainProblem = (d) => String(d || '').replace(/^\s*\d+\.\s+/, '').replace(/^(?:Account \d+\s+)?Step \d+\s*(\([^)]*\))?\s*[—–:-]\s*/i, '').replace(/^Verify \(assert\):\s*/i, '')
+  // The tester's own log voice ("Agent clicked … button is non-functional or unimplemented") in the client's words.
+  .replace(/^(?:the\s+)?(?:test\s+)?(?:agent|tester)\s+(clicked|pressed|opened|filled|submitted)\b/i, (m, v) => 'I ' + v.toLowerCase())
+  .replace(/;?\s*(?:the\s+)?button is non-?functional or unimplemented\.?$/i, '. The button does nothing.')
+  .slice(0, 300);
 async function report(testId) {
   showNav();
   let r = {};
