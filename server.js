@@ -227,6 +227,14 @@ const SUPER_ADMIN_EMAIL = (process.env.SUPER_ADMIN_EMAIL || 'danijel.muranovic@g
 const LOCAL_RUN = RUN_MODE.local;
 const PROD_JOBS = RUN_MODE.prodJobs;
 console.log(`[run-mode] ${LOCAL_RUN ? 'LOCAL' : 'PRODUCTION'} (${RUN_MODE.reason}) — production jobs ${PROD_JOBS ? 'ON' : 'OFF'}, outbound mail ${RUN_MODE.mailReason}`);
+// A local run spends its own Claude key when one is set, so testing on a laptop
+// cannot drain the key that production free signups run on (seen 2026-11-11).
+if (LOCAL_RUN && process.env.ANTHROPIC_LOCAL_KEY) {
+  process.env.ANTHROPIC_SUPPORT_KEY = process.env.ANTHROPIC_LOCAL_KEY;
+  console.log('[run-mode] local run: using ANTHROPIC_LOCAL_KEY instead of the production support key');
+} else if (LOCAL_RUN) {
+  console.warn('[run-mode] local run on the PRODUCTION support key: set ANTHROPIC_LOCAL_KEY in .env to keep test spend separate');
+}
 // Compare canonically (canonicalEmail strips gmail dots + plus-tags) so the
 // super admin still matches after an email has been through canonicalEmail()
 // on the free-run identity path — otherwise danijel.muranovic@ (stored WITH a
@@ -955,11 +963,20 @@ function isValidEmailSyntax(e) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(String(e || '').trim());
 }
 
+// Local runs only: TESTPILOT_LOCAL_PAID_EMAILS=a@example.com,b@example.com treats
+// those test identities as paid in THIS process, so the paid paths can be
+// checked without changing a row in the shared database. Only @example.*
+// addresses qualify, and never on production.
+const LOCAL_PAID = new Set(RUN_MODE.local ? String(process.env.TESTPILOT_LOCAL_PAID_EMAILS || '').toLowerCase().split(',').map((e) => e.trim()).filter((e) => /@example[.](com|org|net)$/.test(e)) : []);
+const isLocalPaid = (email) => LOCAL_PAID.size > 0 && LOCAL_PAID.has(String(email || '').trim().toLowerCase());
+if (LOCAL_PAID.size) console.log(`[run-mode] local paid test identities: ${[...LOCAL_PAID].join(', ')}`);
+
 async function getUserByEmail(email) {
   if (!SUPABASE_URL || !email) return null;
   try {
     const rows = await supabase('GET', 'users', null, `?email=eq.${encodeURIComponent(email)}&select=*`);
-    return Array.isArray(rows) ? rows[0] : null;
+    const row = Array.isArray(rows) ? rows[0] : null;
+    return row && isLocalPaid(row.email) ? { ...row, plan: 'pro' } : row;
   } catch (err) {
     console.warn('[users] lookup failed:', err.message);
     return null;
@@ -2274,7 +2291,7 @@ app.post('/api/auth/verify', express.urlencoded({ extended: false, limit: '2kb' 
     const user = users && users[0];
     if (!user) return res.redirect(303, '/first-run');
 
-    sessions.set(sessionToken, { email: user.email, userId: user.id, plan: user.plan, free_run_used: user.free_run_used || false, terms_accepted_version: user.terms_accepted_version || null, source: 'magic-link', createdAt: Date.now() });
+    sessions.set(sessionToken, { email: user.email, userId: user.id, plan: isLocalPaid(user.email) ? 'pro' : user.plan, free_run_used: user.free_run_used || false, terms_accepted_version: user.terms_accepted_version || null, source: 'magic-link', createdAt: Date.now() });
     saveSessions();
 
     // Update last login
@@ -7678,6 +7695,33 @@ async function evaluateStateAssertion(assert, page, diag) {
 // exempt:false covers the other non-applicable cases (unknown assert type,
 // invalid regex).
 const LOOK_ONLY_ACTIONS = new Set(['navigate', 'scroll', 'scroll_to', 'wait', 'hover', 'retry_hint']);
+// Errors every browser throws now and then that say nothing about the app.
+const BENIGN_PAGE_ERROR = /ResizeObserver|^Script error|AbortError|Load failed|Failed to fetch|NetworkError|ChunkLoadError|Loading chunk|extension:/i;
+// A verify whose check was already true before the action (see
+// negativeControlCheck) is looked at once more: did the action do anything?
+// Returns a finding to report instead of the pass, or null.
+async function hollowPass(page, pre, diag, check) {
+  if (!pre || LOOK_ONLY_ACTIONS.has(pre.action)) return null;
+  const what = pre.target ? `“${pre.target}”` : 'that step';
+  const want = String(check || '').slice(0, 200);
+  const errs = (diag.pageErrors || []).slice(pre.pageErrorCount || 0).filter((e) => !BENIGN_PAGE_ERROR.test(String(e.message || '')));
+  if (errs.length) {
+    const msg = String(errs[0].message || '').slice(0, 160);
+    return { cause: 'app_error_visible', actual: `The app reported an error: ${msg}`,
+      description: `After ${what} the app hit an error (“${msg}”). Expected: ${want}` };
+  }
+  if (pre.action !== 'click') return null;
+  const sameUrl = page.url() === pre.url;
+  const sameText = (await visiblePageText(page)) === pre.text;
+  const noCalls = (diag.apiCalls || []).length === (pre.apiCallCount || 0);
+  const noNewTab = page.context().pages().length === (pre.tabCount || 1);   // a link that opens a new tab did something
+  if (sameUrl && sameText && noCalls && noNewTab) {
+    return { cause: 'action_no_effect', actual: 'The page stayed exactly the same after the click.',
+      description: `Clicking ${what} did nothing: the page stayed exactly the same. Expected: ${want}` };
+  }
+  return null;
+}
+
 async function negativeControlCheck(assert, preActionState, diag) {
   const type = assert?.type;
   const expectChange = assert?.expectChange !== false;
@@ -8612,6 +8656,9 @@ What is your first action?`,
           url: page.url(),
           text: await visiblePageText(page),
           apiCallCount: diag.apiCalls.length,
+          pageErrorCount: diag.pageErrors.length,
+          tabCount: page.context().pages().length,
+          target: String(action.target || action.field || '').slice(0, 80),
         };
       }
 
@@ -9613,7 +9660,23 @@ Look at this turn's screenshot and the Buttons / Fields lists. Pick something el
                   // so a weak check is visible instead of silently trusted.
                   const nc = await negativeControlCheck(action.assert, preActionState, diag);
                   sanityCheck = nc.wentRed === true ? 'verified' : nc.wentRed === false ? 'unproven' : nc.exempt ? 'exempt' : null;
-                  if (nc.wentRed === false) {
+                  // The check was already true BEFORE the action, so its pass proves
+                  // nothing. If on top of that the action visibly did nothing, or the
+                  // app threw an error because of it, that is the result: a problem,
+                  // not a pass. Seen 2026-11-12: a dead "Track my order" button and a
+                  // crashing "Returns policy" page both came back "found on the page".
+                  const hollow = nc.wentRed === false ? await hollowPass(page, preActionState, diag, action.check) : null;
+                  if (hollow) {
+                    const finding = classifyFailure({
+                      cause: hollow.cause, step: stepNum, check: action.check,
+                      description: hollow.description, expected: sa.expected, actual: hollow.actual,
+                      severity: 'medium', screenshot: verifyScreenshot,
+                    });
+                    result.findings.push(finding);
+                    result.bugs.push(finding);
+                    sanityCheck = null;
+                    outcome = `❌ ${hollow.description}`;
+                  } else if (nc.wentRed === false) {
                     result.findings.push(classifyFailure({
                       cause: 'state_assertion_unproven',
                       step: stepNum,
@@ -13148,6 +13211,8 @@ app.post('/api/v1/apps/:appId/scenarios/suggest', async (req, res) => {
   for (const f of flows) {
     if (!f?.name) continue;
     if (DESTRUCTIVE.test(f.name) || DESTRUCTIVE.test(f.description || '')) continue;
+    // Signing out proves nothing about the app and ends the session the test needs.
+    if (/^(sign|log)[ -]?out\b/i.test(String(f.name).trim())) continue;
     candidates.push({
       name: cleanName(f.name),
       description: cleanDesc(f.description) || (Array.isArray(f.steps) ? f.steps.join(' → ') : ''),
