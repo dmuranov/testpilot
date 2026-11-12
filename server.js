@@ -12,6 +12,7 @@ import { assertPublicUrl } from './routes/ssrf.js';
 import { alertOnboardingIssue, watchOnboarding, onOnboardingFailure, isInternal as isInternalEmail } from './lib/onboarding-alert.js';
 import { RUN_MODE, isInternalAddress } from './lib/local-run.js';
 import { matchesText } from './lib/text-match.js';
+import { quickRead, understandPrompt, parseUnderstanding, appDigest, scenarioPrompt, parseScenario, makeLimiter } from './lib/chat-understand.js';
 import { userScenarioWords, FREE_RUN_WORD_LIMIT } from './lib/scenario-words.js';
 import { sendResend, canSend } from './lib/resend.js';
 import { createFreeRunAllowance } from './lib/free-runs.js';
@@ -14922,6 +14923,60 @@ app.post('/api/funnel/step', (req, res) => {
   const who = (token && sessions.get(token)?.email) || 'anon';
   console.log('[funnel-step]', step, who, String(req.body?.detail || '').slice(0, 80));
   res.json({ ok: true });
+});
+
+// ── the chat reads a plain answer ─────────────────────────────
+// Every question in the chat also takes an answer in the client's own words
+// (lib/chat-understand.js). Quick rules first; otherwise one small call on
+// TestPilot's own key, limited per visitor, and skipped when that key is
+// down or the month's free budget is spent (the chat then asks again).
+const understandLimit = makeLimiter(40, 60 * 60_000);
+const scenarioLimit = makeLimiter(20, 60 * 60_000);
+const chatAiAvailable = async () => !!process.env.ANTHROPIC_SUPPORT_KEY && !isFreeBudgetExceeded() && !(await freeTestsPaused());
+app.post('/api/chat/understand', async (req, res) => {
+  const q = String(req.body?.q || '');
+  if (!['email', 'url', 'menu'].includes(q)) return res.status(400).json({ error: 'unknown question' });
+  const text = String(req.body?.text || '').slice(0, 500);
+  const session = sessions.get(req.cookies?.tpsession);
+  const known = { email: String(session?.email || req.body?.known?.email || '').slice(0, 200), app: String(req.body?.known?.app || '').slice(0, 300) };
+  const options = (Array.isArray(req.body?.options) ? req.body.options : []).slice(0, 45).map((o) => ({ label: String(o?.label || '').slice(0, 80), desc: String(o?.desc || '').slice(0, 140) }));
+  const ctx = { known, options, title: String(req.body?.title || '').slice(0, 300) };
+  const quick = quickRead(q, text, ctx);
+  if (quick) return res.json(quick);
+  try {
+    if (!understandLimit(session?.email || clientIpOf(req)) || !(await chatAiAvailable())) return res.json({ action: 'unclear' });
+    const resp = await getClient(process.env.ANTHROPIC_SUPPORT_KEY).messages.create({
+      model: 'claude-haiku-4-5', max_tokens: 200,
+      messages: [{ role: 'user', content: understandPrompt(q, text, ctx) }],
+    }, { timeout: 15_000, maxRetries: 0 });
+    res.json(parseUnderstanding(q, (resp.content || []).find((b) => b.type === 'text')?.text, ctx));
+  } catch (e) {
+    console.warn('[chat-understand] failed:', String(e.message).slice(0, 120));
+    res.json({ action: 'unclear' });
+  }
+});
+
+// "You create the scenario": written from what the crawl saw, around the
+// client's few words when they gave some. Signed-in owners of the app only.
+app.post('/api/chat/scenario', async (req, res) => {
+  const user = requireUser(req, res);
+  if (!user) return;
+  const appId = String(req.body?.appId || '');
+  const kind = ['journey', 'checkout', 'multirole'].includes(req.body?.kind) ? req.body.kind : 'journey';
+  const map = platformMaps.get(appId);
+  if (!map) return res.status(404).json({ error: 'I have not looked at this app yet.' });
+  if (!ownsApp(appId, requesterEmail(req))) return res.status(403).json({ error: 'This app belongs to another account.', code: 'OWNERSHIP_MISMATCH' });
+  try {
+    if (!scenarioLimit(user.email) || !(await chatAiAvailable())) return res.json({ none: true, reply: '' });
+    const resp = await getClient(process.env.ANTHROPIC_SUPPORT_KEY).messages.create({
+      model: 'claude-sonnet-5', max_tokens: 3000,   // the scenario IS the test: worth the better writer (it thinks first, hence the room)
+      messages: [{ role: 'user', content: scenarioPrompt(kind, appDigest(map), String(req.body?.hint || '').slice(0, 400)) }],
+    }, { timeout: 45_000, maxRetries: 0 });
+    res.json(parseScenario((resp.content || []).find((b) => b.type === 'text')?.text));
+  } catch (e) {
+    console.warn('[chat-scenario] failed:', String(e.message).slice(0, 120));
+    res.json({ none: true, reply: '' });
+  }
 });
 
 app.post('/api/support', async (req, res) => {

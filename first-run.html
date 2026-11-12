@@ -187,10 +187,31 @@ function askEmail() {
   setReply(`<div class="row"><input id="in" type="email" inputmode="email" autocomplete="email" placeholder="you@company.com" onkeydown="if(event.key==='Enter')gotEmail()"><button onclick="gotEmail()">Send</button></div>
     <div class="muted">By continuing you accept the <a href="/terms.html" target="_blank" style="color:#c8f040">Terms</a> and <a href="/privacy.html" target="_blank" style="color:#c8f040">Privacy Policy</a>.</div>`);
 }
-function gotEmail() {
-  const v = document.getElementById('in').value.trim().toLowerCase();
-  if (!v || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) return say('<p>That doesn\'t look like an email address. Try again?</p>', 'err');
-  st.email = v; me(v); step('email');
+// ── answers in the client's own words ─────────────────────
+// Every question also takes a plain sentence ("use the one I gave you", "you
+// create the scenario", a question back). The server reads it: quick rules,
+// then one small Claude call (lib/chat-understand.js). Passwords never go there.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const HANDS_BACK = /\b(you (create|make|write|decide|choose|pick|suggest|do it|come up|tell me|propose|generate)|(create|make|write|suggest|pick|choose|propose|generate) (one|it|something|a (scenario|flow|test))( for me)?|suggest( one| something)?|surprise me|up to you|your (choice|call)|whatever( you (think|want))?|anything( is fine)?|i (do not|don'?t) know|not sure|no idea|you know best)\b/i;
+async function understand(q, text, extra) {
+  try {
+    const { res, data } = await postJson('/api/chat/understand', { q, text, known: { email: st.email || '', app: st.url || '' }, ...(extra || {}) });
+    if (res.ok && data && data.action) return data;
+  } catch (e) {}
+  return { action: 'unclear' };
+}
+async function gotEmail() {
+  const raw = document.getElementById('in').value.trim();
+  if (!raw) return;
+  let v = raw.toLowerCase();
+  me(raw);
+  if (!EMAIL_RE.test(v)) {
+    const u = await understand('email', raw);
+    if (u.action === 'value') v = u.value;
+    else if (u.action === 'answer') return say(`<p>${esc(u.reply)}</p><p>What's your email?</p>`);
+    else return say('<p>I did not catch an email address in that. What\'s your email?</p>', 'err');
+  }
+  st.email = v; step('email');
   askUrl();
 }
 
@@ -206,10 +227,20 @@ function askUrl() {
 }
 async function gotUrl() {
   const input = document.getElementById('in');
-  const v = input.value.trim();
+  let v = input.value.trim();
   if (!v) return;
+  // Not a bare link (a sentence, a question): read it first.
+  let echoed = false;
+  if (/\s/.test(v) || !/\./.test(v)) {
+    me(v); echoed = true;
+    const u = await understand('url', v);
+    if (u.action === 'value') v = u.value;
+    else if (u.action === 'use_known' && st.url) v = st.url;
+    else if (u.action === 'answer') return say(`<p>${esc(u.reply)}</p><p>Paste the link to your app: the one your customers open.</p>`);
+    else return say('<p>I did not find a link in that. Paste the address your customers open, for example https://your-app.com.</p>', 'err');
+  }
   if (editorLink(v)) return say('<p>That looks like your <b>editor</b> link. I need the link your customers open, the published one. In your builder, look for <b>Publish</b> or <b>Share</b> and copy the live address.</p>', 'err');
-  me(v); setReply('<div class="muted">Checking…</div>');
+  if (!echoed) me(v); setReply('<div class="muted">Checking…</div>');
   let attrib = (window.tpAttribution && window.tpAttribution.first) || null;
   if (!attrib) { try { attrib = JSON.parse(localStorage.getItem('tp_attrib') || 'null'); } catch (e) {} }
   try {
@@ -375,7 +406,7 @@ async function loadPicks() {
 // number, the way they would answer a person.
 let numberHandler = null, menuSeq = 0;
 function menu(title, items, extra) {
-  st.menu = items;
+  st.menu = items; st.menuTitle = String(title || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
   const seq = ++menuSeq;
   // Older lists stay readable but no longer answer: their numbers belong to them.
   document.querySelectorAll('.choices button.choice').forEach((b) => { b.disabled = true; });
@@ -384,14 +415,28 @@ function menu(title, items, extra) {
   // The list keeps answering until something starts running (lockMenus), so
   // a client who changes their mind can pick again.
   numberHandler = (n) => { const it = st.menu[n - 1]; if (it) { me(`${n}. ${it.label}`); it.act(); } };
-  setReply(`<div class="row"><input id="num" inputmode="numeric" placeholder="Type a number (1–${items.length})" onkeydown="if(event.key==='Enter')gotNumber()"><button onclick="gotNumber()">Send</button></div>${extra || ''}`);
+  setReply(`<div class="row"><input id="num" inputmode="numeric" placeholder="Type a number (1–${items.length}), or say it in your own words" onkeydown="if(event.key==='Enter')gotNumber()"><button onclick="gotNumber()">Send</button></div>${extra || ''}`);
 }
 function lockMenus() { numberHandler = null; document.querySelectorAll('.choices button.choice').forEach((b) => { b.disabled = true; }); }
 function choose(n, seq) { if (seq && seq !== menuSeq) return; if (numberHandler) numberHandler(n); }
-function gotNumber() {
-  const n = parseInt((document.getElementById('num') || {}).value, 10);
-  if (!(n >= 1 && n <= st.menu.length)) return say(`<p>Type a number from 1 to ${st.menu.length}.</p>`, 'err');
-  choose(n);
+async function gotNumber() {
+  const box = document.getElementById('num');
+  const raw = ((box || {}).value || '').trim();
+  if (!raw) return;
+  if (/^\d+$/.test(raw)) {
+    const n = parseInt(raw, 10);
+    if (!(n >= 1 && n <= st.menu.length)) return say(`<p>Type a number from 1 to ${st.menu.length}.</p>`, 'err');
+    return choose(n);
+  }
+  if (!numberHandler) return;
+  // Words instead of a number: which item do they mean, or what are they asking?
+  const seq = menuSeq, items = st.menu;
+  me(raw); box.value = '';
+  const u = await understand('menu', raw, { title: st.menuTitle, options: items.map((it) => ({ label: it.label, desc: it.desc || '' })) });
+  if (seq !== menuSeq || !numberHandler) return;   // the chat moved on meanwhile
+  if (u.action === 'choose' && items[u.index - 1]) { say(`<p class="muted">${esc(items[u.index - 1].label)}.</p>`); return items[u.index - 1].act(); }
+  if (u.action === 'answer') return say(`<p>${esc(u.reply)}</p><p class="muted">Pick one from the list above: its number, or in your own words.</p>`);
+  say(`<p>I did not understand that. Pick a number from 1 to ${items.length}, or say it another way.</p>`, 'err');
 }
 
 const paid = () => !!st.plan && !['free', 'onerun'].includes(st.plan);
@@ -409,12 +454,27 @@ const hostOf = (u) => { try { return new URL(u).host; } catch (e) { return u || 
 // The link in the email brings them back here (the server sends a verified
 // sign-in to /first-run), never to the old dashboard.
 function askSignIn() {
+  if (st.email) return menu(`<p>Shall I send the sign-in link to <b>${esc(st.email)}</b>?</p>`, [
+    { label: 'Yes, send it', desc: '', act: () => sendSignInLink(st.email) },
+    { label: 'Another email', desc: '', act: askSignInEmail },
+  ]);
+  askSignInEmail();
+}
+function askSignInEmail() {
   say('<p>What is your TestPilot email? I will send you a sign-in link.</p>');
   setReply(`<div class="row"><input id="si" type="email" autocomplete="email" placeholder="you@company.com" onkeydown="if(event.key==='Enter')sendSignInLink(document.getElementById('si').value)"><button onclick="sendSignInLink(document.getElementById('si').value)">Send</button></div>`);
 }
 async function sendSignInLink(email) {
-  const e = String(email || '').trim().toLowerCase();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) return say('<p>That does not look like an email address.</p>', 'err');
+  let e = String(email || '').trim().toLowerCase();
+  if (!e) return;
+  if (!EMAIL_RE.test(e)) {
+    me(String(email).trim());
+    const u = await understand('email', String(email));
+    if (u.action === 'value') e = u.value;
+    else if (u.action === 'use_known' && st.email) e = st.email;
+    else if (u.action === 'answer') return say(`<p>${esc(u.reply)}</p><p>Which email shall I send the sign-in link to?</p>`);
+    else return say('<p>I did not catch an email address in that. Which email shall I send the sign-in link to?</p>', 'err');
+  }
   try {
     const { res, data } = await postJson('/api/auth/request', { email: e });
     if (res.ok) { say(`<p>📬 Check your inbox at <b>${esc(e)}</b>: click the link and you come back right here.</p>`); setReply(''); }
@@ -582,8 +642,8 @@ function needLogin(next) {
   askCredsNow();
   return true;
 }
-function ownTest() {
-  say('<p>Please describe the flow you want to test: what a customer does, step by step, and what should be true at the end.</p><p class="muted">Example: "Open the shop, add the Ciotola in maiolica to the cart, go to checkout and check the total is €24."</p>');
+function ownTest(quiet) {
+  if (quiet !== true) say('<p>Please describe the flow you want to test: what a customer does, step by step, and what should be true at the end.</p><p class="muted">Example: "Open the shop, add the Ciotola in maiolica to the cart, go to checkout and check the total is €24." A few words are enough too, or say "you write it" and I will suggest one.</p>');
   setReply(`<div class="row"><textarea id="sc" rows="3" maxlength="600" placeholder="A customer…"></textarea><button onclick="gotOwn()">Run</button></div>`);
 }
 // Checked before it runs, so a vague request does not burn a run: long enough to
@@ -592,12 +652,30 @@ function gotOwn() {
   const v = (document.getElementById('sc') || {}).value.trim();
   if (!v) return;
   const words = v.split(/\s+/).filter(Boolean).length;
-  if (words < 6) return say('<p>Tell me a bit more: the steps a customer takes and what should happen at the end.</p>', 'err');
+  // "You write it", or only a few words: I write the scenario and ask before I run it.
+  if (words < 6 || (HANDS_BACK.test(v) && words <= 16)) { me(v); return draftScenario('journey', HANDS_BACK.test(v) ? '' : v, (s) => run(s), ownTest); }
   if (!paid() && words > 100) return say('<p>The free test takes up to 100 words. Can you make it shorter?</p>', 'err');
   // The whole app, not one flow ("check everything in the summary" is one flow).
   if (/\b(test everything|every (button|page|link)|whole app|entire app|all (buttons|pages|links))\b/i.test(v)) return say('<p>That is the whole app, not one flow. Pick <b>Click-everything check</b> for that, or describe one flow.</p>', 'err');
   me(v); step('test_chosen', 'own');
   run(v);
+}
+// Written from what I saw in the app, around the client's few words when they
+// gave some. Shown first: nothing runs until they say so.
+async function draftScenario(kind, hint, runIt, describe) {
+  setReply('<div class="muted">Writing a scenario from what I saw in your app…</div>');
+  let d = {};
+  try { d = (await postJson('/api/chat/scenario', { appId: st.appId, kind, hint })).data || {}; } catch (e) {}
+  if (d.scenario) {
+    say(`<p>Here is what I would test:</p><code class="box">${esc(d.scenario)}</code>`);
+    return menu('<p>Shall I run it?</p>', [
+      { label: 'Run it', desc: '', act: () => { step('test_chosen', 'drafted'); runIt(d.scenario); } },
+      { label: 'Write another one', desc: 'A different one from your app.', act: () => draftScenario(kind, `${hint ? hint + '. ' : ''}Not this one again: ${d.scenario.slice(0, 160)}`, runIt, describe) },
+      { label: 'I will describe it', desc: 'In my own words.', act: () => describe() },
+    ]);
+  }
+  say(`<p>${esc(d.reply || 'I could not write one from what I saw in your app. Tell me in a sentence what a customer does, and what should be true at the end.')}</p>`);
+  describe(true);
 }
 // ── Security check, in the chat ───────────────────────────
 // Account 1 is the login the chat already has; only the second account is
@@ -666,14 +744,14 @@ function askSecondAccount(why, next, slot = 'second') {
 
 // ── Checkout & Booking, in the chat ───────────────────────
 // The same run as a journey, on the flow endpoint, which stops before paying.
-function checkoutTest() {
-  say('<p>Please describe the purchase or booking: what the customer picks, the details they fill in, and what the last screen before paying should show.</p><p class="muted">Example: "Book a table for 2 on Saturday at 20:00 and check the summary shows the date, time and 2 guests." I stop before anything is paid.</p>');
+function checkoutTest(quiet) {
+  if (quiet !== true) say('<p>Please describe the purchase or booking: what the customer picks, the details they fill in, and what the last screen before paying should show.</p><p class="muted">Example: "Book a table for 2 on Saturday at 20:00 and check the summary shows the date, time and 2 guests." A few words are enough too, or say "you write it" and I will suggest one. I stop before anything is paid.</p>');
   setReply(`<div class="row"><textarea id="sc" rows="3" maxlength="600" placeholder="A customer books…"></textarea><button onclick="gotCheckout()">Run</button></div>`);
 }
 function gotCheckout() {
   const v = (document.getElementById('sc') || {}).value.trim();
   if (!v) return;
-  if (v.split(/\s+/).filter(Boolean).length < 6) return say('<p>Tell me a bit more: what the customer picks and what the screen before paying should show.</p>', 'err');
+  if (v.split(/\s+/).filter(Boolean).length < 6 || (HANDS_BACK.test(v) && v.split(/\s+/).length <= 16)) { me(v); return draftScenario('checkout', HANDS_BACK.test(v) ? '' : v, (s) => run(s, 'checkout'), checkoutTest); }
   if (!paid() && v.split(/\s+/).filter(Boolean).length > 100) return say('<p>The free test takes up to 100 words. Can you make it shorter?</p>', 'err');
   me(v); step('test_chosen', 'checkout');
   run(v, 'checkout');
@@ -682,16 +760,21 @@ function gotCheckout() {
 // ── Multi-role, in the chat ───────────────────────────────
 // One flow, run as account 1 (the login the chat has) and account 2 (asked
 // once); one report with each problem marked by the account that hit it.
-function multiRoleTest() {
+function multiRoleTest(quiet) {
   if (!st.appPw && !st.savedLogin) { say('<p>First the login of account 1.</p>'); st.afterCreds = multiRoleTest; return askCredsNow(); }
   if (!st.secondEmail) return askSecondAccount(`I run the same flow as two different users of ${esc(st.origin || 'your app')}. Which <b>second test account</b> should I use (for example a customer if account 1 is an admin)?`, multiRoleTest);
-  say('<p>Please describe the flow both accounts do, and what each one should see or be allowed to do.</p><p class="muted">Example: "Open the orders page. Account 1 (admin) sees every order and can delete one; account 2 (customer) sees only their own orders and no delete button."</p>');
+  if (quiet !== true) say('<p>Please describe the flow both accounts do, and what each one should see or be allowed to do.</p><p class="muted">Example: "Open the orders page. Account 1 (admin) sees every order and can delete one; account 2 (customer) sees only their own orders and no delete button."</p>');
   setReply(`<div class="row"><textarea id="sc" rows="3" maxlength="800" placeholder="Both open…"></textarea><button onclick="gotMultiRole()">Run</button></div>`);
 }
 function gotMultiRole() {
   const v = (document.getElementById('sc') || {}).value.trim();
   if (!v) return;
-  if (v.split(/\s+/).filter(Boolean).length < 6) return say('<p>Tell me a bit more: what both do, and what each account should see.</p>', 'err');
+  if (v.split(/\s+/).filter(Boolean).length < 6 || (HANDS_BACK.test(v) && v.split(/\s+/).length <= 16)) {
+    me(v);
+    // Two accounts: what differs between them is the client's knowledge, not mine.
+    if (HANDS_BACK.test(v)) return say('<p>For two accounts I need one thing from you: what should account 2 <b>not</b> see or do that account 1 can? A few words are enough, for example "account 2 must not see the delete button on orders".</p>');
+    return draftScenario('multirole', v, (s) => run(s, 'multirole'), multiRoleTest);
+  }
   me(v); step('test_chosen', 'multirole');
   run(v, 'multirole');
 }
@@ -1137,8 +1220,8 @@ const NAV_TEST = {
   },
   checkout() {
     say('<p><b>Checkout &amp; Booking Test.</b> I go through a purchase or a booking up to the payment step and check every screen on the way. I stop before anything is paid.</p>');
-    if (needLogin(checkoutTest)) return;
-    checkoutTest();
+    if (needLogin(checkoutAsk)) return;
+    checkoutAsk();
   },
   multirole() {
     say('<p><b>Multi-Role.</b> I run the same flow as two different users, for example an admin and a customer, and check that each one sees and can do only what they should.</p>');
@@ -1153,10 +1236,16 @@ const NAV_TEST = {
     menu('<p>It usually takes three to eight minutes. Shall I start?</p>', [{ label: 'Start', desc: '', act: clickEverything }, { label: 'Not now', desc: '', act: () => say('<p>Fine. Pick anything from the menu when you are ready.</p>') }]);
   },
 };
+function checkoutAsk() {
+  menu('<p>Shall I write the scenario from what I learned about your app, or do you want to describe it?</p>', [
+    { label: 'Write it for me', desc: 'I show it to you before I run anything.', act: () => draftScenario('checkout', '', (s) => run(s, 'checkout'), checkoutTest) },
+    { label: 'I will describe it', desc: 'What the customer buys or books, in your own words.', act: () => checkoutTest() },
+  ]);
+}
 function flowAsk() {
   menu('<p>Shall I suggest a flow from what I learned about your app, or do you want to describe one?</p>', [
     { label: 'Suggest flows', desc: 'I list the flows I saw in your app and you pick one.', act: flowSuggest },
-    { label: 'I will describe it', desc: 'In your own words, e.g. "a customer books a table for Saturday".', act: ownTest },
+    { label: 'I will describe it', desc: 'In your own words, e.g. "a customer books a table for Saturday".', act: () => ownTest() },
   ]);
 }
 async function flowSuggest() {
@@ -1164,7 +1253,7 @@ async function flowSuggest() {
   if (!picks.length) { say('<p>I did not see enough in your app to suggest a flow.</p>'); return ownTest(); }
   menu('<p>These are the flows I saw. Which one shall I test?</p>', [
     ...picks.map((p) => ({ label: p.name, desc: p.description || '', act: () => { step('test_chosen', 'suggested'); run(`${p.name}: ${p.description || ''}`.trim()); } })),
-    { label: 'None of these', desc: 'I will describe the flow myself.', act: ownTest },
+    { label: 'None of these', desc: 'I will describe the flow myself.', act: () => ownTest() },
   ]);
 }
 const when = (iso) => { try { return new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }); } catch (e) { return ''; } };
