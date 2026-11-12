@@ -51,6 +51,9 @@ const CAUSE_CATEGORY = {
   // needed before it can count as a real defect. See server.js's structured
   // verify path.
   state_assertion_failed: Category.APP_BUG,
+  // A click after which the page stayed exactly the same (same address, same
+  // text, no request), while the check that followed proved nothing new.
+  action_no_effect:   Category.APP_BUG,
   // ── TestPilot couldn't do something ─────────────────────────────
   selector_miss:      Category.TOOL_LIMITATION,
   click_failed:       Category.TOOL_LIMITATION,
