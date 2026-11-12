@@ -17435,6 +17435,8 @@ async function runSchedule(s) {
     sessionState = saved.sessionState; savedIndexedDB = saved.indexedDB;
   }
 
+  // One run of the watched test. Called a second time to confirm a failure.
+  const runOnce = async () => {
   const testId = randomUUID();
   testResults.set(testId, { testId, appId: s.appId, scenario: s.scenario, status: 'starting', userEmail: s.ownerEmail, userId: s.ownerUserId || null, startedAt: new Date().toISOString(), steps: [], bugs: [], scheduleId: s.id });
   await acquireScanSlot();
@@ -17447,10 +17449,12 @@ async function runSchedule(s) {
   } finally {
     releaseScanSlot();
     recordScanOutcome(testResults.get(testId)?.status);
-    if (freeHold && !CHARGED_RUN_STATUSES.includes(testResults.get(testId)?.status)) freeHold.refund();
   }
+  return { testId, result: testResults.get(testId) };
+  };
 
-  const result = testResults.get(testId);
+  let { testId, result } = await runOnce();
+  if (freeHold && !CHARGED_RUN_STATUSES.includes(result?.status)) freeHold.refund();
   // Broke on our side: not a verdict on the app. No alert, the baseline stays.
   if (result?.ourSide) { s.lastTestId = testId; return finish('Skipped: TestPilot had a problem on its side (not your app). The next run is as scheduled.'); }
   // A saved login that no longer gets in has expired: that is not the app breaking.
@@ -17464,9 +17468,27 @@ async function runSchedule(s) {
     return finish(`Skipped: ${s.savedSessionRole ? `the saved login "${s.savedSessionRole}"` : 'the saved login'} no longer signs in (it may have changed or expired). Save it again in TestPilot.`);
   }
   if (usesSavedLogin && CHARGED_RUN_STATUSES.includes(result?.status)) s.loginProblemNotifiedAt = null;   // got through signed in: a later expiry mails again
-  const curr = outcomeSignature(result);
+  let curr = outcomeSignature(result);
   const prev = s.baseline || null;
-  const regressed = isRegression(prev, curr);
+  let regressed = isRegression(prev, curr);
+  // One failing run is not yet news: a slow page or a hiccup fails once and
+  // passes the next minute. Run it again now; mail the owner only when the
+  // second run fails too. The second run is the one kept as the result.
+  if (regressed) {
+    const firstTestId = testId;
+    const again = await runOnce();
+    // No verdict from the recheck (our side broke): no alert, the baseline stays.
+    if (!again.result || again.result.ourSide) { s.lastTestId = firstTestId; return finish('A run failed and the recheck could not be done (a problem on TestPilot’s side, not your app). No alert was sent; the next run is as scheduled.'); }
+    // The recheck could not sign in: that is the saved login, not the app.
+    if (usesSavedLogin && /^login_/.test(String(again.result.blockedReason?.cause || ''))) { s.lastTestId = again.testId; await notifySavedLoginProblem(s, 'expired'); return finish('Skipped: the saved login no longer signs in (it may have changed or expired). Save it again in TestPilot.'); }
+    testId = again.testId; result = again.result;
+    curr = outcomeSignature(result);
+    regressed = isRegression(prev, curr);
+    s.lastRecheck = { at: new Date().toISOString(), firstTestId, confirmed: regressed };
+    console.log(`[schedules] ${s.id} failed once, recheck ${regressed ? 'failed too: alerting' : 'passed: no alert'}`);
+  }
+  // Working again after an alert: the owner hears that too.
+  const fixedAgain = curr.ok && !!s.alertOpen;
 
   s.lastRunAt = new Date().toISOString();
   s.lastTestId = testId;
@@ -17480,6 +17502,7 @@ async function runSchedule(s) {
   saveSchedules();
 
   if (regressed) await sendRegressionAlert(s, prev, curr, result, apiKey);
+  else if (fixedAgain) await sendFixedAgainMail(s);
 }
 
 // The fix for each bug the run found, ready to paste into the client's builder
@@ -17527,8 +17550,24 @@ async function sendRegressionAlert(s, prev, curr, result, apiKey) {
   try {
     await mailer({ to, subject: `⚠ Something stopped working in ${host}`, text });
     s.lastNotifiedAt = new Date().toISOString();
+    s.alertOpen = true;                                          // a later pass sends "working again"
     saveSchedules();
   } catch (e) { console.warn('[schedules] alert email failed:', e.message); }
+}
+
+// The watched test passes again after an alert went out. One short mail, so the
+// owner knows the fix worked without opening TestPilot.
+async function sendFixedAgainMail(s) {
+  const to = s.alertEmail || s.ownerEmail;
+  s.alertOpen = false;
+  saveSchedules();
+  if (!to) return;
+  const appName = platformMaps.get(s.appId)?.url || s.appId;
+  const host = (() => { try { return new URL(appName).host; } catch { return appName; } })();
+  const NL = String.fromCharCode(10);
+  const text = `Good news: the test that TestPilot watches for you passes again.${NL+NL}App: ${appName}${NL}What it checks: ${s.scenario}${NL+NL}Nothing to do. TestPilot keeps watching and writes to you only if it stops working again.${NL+NL}The latest report is in TestPilot: ${APP_URL}/first-run${NL}`;
+  try { await mailer({ to, subject: `✓ Working again in ${host}`, text }); }
+  catch (e) { console.warn('[schedules] fixed-again email failed:', e.message); }
 }
 
 // Ticker: every 5 min run at most one due schedule (serialized). Extra due
