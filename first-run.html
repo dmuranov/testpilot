@@ -49,6 +49,35 @@
   .plan{margin-top:10px;border:1px solid rgba(200,240,64,0.5);border-radius:8px;padding:12px}
   .plan b{font-size:20px}
   @media (max-width:520px){.msg{max-width:96%}}
+  /* Signed-in clients: the same chat with the menu beside it. A menu item
+     starts a conversation; it never opens a form. */
+  .nav,.nav-toggle,.nav-shade{display:none}
+  body.has-nav{padding-left:272px}
+  body.has-nav .nav{display:flex;flex-direction:column;gap:2px;position:fixed;left:0;top:0;bottom:0;width:272px;background:#060606;border-right:1px solid #1d1d1d;padding:22px 14px 16px;overflow-y:auto;z-index:20}
+  body.has-nav .wrap{max-width:1040px;margin:0;padding:28px 40px 200px}
+  body.has-nav .reply{padding-left:40px;padding-right:40px}
+  body.has-nav .reply-in{max-width:960px;margin:0}
+  body.has-nav .reply{left:272px}
+  body.has-nav .topbar{display:none}
+  .nav .brand{padding:0 10px 18px}
+  .nav-sep{height:1px;background:#1d1d1d;margin:8px 6px}
+  .nav-item{display:flex;align-items:center;gap:12px;width:100%;background:transparent;color:#e4e4e4;font-weight:500;font-size:14px;padding:10px 12px;border-radius:8px;text-align:left}
+  .nav-item svg{width:19px;height:19px;flex:none;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+  .nav-item:hover{background:#101010;opacity:1}
+  .nav-item.on{background:rgba(200,240,64,0.14);color:#c8f040}
+  .nav-foot{margin-top:auto;padding:14px 10px 0;font-size:12px;color:#8a8a8a;word-break:break-all}
+  .nav-foot a{color:#a8a8a8;text-decoration:none;display:block;margin-top:6px}
+  .nav-foot a:hover{color:#c8f040}
+  @media (max-width:860px){
+    body.has-nav{padding-left:0}
+    body.has-nav .reply{left:0;padding:12px 16px}
+    body.has-nav .wrap{padding:24px 16px 200px}
+    body.has-nav .topbar{display:flex}
+    body.has-nav .nav{transform:translateX(-100%);transition:transform .18s ease;width:280px}
+    body.has-nav.nav-open .nav{transform:none}
+    body.has-nav .nav-toggle{display:inline-flex;align-items:center;justify-content:center;background:transparent;border:1px solid #333;color:#e8e8e8;padding:7px 10px;margin-right:10px;font-size:16px;line-height:1}
+    body.has-nav.nav-open .nav-shade{display:block;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:15}
+  }
 </style>
 <script type="text/javascript">
 /* Cookie consent — gates Microsoft Clarity (GDPR/ePrivacy: no analytics before opt-in; choice remembered). */
@@ -57,9 +86,11 @@
 </head>
 <body>
 
+<nav class="nav" id="nav" aria-label="TestPilot menu"></nav>
+<div class="nav-shade" onclick="document.body.classList.remove('nav-open')"></div>
 <div class="wrap">
   <div class="topbar">
-    <div class="brand">Test<span>Pilot</span></div>
+    <div style="display:flex;align-items:center"><button class="nav-toggle" aria-label="Menu" onclick="document.body.classList.toggle('nav-open')">☰</button><div class="brand">Test<span>Pilot</span></div></div>
     <a href="#" class="signin" id="signin-link" onclick="askSignIn();return false">Sign in →</a>
   </div>
   <div class="chat" id="chat" aria-live="polite"></div>
@@ -327,7 +358,8 @@ function learnFailed(msg, next) {
 
 // ── 7. pick a test ────────────────────────────────────────
 let picks = [];
-async function suggest() {
+async function suggest() { await loadPicks(); showChoices(); }
+async function loadPicks() {
   setReply('<div class="muted">Thinking of what to test…</div>');
   picks = [];
   try {
@@ -337,7 +369,6 @@ async function suggest() {
       picks = [...data.scenarios, ...(Array.isArray(data.existing) ? data.existing : [])].filter(Boolean).sort((a, b) => (rank[a.source] ?? 2) - (rank[b.source] ?? 2)).slice(0, 3);
     }
   } catch (e) {}
-  showChoices();
 }
 // ── numbered choices ──────────────────────────────────────
 // Every list in the chat is numbered: the client clicks an item or types its
@@ -404,9 +435,9 @@ async function start() {
   }
   if (!who || !who.email) return askEmail();
   st.email = who.email; st.plan = who.plan || 'free'; st.freeUsed = !!who.free_run_used;
-  // Signed in: the header offers the old dashboard only as an advanced extra.
+  // Signed in: no sign-in link. The old dashboard is in the menu's footer.
   const link = document.getElementById('signin-link');
-  if (link) { link.textContent = 'Advanced tools'; link.onclick = null; link.href = '/classic'; }
+  if (link) link.style.display = 'none';
   if (new URLSearchParams(location.search).get('upgraded') === '1') {
     history.replaceState({}, '', '/first-run');
     if (paid()) {
@@ -416,7 +447,7 @@ async function start() {
   }
   welcomeBack();
 }
-async function welcomeBack() {
+async function welcomeBack(fromNav) {
   let apps = [];
   try { apps = await (await fetch('/api/apps')).json(); } catch (e) {}
   // One entry per address: a re-crawled app has an older map too; keep the newest.
@@ -426,7 +457,8 @@ async function welcomeBack() {
   }
   st.apps = [...byUrl.values()];
   if (!st.apps.length) { say('<p>Welcome back! Let us test an app.</p>'); return askUrl(); }
-  menu('<p>Welcome back! Which app shall I test?</p>', [
+  showNav();
+  menu(`<p>${fromNav ? 'Your apps.' : 'Welcome back!'} Which app shall I test?</p>`, [
     ...st.apps.map((a) => ({ label: hostOf(a.url), desc: a.url, act: () => openApp(a) })),
     { label: 'Another app', desc: 'Add a new one', act: newApp },
   ]);
@@ -435,11 +467,11 @@ async function welcomeBack() {
 function resetApp() {
   Object.assign(st, { appId: null, url: '', origin: '', appEmail: '', appPw: '', savedLogin: null, loginAnswered: false, hasLogin: false,
     secondEmail: '', secondPw: '', peerEmail: '', peerPw: '', platform: 'other', platformName: '', verification: null, lastScenario: '', lastKind: 'journey',
-    afterCreds: null, afterVerify: null, afterSecond: null, afterKey: null, afterSave: null, afterSaveNo: null });
+    afterCreds: null, afterVerify: null, afterSecond: null, afterKey: null, afterSave: null, afterSaveNo: null, appReady: false });
   picks = [];
 }
 function newApp() { resetApp(); askUrl(); }
-async function openApp(a) {
+async function openApp(a, next) {
   resetApp();
   st.appId = a.appId; st.url = a.url;
   try { st.platform = localStorage.getItem('tp_platform_' + a.url) || 'other'; } catch (e) { st.platform = 'other'; }
@@ -456,7 +488,8 @@ async function openApp(a) {
     return askLogin();
   }
   if (st.savedLogin) say(`<p>I will sign in with your saved login <b>${esc(st.savedLogin)}</b>.</p>`);
-  else if (a.loginRequired) { st.afterCreds = suggest; say('<p>This app has a login. Which test account should I use?</p>'); return askCredsNow(); }
+  else if (a.loginRequired) { st.afterCreds = next || suggest; say('<p>This app has a login. Which test account should I use?</p>'); return askCredsNow(); }
+  if (next) { st.appReady = true; return next(); }
   suggest();
 }
 // The login question without the "Yes, it has a login" echo (asked by the chat itself).
@@ -512,6 +545,7 @@ function gotKey() {
 
 // ── 7b. pick a test (numbered) ────────────────────────────
 function showChoices() {
+  st.appReady = true; navActive('');
   const freeLeft = !paid() && !st.freeUsed;
   const items = picks.map((p) => ({ label: p.name, desc: p.description || '', act: () => { step('test_chosen', 'suggested'); run(`${p.name}: ${p.description || ''}`.trim()); } }));
   items.push(
@@ -950,6 +984,7 @@ async function sweepReport(sweepId) {
 // is not part of the problem the client reads.
 const plainProblem = (d) => String(d || '').replace(/^\s*\d+\.\s+/, '').replace(/^(?:Account \d+\s+)?Step \d+\s*(\([^)]*\))?\s*[—–:-]\s*/i, '').replace(/^Verify \(assert\):\s*/i, '').slice(0, 300);
 async function report(testId) {
+  showNav();
   let r = {};
   try { r = await (await fetch('/api/test/' + testId)).json(); } catch (e) {}
   await refreshMe();   // a run that did not count gave the free run back
@@ -1055,6 +1090,127 @@ async function checkout() {
     if (data.url) return void (location.href = data.url);
     say(`<p>${esc(data.error || 'Checkout did not open.')}</p>`, 'err');
   } catch (e) { say('<p>' + esc(netErr(e)) + '</p>', 'err'); }
+}
+
+
+// ── the menu beside the chat ──────────────────────────────
+// For signed-in clients who have an app. Every item starts a conversation in
+// the chat: a short line on what it does, then the questions it needs.
+const NAV_ICON = {"learn":"<path d=\"M3 11l9-8 9 8\"/><path d=\"M5 10v10h14V10\"/>","apps":"<path d=\"M12 3l9 5-9 5-9-5 9-5z\"/><path d=\"M3 13l9 5 9-5\"/>","security":"<path d=\"M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6l8-3z\"/>","flow":"<path d=\"M6 4l14 8-14 8V4z\"/>","checkout":"<rect x=\"5\" y=\"4\" width=\"14\" height=\"17\" rx=\"2\"/><path d=\"M9 4V3h6v1M9 10h6M9 14h6\"/>","sweep":"<circle cx=\"12\" cy=\"12\" r=\"9\"/><path d=\"M8 12l3 3 5-6\"/>","multirole":"<circle cx=\"9\" cy=\"8\" r=\"3\"/><path d=\"M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6\"/><circle cx=\"17\" cy=\"9\" r=\"2.4\"/><path d=\"M16 14.2c2.9.3 5 2.7 5 5.8\"/>","watch":"<rect x=\"4\" y=\"5\" width=\"16\" height=\"16\" rx=\"2\"/><path d=\"M8 3v4M16 3v4M4 10h16\"/>","history":"<path d=\"M3 12a9 9 0 1 0 3-6.7L3 8\"/><path d=\"M3 3v5h5M12 7v5l3 2\"/>"};
+const NAV = [['learn', 'Learn New App'], ['apps', 'Learned Apps'], null,
+  ['security', 'Security Test'], ['flow', 'Flow Test'], ['checkout', 'Checkout & Booking Test'], ['sweep', 'Check Everything'], ['multirole', 'Multi-Role'], null,
+  ['watch', 'Scheduled Runs'], ['history', 'Test History']];
+function showNav() {
+  if (document.body.classList.contains('has-nav') || !st.email) return;
+  document.getElementById('nav').innerHTML = '<div class="brand">Test<span>Pilot</span></div>'
+    + NAV.map((n) => n ? `<button class="nav-item" data-k="${n[0]}" onclick="nav('${n[0]}')"><svg viewBox="0 0 24 24">${NAV_ICON[n[0]]}</svg><span>${n[1]}</span></button>` : '<div class="nav-sep"></div>').join('')
+    + `<div class="nav-foot">${esc(st.email)}<a href="/classic">Advanced tools (old dashboard)</a></div>`;
+  document.body.classList.add('has-nav');
+}
+function navActive(k) { document.querySelectorAll('.nav-item').forEach((b) => b.classList.toggle('on', b.dataset.k === k)); }
+// Something is running when the reply bar shows a status line and nothing to answer with.
+const isBusy = () => !$reply.querySelector('input,textarea,button') && !!$reply.textContent.trim();
+function nav(k) {
+  document.body.classList.remove('nav-open');
+  const label = (NAV.find((n) => n && n[0] === k) || [])[1] || k;
+  if (isBusy()) return say(`<p>I am in the middle of something. Ask me for <b>${esc(label)}</b> again as soon as it finishes.</p>`);
+  navActive(k); me(label); step('nav', k);
+  if (k === 'learn') return newApp();
+  if (k === 'apps') return welcomeBack(true);
+  if (k === 'watch') return watchList();
+  if (k === 'history') return historyList();
+  withApp(NAV_TEST[k]);
+}
+// A test needs an app: the one already open, or the client picks one.
+function withApp(next) {
+  if (st.appId && st.appReady) { if (st.apps.length > 1) say(`<p class="muted">On ${esc(hostOf(st.url))}. For another app, pick Learned Apps.</p>`); return next(); }
+  if (st.appId) return say('<p>Let us finish setting up this app first: answer the question above, or pick <b>Learned Apps</b> to open another one.</p>');
+  if (!st.apps.length) { say('<p>I need to learn an app first.</p>'); return askUrl(); }
+  if (st.apps.length === 1) return openApp(st.apps[0], next);
+  menu('<p>On which app?</p>', st.apps.map((a) => ({ label: hostOf(a.url), desc: a.url, act: () => openApp(a, next) })));
+}
+const NAV_TEST = {
+  flow() {
+    say('<p><b>Flow Test.</b> I go through one flow the way a customer would, step by step, and tell you in plain words where it breaks and how to fix it.</p>');
+    if (needLogin(flowAsk)) return;
+    flowAsk();
+  },
+  checkout() {
+    say('<p><b>Checkout &amp; Booking Test.</b> I go through a purchase or a booking up to the payment step and check every screen on the way. I stop before anything is paid.</p>');
+    if (needLogin(checkoutTest)) return;
+    checkoutTest();
+  },
+  multirole() {
+    say('<p><b>Multi-Role.</b> I run the same flow as two different users, for example an admin and a customer, and check that each one sees and can do only what they should.</p>');
+    multiRoleTest();
+  },
+  security() {
+    say('<p><b>Security Test.</b> I check whether one customer can reach another customer’s data, and I look for the common weak spots. I only read: nothing is changed or deleted.</p>');
+    securityCheck();
+  },
+  sweep() {
+    say('<p><b>Check Everything.</b> I click every button and link I can find and tell you which ones are broken or do nothing. Before a click that could order, send or delete something, I ask you.</p>');
+    menu('<p>It usually takes three to eight minutes. Shall I start?</p>', [{ label: 'Start', desc: '', act: clickEverything }, { label: 'Not now', desc: '', act: () => say('<p>Fine. Pick anything from the menu when you are ready.</p>') }]);
+  },
+};
+function flowAsk() {
+  menu('<p>Shall I suggest a flow from what I learned about your app, or do you want to describe one?</p>', [
+    { label: 'Suggest flows', desc: 'I list the flows I saw in your app and you pick one.', act: flowSuggest },
+    { label: 'I will describe it', desc: 'In your own words, e.g. "a customer books a table for Saturday".', act: ownTest },
+  ]);
+}
+async function flowSuggest() {
+  if (!picks.length) await loadPicks();
+  if (!picks.length) { say('<p>I did not see enough in your app to suggest a flow.</p>'); return ownTest(); }
+  menu('<p>These are the flows I saw. Which one shall I test?</p>', [
+    ...picks.map((p) => ({ label: p.name, desc: p.description || '', act: () => { step('test_chosen', 'suggested'); run(`${p.name}: ${p.description || ''}`.trim()); } })),
+    { label: 'None of these', desc: 'I will describe the flow myself.', act: ownTest },
+  ]);
+}
+const when = (iso) => { try { return new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }); } catch (e) { return ''; } };
+const appHost = (appId) => hostOf(((st.apps || []).find((a) => a.appId === appId) || {}).url || '') || 'your app';
+const RESULT_WORDS = { completed: 'passed', completed_with_unverified: 'passed', completed_with_bugs: 'found problems', blocked: 'stopped early', incomplete: 'stopped early', error: 'did not run', config_error: 'did not run' };
+// ── Scheduled Runs: what is being watched, and stopping it ──
+async function watchList() {
+  let list = [];
+  try { list = ((await (await fetch('/api/schedules')).json()).schedules || []).filter((s) => String(s.ownerEmail || '').toLowerCase() === st.email.toLowerCase()); }
+  catch (e) { return say('<p>' + esc(netErr(e)) + '</p>', 'err'); }
+  if (!list.length) {
+    say('<p><b>Scheduled Runs.</b> Nothing is being watched yet. When a Flow Test passes, I offer to rerun it every day and write to you only when it breaks, with the fix.</p>');
+    return menu('<p>What next?</p>', [{ label: 'Run a Flow Test', desc: '', act: () => nav('flow') }, { label: 'Pick an app', desc: '', act: () => welcomeBack(true) }]);
+  }
+  menu(`<p><b>Scheduled Runs.</b> I rerun ${list.length === 1 ? 'this test' : 'these tests'} every day and write to you only when one breaks. Pick one to see it or stop it.</p>`,
+    list.map((s) => ({ label: appHost(s.appId), desc: `${String(s.scenario || '').slice(0, 110)}${s.lastRunAt ? ` · last run ${when(s.lastRunAt)}: ${RESULT_WORDS[s.lastStatus] || 'no result'}` : ' · not run yet'}`, act: () => watchOne(s) })));
+}
+function watchOne(s) {
+  say(`<p><b>${esc(appHost(s.appId))}</b></p><p>What it checks: ${esc(s.scenario || '')}</p><p class="muted">${s.lastRunAt ? `Last run ${esc(when(s.lastRunAt))}: ${esc(RESULT_WORDS[s.lastStatus] || 'no result')}.` : 'Not run yet.'} ${s.nextRunAt ? `Next run ${esc(when(s.nextRunAt))}.` : ''}${s.lastError ? ' ' + esc(s.lastError) : ''}</p>`);
+  menu('<p>What shall I do with it?</p>', [
+    { label: 'Keep watching', desc: 'Leave it as it is.', act: watchList },
+    { label: 'Stop watching', desc: 'I stop the daily run. Nothing else is deleted.', act: async () => {
+      try { const r = await fetch('/api/schedules/' + encodeURIComponent(s.id), { method: 'DELETE' }); if (!r.ok) throw new Error('HTTP ' + r.status); say('<p>Stopped. I no longer run this test daily.</p>'); }
+      catch (e) { say('<p>I could not stop it right now (' + esc(e.message) + '). Try again in a moment.</p>', 'err'); }
+      watchList();
+    } },
+  ]);
+}
+// ── Test History: the last runs, each opened as a short report ──
+async function historyList() {
+  let list = [];
+  try { list = await (await fetch('/api/tests')).json(); } catch (e) { return say('<p>' + esc(netErr(e)) + '</p>', 'err'); }
+  list = (Array.isArray(list) ? list : []).filter((t) => t.startedAt && t.scenario).sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt))).slice(0, 8);
+  if (!list.length) { say('<p><b>Test History.</b> No tests yet. Pick a test from the menu to run the first one.</p>'); return; }
+  menu('<p><b>Test History.</b> Your latest tests. Pick one to read its result again.</p>',
+    list.map((t) => ({ label: `${when(t.startedAt)} · ${appHost(t.appId)} · ${RESULT_WORDS[t.status] || 'no result'}`, desc: String(t.scenario || '').slice(0, 120), act: () => historyOne(t) })));
+}
+async function historyOne(t) {
+  let r = {};
+  try { r = await (await fetch('/api/test/' + encodeURIComponent(t.testId))).json(); } catch (e) {}
+  const bugs = Array.isArray(r.bugs) ? r.bugs : [];
+  say(`<p><b>${esc(appHost(t.appId))}</b>, ${esc(when(t.startedAt))}</p><p>What it checked: ${esc(String(t.scenario || '').slice(0, 500))}</p>`
+    + (bugs.length ? `<p>It found <b>${bugs.length} problem${bugs.length === 1 ? '' : 's'}</b>:</p>${bugs.map((b, i) => `<div class="problem"><b>${i + 1}.</b> ${b.role ? `<span class="tag">${esc(b.role)}</span> ` : ''}${esc(plainProblem(b.description || b))}</div>`).join('')}`
+      : ['completed', 'completed_with_unverified'].includes(r.status || t.status) ? `<p><b>Everything in this test worked.</b> ✅ ${esc((r.steps || []).length)} steps, no problems found.</p>`
+      : '<p>This test stopped before it could give a verdict.</p>'));
+  menu('<p>What next?</p>', [{ label: 'Back to the list', desc: '', act: historyList }, { label: 'Pick an app', desc: '', act: () => welcomeBack(true) }]);
 }
 
 start();

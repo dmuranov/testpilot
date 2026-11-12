@@ -14914,7 +14914,7 @@ app.post('/api/fix-prompt', async (req, res) => {
 
 // Funnel step log for the chat first-run, so drop-off between steps can be
 // read from the server log ([funnel-step] lines). Known step names only.
-const FUNNEL_STEPS = new Set(['email', 'url', 'platform', 'verify_shown', 'verified', 'login', 'learned', 'test_chosen', 'run_started', 'report', 'fix_shown', 'upgrade_click']);
+const FUNNEL_STEPS = new Set(['email', 'url', 'platform', 'verify_shown', 'verified', 'login', 'learned', 'test_chosen', 'run_started', 'report', 'fix_shown', 'upgrade_click', 'nav']);
 app.post('/api/funnel/step', (req, res) => {
   const step = String(req.body?.step || '');
   if (!FUNNEL_STEPS.has(step)) return res.status(400).json({ error: 'unknown step' });
