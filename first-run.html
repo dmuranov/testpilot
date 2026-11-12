@@ -981,6 +981,13 @@ async function report(testId) {
   const all = paid();
   say(`<p>I found <b>${bugs.length} problem${bugs.length === 1 ? '' : 's'}</b>:</p>
     ${bugs.map((b, i) => `<div class="problem${!all && i ? ' locked' : ''}"><b>${i + 1}.</b> ${b.role ? `<span class="tag">${esc(b.role)}</span> ` : ''}${esc(plainProblem(b.description || b))}${!all && i ? '<div class="muted" style="margin-top:4px">🔒 Fix prompt included in the €15/month plan</div>' : ''}</div>`).join('')}`);
+  // Found a problem and then could not go on: say so, or the client thinks the
+  // rest of the flow was checked too.
+  if (r.summary && r.summary.blocked) {
+    const last = (r.steps || []).slice(-1)[0] || {};
+    const said = String(last.action === 'done' ? (last.outcome || '') : '').replace(/^BLOCKED:\s*/i, '');
+    say(`<p class="muted">After that the test could not go further, so the rest of the flow was not checked.${said ? ' Where it stopped: ' + esc(said.slice(0, 300)) : ''}</p>`);
+  }
   const where = esc(st.platformName && st.platform !== 'other' ? st.platformName + '’s AI chat' : 'your builder’s AI chat');
   // Every fix gets its bubble now, in order; at most three are written at a
   // time (they run on the client's key, under its rate limit).
