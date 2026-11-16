@@ -1266,6 +1266,29 @@ app.use((req, res, next) => {
   next();
 });
 
+// ── UNDER CONSTRUCTION ────────────────────────────────────────
+// 2026-11-16: free tests burned through the Claude credit (35 € in a day), so
+// the public entry points show a holding page with a waitlist form instead.
+// Paying clients run on their own Claude key and keep the full app; the super
+// admin does too, so the owner can keep working. Everything else (/api, assets,
+// terms, privacy) is untouched. Turn off with TESTPILOT_UNDER_CONSTRUCTION=off
+// in .env (or by deleting this block) and restart.
+const UNDER_CONSTRUCTION = String(process.env.TESTPILOT_UNDER_CONSTRUCTION || 'on').toLowerCase() !== 'off';
+const CONSTRUCTION_PATHS = new Set(['/', '/first-run', '/first-run.html', '/landing.html', '/sandbox', '/sandbox.html', '/app', '/index.html', '/classic']);
+app.use(async (req, res, next) => {
+  if (!UNDER_CONSTRUCTION || (req.method !== 'GET' && req.method !== 'HEAD')) return next();
+  if (!CONSTRUCTION_PATHS.has(req.path)) return next();
+  const email = sessions.get(req.cookies?.tpsession)?.email;
+  if (email) {
+    if (isSuperAdmin(email)) return next();
+    // Sessions do not carry the plan reliably; the users row does.
+    const user = await getUserByEmail(email).catch(() => null);
+    if (user && (user.plan || 'free') !== 'free') return next();
+  }
+  res.setHeader('Cache-Control', 'no-cache, must-revalidate');
+  res.sendFile(path.resolve('./construction.html'));
+});
+
 // Old addresses (bookmarks, old mail links, campaign links) open the chat.
 // Before express.static, which would otherwise hand out index.html itself.
 function toChat(req, res) {
@@ -2089,20 +2112,22 @@ app.post('/api/apps/cleanup', async (req, res) => {
 // Waitlist
 const WAITLIST_FILE = './waitlist.json';
 app.post('/api/waitlist', async (req, res) => {
-  const { email } = req.body;
-  if (!email || !email.includes('@')) return res.status(400).json({ error: 'Invalid email' });
+  const email = String(req.body?.email || '').trim().toLowerCase().slice(0, 254);
+  if (!email || !isValidEmailSyntax(email)) return res.status(400).json({ error: 'Invalid email' });
+  const source = String(req.body?.source || 'site').replace(/[^a-z0-9-]/gi, '').slice(0, 40);
   try {
     let list = [];
     try { list = JSON.parse(await fs.readFile(WAITLIST_FILE, 'utf-8')); } catch {}
-    if (!list.includes(email)) {
-      list.push(email);
+    // Old entries are plain strings; new ones carry when and where they signed up.
+    if (!list.some((x) => (typeof x === 'string' ? x : x?.email)?.toLowerCase() === email)) {
+      list.push({ email, at: new Date().toISOString(), source });
       await fs.writeFile(WAITLIST_FILE, JSON.stringify(list, null, 2));
       // Notify you
       await mailer.sendMail({
         from: 'hello@testpilotapp.dev',
-        to: 'danijel.muranovic@gmail.com',
+        to: SUPER_ADMIN_EMAIL,
         subject: '🚀 New TestPilot waitlist signup',
-        text: `New signup: ${email}`
+        text: `New signup: ${email} (from: ${source}). Waitlist size: ${list.length}.`
       }).catch(() => {});
     }
     res.json({ ok: true });

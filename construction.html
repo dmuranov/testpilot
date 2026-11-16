@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex">
+<title>TestPilot is getting an upgrade</title>
+<link rel="icon" type="image/png" href="/brand/favicon-32.png">
+<link rel="apple-touch-icon" href="/brand/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Inter:wght@400;500;600&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --black: #080808;
+    --white: #f4f2ee;
+    --accent: #c8f040;
+    --muted: #b8b8b8;
+    --dim: #1a1a1a;
+    --border: rgba(244,242,238,0.12);
+    --error: #ff8a7a;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    min-height: 100dvh;
+    background: var(--black);
+    color: var(--white);
+    font-family: 'Inter', system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 32px 16px;
+  }
+  main { width: 100%; max-width: 520px; text-align: center; }
+  .logo { height: 56px; width: auto; margin-bottom: 40px; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: 'DM Mono', monospace; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--accent); border: 1px solid rgba(200,240,64,0.35); border-radius: 999px; padding: 6px 14px;
+  }
+  .badge::before {
+    content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--accent);
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes pulse { 50% { opacity: 0.3; } }
+  @media (prefers-reduced-motion: reduce) { .badge::before { animation: none; } }
+  h1 {
+    font-family: 'Syne', sans-serif; font-weight: 800;
+    font-size: clamp(30px, 7vw, 44px); line-height: 1.08; letter-spacing: -0.02em;
+    margin: 22px 0 16px; text-wrap: balance;
+  }
+  h1 em { font-style: normal; color: var(--accent); }
+  p.lead { color: var(--muted); font-size: 17px; line-height: 1.55; text-wrap: pretty; }
+  form { margin-top: 32px; display: flex; gap: 8px; }
+  input[type=email] {
+    flex: 1; min-width: 0;
+    background: var(--dim); color: var(--white);
+    border: 1px solid var(--border); border-radius: 12px;
+    padding: 14px 16px; font: inherit; font-size: 16px; outline: none;
+  }
+  input[type=email]:focus { border-color: var(--accent); }
+  button {
+    background: var(--accent); color: var(--black);
+    border: 0; border-radius: 12px; padding: 14px 20px;
+    font-family: 'Syne', sans-serif; font-weight: 700; font-size: 15px; cursor: pointer; white-space: nowrap;
+  }
+  button:disabled { opacity: 0.6; cursor: wait; }
+  @media (max-width: 440px) { form { flex-direction: column; } }
+  .note { margin-top: 12px; font-size: 13px; color: var(--muted); min-height: 1.4em; }
+  .note.err { color: var(--error); }
+  .done {
+    display: none; margin-top: 32px; padding: 20px; border-radius: 14px;
+    border: 1px solid rgba(200,240,64,0.35); background: rgba(200,240,64,0.06);
+    font-size: 16px; line-height: 1.5;
+  }
+  .done strong { color: var(--accent); }
+  footer { margin-top: 56px; font-size: 13px; color: var(--muted); }
+  footer a { color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <img class="logo" src="/brand/wordmark-lockup.png" alt="TestPilot">
+  <div class="badge">Under construction</div>
+  <h1>TestPilot is getting an <em>upgrade</em>.</h1>
+  <p class="lead">We're rebuilding how TestPilot tests your app, so we've paused new tests for a little while. Leave your email and we'll write once, the moment it's back.</p>
+
+  <form id="wl" novalidate>
+    <input id="email" type="email" name="email" autocomplete="email" placeholder="you@company.com" aria-label="Your email address" required>
+    <button id="btn" type="submit">Notify me</button>
+  </form>
+  <p id="note" class="note">One email when we're back. No newsletter, no spam.</p>
+  <div id="done" class="done" role="status"><strong>You're on the list.</strong><br>We'll email you as soon as TestPilot is back.</div>
+
+  <footer>
+    Questions? <a href="mailto:hello@testpilotapp.dev">hello@testpilotapp.dev</a> ·
+    <a href="/privacy.html">Privacy</a> · <a href="/terms.html">Terms</a>
+  </footer>
+</main>
+<script>
+  const form = document.getElementById('wl');
+  const input = document.getElementById('email');
+  const btn = document.getElementById('btn');
+  const note = document.getElementById('note');
+  const done = document.getElementById('done');
+  const say = (text, err) => { note.textContent = text; note.className = err ? 'note err' : 'note'; };
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const email = input.value.trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return say('Please enter a valid email address.', true);
+    btn.disabled = true; btn.textContent = 'Saving…';
+    try {
+      const r = await fetch('/api/waitlist', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, source: 'under-construction' }),
+      });
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || 'failed');
+      form.style.display = 'none'; note.style.display = 'none'; done.style.display = 'block';
+    } catch {
+      say('Something went wrong saving your email. Please try again, or write to hello@testpilotapp.dev.', true);
+      btn.disabled = false; btn.textContent = 'Notify me';
+    }
+  });
+</script>
+</body>
+</html>
