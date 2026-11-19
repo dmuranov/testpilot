@@ -1275,10 +1275,13 @@ app.use((req, res, next) => {
 // in .env (or by deleting this block) and restart.
 const UNDER_CONSTRUCTION = String(process.env.TESTPILOT_UNDER_CONSTRUCTION || 'on').toLowerCase() !== 'off';
 const CONSTRUCTION_PATHS = new Set(['/', '/first-run', '/first-run.html', '/landing.html', '/sandbox', '/sandbox.html', '/app', '/index.html', '/classic']);
+// The public landing shows the holding page to everyone, logged in or not;
+// admins and paying clients reach the app directly at /app.
+const CONSTRUCTION_ALWAYS = new Set(['/', '/landing.html']);
 app.use(async (req, res, next) => {
   if (!UNDER_CONSTRUCTION || (req.method !== 'GET' && req.method !== 'HEAD')) return next();
   if (!CONSTRUCTION_PATHS.has(req.path)) return next();
-  const email = sessions.get(req.cookies?.tpsession)?.email;
+  const email = CONSTRUCTION_ALWAYS.has(req.path) ? null : sessions.get(req.cookies?.tpsession)?.email;
   if (email) {
     if (isSuperAdmin(email)) return next();
     // Sessions do not carry the plan reliably; the users row does.
