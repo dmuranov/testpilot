@@ -265,7 +265,7 @@ async function gotUrl() {
       say(`<p>${esc(data.error || 'I could not open that link.')} Check it opens in a private browser window, then paste it again.</p>`, 'err');
       return askUrlAgain();
     }
-    st.url = data.app.url; step('url', st.url);
+    st.url = data.app.url; step('url', st.url); showLogout();
     postJson('/api/auth/accept-terms', { version: TERMS_VERSION }).catch(() => {});
     askPlatform();
   } catch (e) { say('<p>' + esc(netErr(e)) + '</p>', 'err'); askUrlAgain(); }
@@ -487,6 +487,21 @@ async function sendSignInLink(email) {
   } catch (err) { say('<p>' + esc(netErr(err)) + '</p>', 'err'); }
 }
 
+// ── log out ───────────────────────────────────────────────
+// Signed in (a returning client, or the free test's own session once the app
+// link went in): the top-right link becomes "Log out", and the menu has one too.
+function showLogout() {
+  const link = document.getElementById('signin-link');
+  if (!link) return;
+  link.textContent = 'Log out';
+  link.onclick = () => { logOut(); return false; };
+  link.style.display = '';
+}
+async function logOut() {
+  try { await fetch('/api/auth/logout', { method: 'POST' }); } catch (e) {}
+  location.href = '/first-run';
+}
+
 // ── returning clients ─────────────────────────────────────
 // Signed in already: no email question. Back from paying: say so, get the key.
 async function start() {
@@ -498,11 +513,20 @@ async function start() {
   if (linkErr && (!who || !who.email)) {
     say('<p>' + (linkErr === 'expired' ? 'That sign-in link has expired.' : linkErr === 'used' ? 'That sign-in link was already used.' : 'That sign-in link did not work.') + ' Type your email and I will send you a new one.</p>');
   }
-  if (!who || !who.email) return askEmail();
+  if (!who || !who.email) {
+    // "Log in" on the home page: an existing client wants the sign-in link, not the free-test questions.
+    if (new URLSearchParams(location.search).get('login') === '1') { history.replaceState({}, '', '/first-run'); return askSignInEmail(); }
+    return askEmail();
+  }
   st.email = who.email; st.plan = who.plan || 'free'; st.freeUsed = !!who.free_run_used;
-  // Signed in: no sign-in link. The old dashboard is in the menu's footer.
-  const link = document.getElementById('signin-link');
-  if (link) link.style.display = 'none';
+  // Signed in: the sign-in link becomes "Log out". The old dashboard is in the menu's footer.
+  showLogout();
+  // "Log in" on the home page while already signed in: say who, offer to switch.
+  if (new URLSearchParams(location.search).get('login') === '1') {
+    history.replaceState({}, '', '/first-run');
+    say(`<p>You're already signed in as <b>${esc(who.email)}</b>.</p>`);
+    return setReply(`<div class="row"><button onclick="setReply('');welcomeBack()">Continue as ${esc(who.email)}</button><button class="ghost" onclick="logOut()">Log out and use another email</button></div>`);
+  }
   if (new URLSearchParams(location.search).get('upgraded') === '1') {
     history.replaceState({}, '', '/first-run');
     if (paid()) {
@@ -1192,7 +1216,7 @@ function showNav() {
   if (document.body.classList.contains('has-nav') || !st.email) return;
   document.getElementById('nav').innerHTML = '<div class="brand">Test<span>Pilot</span></div>'
     + NAV.map((n) => n ? `<button class="nav-item" data-k="${n[0]}" onclick="nav('${n[0]}')"><svg viewBox="0 0 24 24">${NAV_ICON[n[0]]}</svg><span>${n[1]}</span></button>` : '<div class="nav-sep"></div>').join('')
-    + `<div class="nav-foot">${esc(st.email)}<a href="/classic">Advanced tools (old dashboard)</a></div>`;
+    + `<div class="nav-foot">${esc(st.email)}<a href="/classic">Advanced tools (old dashboard)</a><a href="#" onclick="logOut();return false">Log out</a></div>`;
   document.body.classList.add('has-nav');
 }
 function navActive(k) { document.querySelectorAll('.nav-item').forEach((b) => b.classList.toggle('on', b.dataset.k === k)); }
