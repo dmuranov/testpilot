@@ -3,15 +3,15 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>How to Test a Lovable App Before Launch — TestPilot</title>
-<meta name="description" content="A practical checklist for testing a Lovable app before launch: sign-up, core flows, data between users and mobile. TestPilot runs the checks like a real user and reports bugs with screenshots.">
+<title>How to Test a Lovable App Before Launch | TestPilot</title>
+<meta name="description" content="Test your Lovable app like a real user before launch: check forms, flows and logins, then get a bug report. Your first TestPilot test is free.">
 <link rel="canonical" href="https://testpilotapp.dev/test-lovable-app">
 <link rel="icon" type="image/png" href="/brand/favicon-32.png">
 <link rel="apple-touch-icon" href="/brand/apple-touch-icon.png">
 <meta property="og:type" content="article">
 <meta property="og:url" content="https://testpilotapp.dev/test-lovable-app">
-<meta property="og:title" content="How to Test a Lovable App Before Launch">
-<meta property="og:description" content="A practical checklist for testing a Lovable app before launch, and how TestPilot runs it for you like a real user.">
+<meta property="og:title" content="How to Test a Lovable App Before Launch | TestPilot">
+<meta property="og:description" content="Test your Lovable app like a real user before launch: check forms, flows and logins, then get a bug report. Your first TestPilot test is free.">
 <meta property="og:image" content="https://testpilotapp.dev/brand/og-share-card.png">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -64,10 +64,16 @@
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
-  "@type": "Article",
-  "headline": "How to test a Lovable app before launch",
+  "@type": "FAQPage",
   "url": "https://testpilotapp.dev/test-lovable-app",
-  "publisher": { "@type": "Organization", "name": "TestPilot", "url": "https://testpilotapp.dev/" }
+  "mainEntity": [
+    { "@type": "Question", "name": "Do I need to write code to test a Lovable app?",
+      "acceptedAnswer": { "@type": "Answer", "text": "No. With TestPilot you describe the scenario in plain English." } },
+    { "@type": "Question", "name": "Does TestPilot work on apps with a login?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes, it can test as a logged-in user when you choose that option for a run." } },
+    { "@type": "Question", "name": "What does it cost after the free test?",
+      "acceptedAnswer": { "@type": "Answer", "text": "The plan is 15 € per month plus VAT. You connect your own Anthropic key, and a typical run costs between 0,10 € and 0,50 € in Anthropic fees, paid directly to Anthropic." } }
+  ]
 }
 </script>
 </head>
@@ -79,38 +85,36 @@
 </nav>
 
 <main>
-  <p class="section-tag">// guide · lovable</p>
-  <h1>How to test a Lovable app before launch</h1>
-  <p class="lead">Lovable gets you from idea to working app fast. What it doesn't do is click through every screen the way your first customers will. This is the checklist to run before you share the link, and how to let TestPilot run it for you.</p>
+  <p class="section-tag">// how to test a lovable app before launch</p>
+  <h1>Test your Lovable app before your first real users do</h1>
+  <p class="lead">Your Lovable app works in the editor. Real users click in a different order, submit half-filled forms and open pages you never checked. Testing a Lovable app before launch means using it the way a customer would, and writing down every place it breaks. Here is how to do it, by hand or with TestPilot.</p>
 
-  <h2>Why Lovable apps break after launch</h2>
-  <p>Each prompt changes code you didn't write by hand. A fix to the dashboard can quietly break sign-up; a new table can come without the access rules the old ones had. The preview looks fine because you are logged in as yourself, with your own data. Real users arrive logged out, on a phone, with empty accounts and typos in their email.</p>
-
-  <h2>The pre-launch checklist</h2>
   <ol>
-    <li><strong>Sign-up and log-in from zero.</strong> New email, wrong password, password reset, log out and back in. Do it in a private window so no old session helps you.</li>
-    <li><strong>Your main flow, end to end.</strong> The one thing a customer comes for: create the booking, post the listing, send the invoice. Check that the result actually shows up where it should.</li>
-    <li><strong>Forms with bad input.</strong> Empty fields, very long text, a date in the past, a price of zero. Every form should say what's wrong instead of failing silently.</li>
-    <li><strong>Two users, two accounts.</strong> Log in as user A, copy a URL with an id in it, open it as user B. If B can see A's data, your Supabase row-level security needs work.</li>
-    <li><strong>Mobile.</strong> Most first visits come from a phone. Check menus, modals and buttons that end up off-screen.</li>
-    <li><strong>Empty states and errors.</strong> A brand-new account with no data, a slow network, a page refresh in the middle of a step.</li>
+    <li><strong>List the flows that matter.</strong> Write down what a user comes to do: sign up, log in, create a record, pay, send a message. Test those first. If they fail, nothing else matters.</li>
+    <li><strong>Test the unhappy paths.</strong> Leave fields empty. Type an invalid email. Go back mid-flow. Refresh a page. Open a page while logged out. Most bugs in AI-built apps are not in the happy path.</li>
+    <li><strong>Check every role.</strong> If your app has more than one kind of user (admin and customer, for example), log in as each and confirm each sees only what they should.</li>
+    <li><strong>Check security basics.</strong> Try changing the ID in a page address and see whether you can open another user's data. See the page on <a href="/security-testing-ai-built-apps">security testing for AI-built apps</a>.</li>
+    <li><strong>Write down what you find.</strong> For each bug: the steps, what you expected, what happened, and a screenshot.</li>
   </ol>
 
-  <h2>Let TestPilot run it</h2>
-  <p>TestPilot opens your published Lovable app in a real browser, learns its screens, and then tests it like a real user from scenarios you write in plain English, for example:</p>
+  <h2>Doing it with TestPilot</h2>
+  <p>TestPilot crawls your app, learns its pages, buttons and forms, and tests it like a real user. You describe a scenario in plain English, such as:</p>
   <div class="box">
-    <p><code>Sign up as a new user, create a project called "Launch test", add two tasks and check they appear on the dashboard.</code></p>
+    <p><code>Book an appointment and verify it saves</code></p>
   </div>
-  <p style="margin-top:20px">You get a bug report with a screenshot of each problem, how serious it is, and what to fix, in plain words. TestPilot also checks the security basics from step 4, such as whether one user can open another user's data by changing the URL.</p>
-  <p>The first test is free, with no credit card. After that, the plan is €15 a month and you connect your own Anthropic key.</p>
+  <p style="margin-top:20px">and TestPilot runs it. You get a report with every step logged, screenshots and bugs flagged by severity. It works on Lovable, Base44, Bolt, v0 and Bubble (beta). Your first test is free, with no credit card and no API key needed.</p>
 
+  <h2>Questions</h2>
+  <p><strong>Do I need to write code to test a Lovable app?</strong><br>No. With TestPilot you describe the scenario in plain English.</p>
+  <p><strong>Does TestPilot work on apps with a login?</strong><br>Yes, it can test as a logged-in user when you choose that option for a run.</p>
+  <p><strong>What does it cost after the free test?</strong><br>The plan is 15 € per month plus VAT. You connect your own Anthropic key, and a typical run costs between 0,10 € and 0,50 € in Anthropic fees, paid directly to Anthropic.</p>
+
+  <h2>Next step</h2>
+  <p>Run your first test free: paste your app's URL and see what breaks.</p>
   <div class="actions">
-    <a href="/first-run" class="btn-primary">Test your Lovable app free →</a>
-    <a href="/sandbox" class="btn-ghost">Or watch the sandbox demo first</a>
+    <a href="/first-run" class="btn-primary">Run your first test free →</a>
+    <a href="/sandbox" class="btn-ghost">Or see a demo</a>
   </div>
-
-  <h2>Also useful</h2>
-  <p><a href="/security-testing-ai-built-apps">Security testing for AI-built apps</a>: what to check before real users put real data into your app.</p>
 </main>
 
 <footer>

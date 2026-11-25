@@ -3,15 +3,15 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Security Testing for AI-Built Apps — TestPilot</title>
-<meta name="description" content="Apps built with Lovable, Bolt, Base44 or v0 often let one user see another user's data. What to check before launch, and how TestPilot tests it like a real user.">
+<title>Security Testing for AI-Built Apps | TestPilot</title>
+<meta name="description" content="Check that one user can't see another user's data in your AI-built app. TestPilot tests URL tampering, IDOR and role escalation. First test free.">
 <link rel="canonical" href="https://testpilotapp.dev/security-testing-ai-built-apps">
 <link rel="icon" type="image/png" href="/brand/favicon-32.png">
 <link rel="apple-touch-icon" href="/brand/apple-touch-icon.png">
 <meta property="og:type" content="article">
 <meta property="og:url" content="https://testpilotapp.dev/security-testing-ai-built-apps">
-<meta property="og:title" content="Security Testing for AI-Built Apps">
-<meta property="og:description" content="What to check before real users put real data into an app built with Lovable, Bolt, Base44 or v0.">
+<meta property="og:title" content="Security Testing for AI-Built Apps | TestPilot">
+<meta property="og:description" content="Check that one user can't see another user's data in your AI-built app. TestPilot tests URL tampering, IDOR and role escalation. First test free.">
 <meta property="og:image" content="https://testpilotapp.dev/brand/og-share-card.png">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -64,10 +64,18 @@
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
-  "@type": "Article",
-  "headline": "Security testing for AI-built apps",
+  "@type": "FAQPage",
   "url": "https://testpilotapp.dev/security-testing-ai-built-apps",
-  "publisher": { "@type": "Organization", "name": "TestPilot", "url": "https://testpilotapp.dev/" }
+  "mainEntity": [
+    { "@type": "Question", "name": "Is security testing different from normal testing?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes. Normal testing checks that things work. Security testing checks that the wrong person cannot make them work." } },
+    { "@type": "Question", "name": "Do I need to know how to code?",
+      "acceptedAnswer": { "@type": "Answer", "text": "No. You describe the scenario in plain English." } },
+    { "@type": "Question", "name": "Does TestPilot store my app's data?",
+      "acceptedAnswer": { "@type": "Answer", "text": "It stores only what your report needs: the learned page map and run screenshots, scoped to your account. Never sold or shared, and deletable." } },
+    { "@type": "Question", "name": "Is it a full security audit?",
+      "acceptedAnswer": { "@type": "Answer", "text": "No. TestPilot is not a full security audit or a penetration test. It tests the app the way a user could attack it from the browser. If you handle payments, health data or anything regulated, get a professional review as well." } }
+  ]
 }
 </script>
 </head>
@@ -79,37 +87,35 @@
 </nav>
 
 <main>
-  <p class="section-tag">// guide · security</p>
-  <h1>Security testing for AI-built apps</h1>
-  <p class="lead">AI builders like Lovable, Bolt, Base44 and v0 write working screens in minutes. The part they most often get wrong is invisible in the preview: who is allowed to see which data. Here is what to check before real users put real data into your app.</p>
+  <p class="section-tag">// security testing for ai-built apps</p>
+  <h1>Can one user see another user's data in your app?</h1>
+  <p class="lead">Security testing for AI-built apps means checking that User A cannot see or change User B's data. Apps made with tools like Lovable, Base44, Bolt, v0 or Bubble often work perfectly for the person who built them, and still leave doors open for everyone else. These are the checks that matter most, and how TestPilot runs them for you.</p>
 
-  <h2>The problem: it works, for everyone</h2>
-  <p>When you test your own app you are one user, logged in, looking at your own records. Everything looks right. The holes show up only when a second person arrives: a list that returns every customer's orders, an edit page that opens for any id in the URL, an admin screen that is hidden from the menu but not locked.</p>
-  <p>These are not exotic attacks. Anyone who changes a number in the address bar can find them.</p>
+  <h2>What goes wrong</h2>
+  <p>AI tools build what you ask for. They rarely ask what should be forbidden. The result is an app where the right user sees the right page, and a wrong user may see it too.</p>
+  <ol>
+    <li><strong>URL manipulation.</strong> Log in, open a record, and change the ID in the address. If another user's record opens, the app does not check who is asking.</li>
+    <li><strong>IDOR (insecure direct object reference).</strong> Same idea, deeper: the app trusts an ID sent by the browser. Test it on every page and action that takes an ID: invoices, profiles, orders, files.</li>
+    <li><strong>Role escalation.</strong> Log in as a regular user and try to reach admin pages or actions. A hidden button is not protection if the page still opens.</li>
+    <li><strong>Session persistence.</strong> Log out and press back. Open a private page in a new tab. A session that stays alive when it should not is a risk.</li>
+  </ol>
 
-  <h2>What to check before launch</h2>
-  <ul>
-    <li><strong>One user, another user's data (IDOR).</strong> As user A, open a page with an id in the URL. Log in as user B and open the same URL. B should get an error, not A's data.</li>
-    <li><strong>URL manipulation.</strong> Change ids, slugs and query parameters by hand. Try the next number, a random one, someone else's.</li>
-    <li><strong>Role escalation.</strong> Log in as a normal user and open admin pages directly by URL. Hidden is not the same as protected.</li>
-    <li><strong>Session persistence.</strong> Log out, press the back button, reopen a saved link. Private pages should send you back to log-in.</li>
-    <li><strong>Database rules.</strong> If your app uses Supabase, make sure row-level security is on for every table that holds user data, not just the first ones you created.</li>
-  </ul>
+  <h2>How TestPilot helps</h2>
+  <p>TestPilot's security testing checks URL manipulation, IDOR, session persistence and role escalation, the kinds of problems no-code builders often miss. You describe what each user should and should not see, and TestPilot tries it with real accounts. With multi-role testing (beta), it can run scenarios across several users in one run: a dispatcher assigns a job, a contractor bids, an admin approves. The report logs every step with screenshots and flags problems by severity.</p>
 
-  <h2>How TestPilot tests it</h2>
-  <p>TestPilot uses your app the way a real user would, in a real browser, and runs these checks as part of a test. Give it two test accounts and it logs in as each one, tries to open the other user's pages and data, and reports what it could reach (testing with several accounts is in beta). Each finding comes with a screenshot, a severity, and what to fix.</p>
-  <div class="box">
-    <p><strong>What it is not:</strong> TestPilot is not a full security audit or a penetration test. It checks the access mistakes that AI-built apps make most often, from the outside, the way a curious user would find them. If you handle payments, health data or anything regulated, get a professional review as well.</p>
-  </div>
-  <p style="margin-top:20px">The first test is free, with no credit card. After that, the plan is €15 a month and you connect your own Anthropic key.</p>
+  <h2>Questions</h2>
+  <p><strong>Is security testing different from normal testing?</strong><br>Yes. Normal testing checks that things work. Security testing checks that the wrong person cannot make them work.</p>
+  <p><strong>Do I need to know how to code?</strong><br>No. You describe the scenario in plain English.</p>
+  <p><strong>Does TestPilot store my app's data?</strong><br>It stores only what your report needs: the learned page map and run screenshots, scoped to your account. Never sold or shared, and deletable.</p>
+  <p><strong>Is it a full security audit?</strong><br>No. TestPilot is not a full security audit or a penetration test. It tests the app the way a user could attack it from the browser. If you handle payments, health data or anything regulated, get a professional review as well.</p>
 
+  <h2>Next step</h2>
+  <p>Run your first test free and see whether one user can reach another's data.</p>
   <div class="actions">
-    <a href="/first-run" class="btn-primary">Run a free security test →</a>
-    <a href="/sandbox" class="btn-ghost">Or watch the sandbox demo first</a>
+    <a href="/first-run" class="btn-primary">Run your first test free →</a>
+    <a href="/sandbox" class="btn-ghost">Or see a demo</a>
   </div>
-
-  <h2>Also useful</h2>
-  <p><a href="/test-lovable-app">How to test a Lovable app before launch</a>: the full pre-launch checklist, from sign-up to mobile.</p>
+  <p style="margin-top:40px"><a href="/test-lovable-app">How to test a Lovable app before launch</a></p>
 </main>
 
 <footer>
