@@ -14246,9 +14246,15 @@ app.post('/api/security/leak-check', async (req, res) => {
 });
 
 // The super admin (the owner) is never asked to prove an app: every check below
-// answers yes for them.
+// answers yes for them. So are the owner's own test accounts (owner request
+// 2026-11-25: fixeratest@ is his Fixera test identity, any answer is accepted).
+// Comma-separated TESTPILOT_VERIFY_EXEMPT in .env replaces the default list.
+const VERIFY_EXEMPT = new Set(String(process.env.TESTPILOT_VERIFY_EXEMPT ?? 'fixeratest@proton.me')
+  .split(',').map((e) => e.trim()).filter(Boolean).map((e) => canonicalEmail(e)));
+const skipsOwnershipProof = (email) => !!email && (isSuperAdmin(email) || VERIFY_EXEMPT.has(canonicalEmail(email)));
+
 async function isSiteVerified(email, origin, pageUrl) {
-  if (isSuperAdmin(email)) return true;
+  if (skipsOwnershipProof(email)) return true;
   const store = await loadVerifiedSites();
   const rec = store[canonicalEmail(email)];
   if (!rec) return false;
@@ -14281,7 +14287,7 @@ function sameSiteHost(origin) {
 // folder: false for checks that probe the whole origin (the security scan), which
 // need the host-level proof; a folder proof covers tests of apps in that folder.
 async function isAppVerified(email, appId, { folder = true } = {}) {
-  if (isSuperAdmin(email)) return true;
+  if (skipsOwnershipProof(email)) return true;
   const origin = originForApp(appId);
   if (!origin) return false;
   const store = await loadVerifiedSites();
@@ -14297,7 +14303,7 @@ async function isAppVerified(email, appId, { folder = true } = {}) {
 // instructions and returns true when it did. Apps the requester does not own
 // fall through to the endpoint's own ownership error; super admins skip it.
 async function denyUnverifiedApp(res, email, appId) {
-  if (!appId || !email || isSuperAdmin(email) || !ownsApp(appId, email)) return false;
+  if (!appId || !email || skipsOwnershipProof(email) || !ownsApp(appId, email)) return false;
   if (await isAppVerified(email, appId)) return false;
   const origin = originForApp(appId);
   if (!origin) return false;
@@ -14313,7 +14319,7 @@ async function denyUnverifiedApp(res, email, appId) {
 // The file or meta-tag proof for (email, origin). Records a success.
 // reason on failure: 'not_found' | 'other_token' | 'unreachable'.
 async function checkSiteProof(email, origin, pageUrl) {
-  if (isSuperAdmin(email)) return { verified: true, method: 'super_admin' };
+  if (skipsOwnershipProof(email)) return { verified: true, method: isSuperAdmin(email) ? 'super_admin' : 'exempt' };
   const token = siteVerifyToken(email, origin);
   let method = null;
 
