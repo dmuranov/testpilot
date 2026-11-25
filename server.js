@@ -1647,6 +1647,11 @@ app.get('/first-run', (req, res) => res.sendFile(path.resolve('./first-run.html'
 // Linked to from landing.html's "Try the Sandbox Demo" CTA.
 app.get('/sandbox', (req, res) => res.sendFile(path.resolve('./sandbox.html')));
 
+// SEO guide pages, linked from the landing (ticker, Security card, footer),
+// /first-run, sitemap.xml and llms.txt.
+app.get('/test-lovable-app', (req, res) => res.sendFile(path.resolve('./test-lovable-app.html')));
+app.get('/security-testing-ai-built-apps', (req, res) => res.sendFile(path.resolve('./security-testing-ai-built-apps.html')));
+
 // Embed pages — minimal, no-chrome UIs designed to be iframed from
 // Base44 (or anywhere else). /live-test/:testId is a read-only SSE
 // log viewer; /chat is a full interactive chat (messages + screenshot

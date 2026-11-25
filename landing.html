@@ -7,15 +7,34 @@
 <link rel="icon" type="image/png" href="/brand/favicon-32.png">
 <link rel="apple-touch-icon" href="/brand/apple-touch-icon.png">
 <link rel="manifest" href="/brand/site.webmanifest">
+<meta name="description" content="TestPilot tests your no-code app like a real user and gives you a bug report with screenshots. Your first test is free, no credit card needed.">
+<link rel="canonical" href="https://testpilotapp.dev/">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://testpilotapp.dev/">
 <meta property="og:title" content="TestPilot — AI Testing for No-Code Apps">
-<meta property="og:description" content="Test faster. Launch smarter.">
+<meta property="og:description" content="TestPilot tests your no-code app like a real user and gives you a bug report with screenshots. Your first test is free, no credit card needed.">
 <meta property="og:image" content="https://testpilotapp.dev/brand/og-share-card.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:description" content="TestPilot tests your no-code app like a real user and gives you a bug report with screenshots. Your first test is free, no credit card needed.">
 <meta name="twitter:image" content="https://testpilotapp.dev/brand/og-share-card.png">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "TestPilot",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "Web",
+  "url": "https://testpilotapp.dev/",
+  "description": "TestPilot tests your no-code app like a real user and gives you a bug report with screenshots. Your first test is free, no credit card needed.",
+  "offers": [
+    { "@type": "Offer", "name": "First test", "price": "0", "priceCurrency": "EUR" },
+    { "@type": "Offer", "name": "Monthly plan", "price": "15", "priceCurrency": "EUR",
+      "priceSpecification": { "@type": "UnitPriceSpecification", "price": "15", "priceCurrency": "EUR", "unitText": "MONTH" } }
+  ]
+}
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&family=Inter:wght@400;500;600&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
 <style>
@@ -351,6 +370,9 @@
   }
 
   .ticker-sep { opacity: 0.4; }
+  .ticker a { color: inherit; text-decoration: underline; text-underline-offset: 3px; }
+  .feature-link { display: inline-block; margin-top: 12px; color: var(--accent); font-size: 13px; text-decoration: none; }
+  .feature-link:hover { text-decoration: underline; }
 
   @keyframes ticker {
     from { transform: translateX(0); }
@@ -952,7 +974,7 @@
   <div class="ticker-inner">
     <span class="ticker-item">WORKS ON ANY APP</span>
     <span class="ticker-item ticker-sep">·</span>
-    <span class="ticker-item">LOVABLE · BASE44 · BOLT · V0 · BUBBLE (BETA)</span>
+    <span class="ticker-item"><a href="/test-lovable-app">LOVABLE</a> · BASE44 · BOLT · V0 · BUBBLE (BETA)</span>
     <span class="ticker-item ticker-sep">·</span>
     <span class="ticker-item">MULTI-ROLE TESTING</span>
     <span class="ticker-item ticker-sep">·</span>
@@ -962,7 +984,7 @@
     <span class="ticker-item ticker-sep">·</span>
     <span class="ticker-item">WORKS ON ANY APP</span>
     <span class="ticker-item ticker-sep">·</span>
-    <span class="ticker-item">LOVABLE · BASE44 · BOLT · V0 · BUBBLE (BETA)</span>
+    <span class="ticker-item"><a href="/test-lovable-app">LOVABLE</a> · BASE44 · BOLT · V0 · BUBBLE (BETA)</span>
     <span class="ticker-item ticker-sep">·</span>
     <span class="ticker-item">MULTI-ROLE TESTING</span>
     <span class="ticker-item ticker-sep">·</span>
@@ -1010,6 +1032,7 @@
       <span class="feature-icon">🔐</span>
       <h3>Security Testing</h3>
       <p>Test that User A can't see User B's data. Checks URL manipulation, IDOR, session persistence, role escalation — the vulnerabilities no-code builders miss.</p>
+      <a class="feature-link" href="/security-testing-ai-built-apps">Security testing for AI-built apps →</a>
     </div>
     <div class="feature reveal">
       <span class="feature-icon">👥</span>
@@ -1202,6 +1225,8 @@
     <li><a href="#how">How it works</a></li>
     <li><a href="#features">Features</a></li>
     <li><a href="#pricing">Pricing</a></li>
+    <li><a href="/test-lovable-app">Test a Lovable app</a></li>
+    <li><a href="/security-testing-ai-built-apps">Security testing</a></li>
     <li><a href="mailto:hello@testpilotapp.dev">Contact</a></li>
     <li><a href="/terms.html">Terms</a></li>
     <li><a href="/privacy.html">Privacy</a></li>

@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>How to Test a Lovable App Before Launch — TestPilot</title>
+<meta name="description" content="A practical checklist for testing a Lovable app before launch: sign-up, core flows, data between users and mobile. TestPilot runs the checks like a real user and reports bugs with screenshots.">
+<link rel="canonical" href="https://testpilotapp.dev/test-lovable-app">
+<link rel="icon" type="image/png" href="/brand/favicon-32.png">
+<link rel="apple-touch-icon" href="/brand/apple-touch-icon.png">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://testpilotapp.dev/test-lovable-app">
+<meta property="og:title" content="How to Test a Lovable App Before Launch">
+<meta property="og:description" content="A practical checklist for testing a Lovable app before launch, and how TestPilot runs it for you like a real user.">
+<meta property="og:image" content="https://testpilotapp.dev/brand/og-share-card.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Inter:wght@400;500;600&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root { --black:#080808; --white:#f4f2ee; --accent:#c8f040; --muted:#d8d8d8; --dim:#2a2a2a; --border:rgba(244,242,238,0.08); }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html { overflow-x:hidden; }
+  body { background:var(--black); color:var(--white); font-family:'Syne',sans-serif; overflow-x:hidden; }
+  body::before { content:''; position:fixed; inset:0; background-image:linear-gradient(rgba(200,240,64,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(200,240,64,0.03) 1px,transparent 1px); background-size:60px 60px; pointer-events:none; z-index:0; }
+  nav { position:fixed; top:0; left:0; right:0; z-index:100; display:flex; align-items:center; justify-content:space-between; padding:20px 48px; background:rgba(8,8,8,0.85); backdrop-filter:blur(12px); border-bottom:1px solid var(--border); }
+  .nav-logo { font-size:18px; font-weight:800; letter-spacing:-0.5px; color:var(--white); text-decoration:none; }
+  .nav-logo span, .footer-logo span { color:var(--accent); }
+  .nav-cta { font-family:'Inter',sans-serif; font-size:12px; font-weight:500; background:var(--accent); color:var(--black); padding:10px 22px; border-radius:2px; text-decoration:none; letter-spacing:0.5px; }
+  .nav-cta:hover { opacity:.85; }
+  main { position:relative; z-index:1; max-width:760px; margin:0 auto; padding:150px 24px 80px; }
+  .section-tag { font-family:'DM Mono',monospace; font-size:11px; letter-spacing:2px; color:var(--accent); text-transform:uppercase; margin-bottom:20px; }
+  h1 { font-size:clamp(36px,6vw,60px); font-weight:800; letter-spacing:-2px; line-height:1.02; margin-bottom:28px; }
+  h2 { font-size:clamp(24px,3.4vw,32px); font-weight:800; letter-spacing:-1px; line-height:1.1; margin:56px 0 18px; }
+  p, li { font-family:'Inter',sans-serif; font-size:16px; line-height:1.75; color:var(--muted); }
+  p + p { margin-top:14px; }
+  .lead { font-size:18px; color:var(--white); }
+  ol, ul { padding-left:22px; margin-top:12px; }
+  li { margin-top:10px; }
+  li strong, p strong { color:var(--white); font-weight:600; }
+  a { color:var(--accent); }
+  .box { border:1px solid rgba(200,240,64,0.25); background:#0d0d0d; border-radius:4px; padding:22px 24px; margin-top:20px; }
+  .box p { font-size:15px; }
+  code { font-family:'DM Mono',monospace; font-size:14px; color:var(--white); }
+  .actions { display:flex; gap:24px; align-items:center; flex-wrap:wrap; margin-top:40px; }
+  .btn-primary { display:inline-flex; background:var(--accent); color:var(--black); font-family:'Syne',sans-serif; font-size:15px; font-weight:700; padding:16px 32px; border-radius:2px; text-decoration:none; transition:transform .15s, opacity .15s; }
+  .btn-primary:hover { transform:translateY(-2px); opacity:.9; }
+  .btn-ghost { font-family:'Inter',sans-serif; font-size:13px; color:var(--muted); text-decoration:none; border-bottom:1px solid var(--muted); padding-bottom:2px; }
+  .btn-ghost:hover { color:var(--white); border-color:var(--white); }
+  footer { position:relative; z-index:1; padding:48px; border-top:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; gap:24px; }
+  .footer-logo { font-size:16px; font-weight:800; letter-spacing:-0.5px; }
+  .footer-links { display:flex; gap:32px; list-style:none; flex-wrap:wrap; }
+  .footer-links a { font-family:'Inter',sans-serif; font-size:11px; letter-spacing:.5px; color:var(--muted); text-decoration:none; }
+  .footer-links a:hover { color:var(--white); }
+  @media (max-width:768px) {
+    nav { padding:16px 20px; }
+    .nav-cta { font-size:13px; padding:8px 14px; }
+    main { padding:110px 16px 60px; }
+    .actions { flex-direction:column; align-items:stretch; text-align:center; }
+    .btn-primary { justify-content:center; }
+    footer { flex-direction:column; text-align:center; padding:40px 16px; }
+    .footer-links { justify-content:center; gap:20px; }
+  }
+</style>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "Article",
+  "headline": "How to test a Lovable app before launch",
+  "url": "https://testpilotapp.dev/test-lovable-app",
+  "publisher": { "@type": "Organization", "name": "TestPilot", "url": "https://testpilotapp.dev/" }
+}
+</script>
+</head>
+<body>
+
+<nav>
+  <a href="/" class="nav-logo">Test<span>Pilot</span></a>
+  <a href="/first-run" class="nav-cta">Run a free test →</a>
+</nav>
+
+<main>
+  <p class="section-tag">// guide · lovable</p>
+  <h1>How to test a Lovable app before launch</h1>
+  <p class="lead">Lovable gets you from idea to working app fast. What it doesn't do is click through every screen the way your first customers will. This is the checklist to run before you share the link, and how to let TestPilot run it for you.</p>
+
+  <h2>Why Lovable apps break after launch</h2>
+  <p>Each prompt changes code you didn't write by hand. A fix to the dashboard can quietly break sign-up; a new table can come without the access rules the old ones had. The preview looks fine because you are logged in as yourself, with your own data. Real users arrive logged out, on a phone, with empty accounts and typos in their email.</p>
+
+  <h2>The pre-launch checklist</h2>
+  <ol>
+    <li><strong>Sign-up and log-in from zero.</strong> New email, wrong password, password reset, log out and back in. Do it in a private window so no old session helps you.</li>
+    <li><strong>Your main flow, end to end.</strong> The one thing a customer comes for: create the booking, post the listing, send the invoice. Check that the result actually shows up where it should.</li>
+    <li><strong>Forms with bad input.</strong> Empty fields, very long text, a date in the past, a price of zero. Every form should say what's wrong instead of failing silently.</li>
+    <li><strong>Two users, two accounts.</strong> Log in as user A, copy a URL with an id in it, open it as user B. If B can see A's data, your Supabase row-level security needs work.</li>
+    <li><strong>Mobile.</strong> Most first visits come from a phone. Check menus, modals and buttons that end up off-screen.</li>
+    <li><strong>Empty states and errors.</strong> A brand-new account with no data, a slow network, a page refresh in the middle of a step.</li>
+  </ol>
+
+  <h2>Let TestPilot run it</h2>
+  <p>TestPilot opens your published Lovable app in a real browser, learns its screens, and then tests it like a real user from scenarios you write in plain English, for example:</p>
+  <div class="box">
+    <p><code>Sign up as a new user, create a project called "Launch test", add two tasks and check they appear on the dashboard.</code></p>
+  </div>
+  <p style="margin-top:20px">You get a bug report with a screenshot of each problem, how serious it is, and what to fix, in plain words. TestPilot also checks the security basics from step 4, such as whether one user can open another user's data by changing the URL.</p>
+  <p>The first test is free, with no credit card. After that, the plan is €15 a month and you connect your own Anthropic key.</p>
+
+  <div class="actions">
+    <a href="/first-run" class="btn-primary">Test your Lovable app free →</a>
+    <a href="/sandbox" class="btn-ghost">Or watch the sandbox demo first</a>
+  </div>
+
+  <h2>Also useful</h2>
+  <p><a href="/security-testing-ai-built-apps">Security testing for AI-built apps</a>: what to check before real users put real data into your app.</p>
+</main>
+
+<footer>
+  <div class="footer-logo">Test<span>Pilot</span></div>
+  <ul class="footer-links">
+    <li><a href="/">Home</a></li>
+    <li><a href="/first-run">Run a free test</a></li>
+    <li><a href="/sandbox">Sandbox demo</a></li>
+    <li><a href="/security-testing-ai-built-apps">Security testing</a></li>
+    <li><a href="/terms.html">Terms</a></li>
+    <li><a href="/privacy.html">Privacy</a></li>
+  </ul>
+</footer>
+
+<!-- Cloudflare Web Analytics --><script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "2e2922dc7ced4368bd5bea2c224545dd"}'></script><!-- End Cloudflare Web Analytics -->
+</body>
+</html>

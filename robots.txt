@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://testpilotapp.dev/sitemap.xml
