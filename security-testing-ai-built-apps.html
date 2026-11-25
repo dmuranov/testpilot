@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Security Testing for AI-Built Apps | TestPilot</title>
+<meta name="description" content="Check that one user can't see another user's data in your AI-built app. TestPilot tests URL tampering, IDOR and role escalation. First test free.">
+<link rel="canonical" href="https://testpilotapp.dev/security-testing-ai-built-apps">
+<link rel="icon" type="image/png" href="/brand/favicon-32.png">
+<link rel="apple-touch-icon" href="/brand/apple-touch-icon.png">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://testpilotapp.dev/security-testing-ai-built-apps">
+<meta property="og:title" content="Security Testing for AI-Built Apps | TestPilot">
+<meta property="og:description" content="Check that one user can't see another user's data in your AI-built app. TestPilot tests URL tampering, IDOR and role escalation. First test free.">
+<meta property="og:image" content="https://testpilotapp.dev/brand/og-share-card.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Inter:wght@400;500;600&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root { --black:#080808; --white:#f4f2ee; --accent:#c8f040; --muted:#d8d8d8; --dim:#2a2a2a; --border:rgba(244,242,238,0.08); }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html { overflow-x:hidden; }
+  body { background:var(--black); color:var(--white); font-family:'Syne',sans-serif; overflow-x:hidden; }
+  body::before { content:''; position:fixed; inset:0; background-image:linear-gradient(rgba(200,240,64,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(200,240,64,0.03) 1px,transparent 1px); background-size:60px 60px; pointer-events:none; z-index:0; }
+  nav { position:fixed; top:0; left:0; right:0; z-index:100; display:flex; align-items:center; justify-content:space-between; padding:20px 48px; background:rgba(8,8,8,0.85); backdrop-filter:blur(12px); border-bottom:1px solid var(--border); }
+  .nav-logo { font-size:18px; font-weight:800; letter-spacing:-0.5px; color:var(--white); text-decoration:none; }
+  .nav-logo span, .footer-logo span { color:var(--accent); }
+  .nav-cta { font-family:'Inter',sans-serif; font-size:12px; font-weight:500; background:var(--accent); color:var(--black); padding:10px 22px; border-radius:2px; text-decoration:none; letter-spacing:0.5px; }
+  .nav-cta:hover { opacity:.85; }
+  main { position:relative; z-index:1; max-width:760px; margin:0 auto; padding:150px 24px 80px; }
+  .section-tag { font-family:'DM Mono',monospace; font-size:11px; letter-spacing:2px; color:var(--accent); text-transform:uppercase; margin-bottom:20px; }
+  h1 { font-size:clamp(36px,6vw,60px); font-weight:800; letter-spacing:-2px; line-height:1.02; margin-bottom:28px; }
+  h2 { font-size:clamp(24px,3.4vw,32px); font-weight:800; letter-spacing:-1px; line-height:1.1; margin:56px 0 18px; }
+  p, li { font-family:'Inter',sans-serif; font-size:16px; line-height:1.75; color:var(--muted); }
+  p + p { margin-top:14px; }
+  .lead { font-size:18px; color:var(--white); }
+  ol, ul { padding-left:22px; margin-top:12px; }
+  li { margin-top:10px; }
+  li strong, p strong { color:var(--white); font-weight:600; }
+  a { color:var(--accent); }
+  .box { border:1px solid rgba(200,240,64,0.25); background:#0d0d0d; border-radius:4px; padding:22px 24px; margin-top:20px; }
+  .box p { font-size:15px; }
+  code { font-family:'DM Mono',monospace; font-size:14px; color:var(--white); }
+  .actions { display:flex; gap:24px; align-items:center; flex-wrap:wrap; margin-top:40px; }
+  .btn-primary { display:inline-flex; background:var(--accent); color:var(--black); font-family:'Syne',sans-serif; font-size:15px; font-weight:700; padding:16px 32px; border-radius:2px; text-decoration:none; transition:transform .15s, opacity .15s; }
+  .btn-primary:hover { transform:translateY(-2px); opacity:.9; }
+  .btn-ghost { font-family:'Inter',sans-serif; font-size:13px; color:var(--muted); text-decoration:none; border-bottom:1px solid var(--muted); padding-bottom:2px; }
+  .btn-ghost:hover { color:var(--white); border-color:var(--white); }
+  footer { position:relative; z-index:1; padding:48px; border-top:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; gap:24px; }
+  .footer-logo { font-size:16px; font-weight:800; letter-spacing:-0.5px; }
+  .footer-links { display:flex; gap:32px; list-style:none; flex-wrap:wrap; }
+  .footer-links a { font-family:'Inter',sans-serif; font-size:11px; letter-spacing:.5px; color:var(--muted); text-decoration:none; }
+  .footer-links a:hover { color:var(--white); }
+  @media (max-width:768px) {
+    nav { padding:16px 20px; }
+    .nav-cta { font-size:13px; padding:8px 14px; }
+    main { padding:110px 16px 60px; }
+    .actions { flex-direction:column; align-items:stretch; text-align:center; }
+    .btn-primary { justify-content:center; }
+    footer { flex-direction:column; text-align:center; padding:40px 16px; }
+    .footer-links { justify-content:center; gap:20px; }
+  }
+</style>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "url": "https://testpilotapp.dev/security-testing-ai-built-apps",
+  "mainEntity": [
+    { "@type": "Question", "name": "Is security testing different from normal testing?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes. Normal testing checks that things work. Security testing checks that the wrong person cannot make them work." } },
+    { "@type": "Question", "name": "Do I need to know how to code?",
+      "acceptedAnswer": { "@type": "Answer", "text": "No. You describe the scenario in plain English." } },
+    { "@type": "Question", "name": "Does TestPilot store my app's data?",
+      "acceptedAnswer": { "@type": "Answer", "text": "It stores only what your report needs: the learned page map and run screenshots, scoped to your account. Never sold or shared, and deletable." } },
+    { "@type": "Question", "name": "Is it a full security audit?",
+      "acceptedAnswer": { "@type": "Answer", "text": "No. TestPilot is not a full security audit or a penetration test. It tests the app the way a user could attack it from the browser. If you handle payments, health data or anything regulated, get a professional review as well." } }
+  ]
+}
+</script>
+</head>
+<body>
+
+<nav>
+  <a href="/" class="nav-logo">Test<span>Pilot</span></a>
+  <a href="/first-run" class="nav-cta">Run a free test →</a>
+</nav>
+
+<main>
+  <p class="section-tag">// security testing for ai-built apps</p>
+  <h1>Can one user see another user's data in your app?</h1>
+  <p class="lead">Security testing for AI-built apps means checking that User A cannot see or change User B's data. Apps made with tools like Lovable, Base44, Bolt, v0 or Bubble often work perfectly for the person who built them, and still leave doors open for everyone else. These are the checks that matter most, and how TestPilot runs them for you.</p>
+
+  <h2>What goes wrong</h2>
+  <p>AI tools build what you ask for. They rarely ask what should be forbidden. The result is an app where the right user sees the right page, and a wrong user may see it too.</p>
+  <ol>
+    <li><strong>URL manipulation.</strong> Log in, open a record, and change the ID in the address. If another user's record opens, the app does not check who is asking.</li>
+    <li><strong>IDOR (insecure direct object reference).</strong> Same idea, deeper: the app trusts an ID sent by the browser. Test it on every page and action that takes an ID: invoices, profiles, orders, files.</li>
+    <li><strong>Role escalation.</strong> Log in as a regular user and try to reach admin pages or actions. A hidden button is not protection if the page still opens.</li>
+    <li><strong>Session persistence.</strong> Log out and press back. Open a private page in a new tab. A session that stays alive when it should not is a risk.</li>
+  </ol>
+
+  <h2>How TestPilot helps</h2>
+  <p>TestPilot's security testing checks URL manipulation, IDOR, session persistence and role escalation, the kinds of problems no-code builders often miss. You describe what each user should and should not see, and TestPilot tries it with real accounts. With multi-role testing (beta), it can run scenarios across several users in one run: a dispatcher assigns a job, a contractor bids, an admin approves. The report logs every step with screenshots and flags problems by severity.</p>
+
+  <h2>Questions</h2>
+  <p><strong>Is security testing different from normal testing?</strong><br>Yes. Normal testing checks that things work. Security testing checks that the wrong person cannot make them work.</p>
+  <p><strong>Do I need to know how to code?</strong><br>No. You describe the scenario in plain English.</p>
+  <p><strong>Does TestPilot store my app's data?</strong><br>It stores only what your report needs: the learned page map and run screenshots, scoped to your account. Never sold or shared, and deletable.</p>
+  <p><strong>Is it a full security audit?</strong><br>No. TestPilot is not a full security audit or a penetration test. It tests the app the way a user could attack it from the browser. If you handle payments, health data or anything regulated, get a professional review as well.</p>
+
+  <h2>Next step</h2>
+  <p>Run your first test free and see whether one user can reach another's data.</p>
+  <div class="actions">
+    <a href="/first-run" class="btn-primary">Run your first test free →</a>
+    <a href="/sandbox" class="btn-ghost">Or see a demo</a>
+  </div>
+  <p style="margin-top:40px"><a href="/test-lovable-app">How to test a Lovable app before launch</a></p>
+</main>
+
+<footer>
+  <div class="footer-logo">Test<span>Pilot</span></div>
+  <ul class="footer-links">
+    <li><a href="/">Home</a></li>
+    <li><a href="/first-run">Run a free test</a></li>
+    <li><a href="/sandbox">Sandbox demo</a></li>
+    <li><a href="/test-lovable-app">Test a Lovable app</a></li>
+    <li><a href="/terms.html">Terms</a></li>
+    <li><a href="/privacy.html">Privacy</a></li>
+  </ul>
+</footer>
+
+<!-- Cloudflare Web Analytics --><script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "2e2922dc7ced4368bd5bea2c224545dd"}'></script><!-- End Cloudflare Web Analytics -->
+</body>
+</html>

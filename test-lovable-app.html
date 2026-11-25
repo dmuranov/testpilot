@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>How to Test a Lovable App Before Launch | TestPilot</title>
+<meta name="description" content="Test your Lovable app like a real user before launch: check forms, flows and logins, then get a bug report. Your first TestPilot test is free.">
+<link rel="canonical" href="https://testpilotapp.dev/test-lovable-app">
+<link rel="icon" type="image/png" href="/brand/favicon-32.png">
+<link rel="apple-touch-icon" href="/brand/apple-touch-icon.png">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://testpilotapp.dev/test-lovable-app">
+<meta property="og:title" content="How to Test a Lovable App Before Launch | TestPilot">
+<meta property="og:description" content="Test your Lovable app like a real user before launch: check forms, flows and logins, then get a bug report. Your first TestPilot test is free.">
+<meta property="og:image" content="https://testpilotapp.dev/brand/og-share-card.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Inter:wght@400;500;600&family=Syne:wght@600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root { --black:#080808; --white:#f4f2ee; --accent:#c8f040; --muted:#d8d8d8; --dim:#2a2a2a; --border:rgba(244,242,238,0.08); }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html { overflow-x:hidden; }
+  body { background:var(--black); color:var(--white); font-family:'Syne',sans-serif; overflow-x:hidden; }
+  body::before { content:''; position:fixed; inset:0; background-image:linear-gradient(rgba(200,240,64,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(200,240,64,0.03) 1px,transparent 1px); background-size:60px 60px; pointer-events:none; z-index:0; }
+  nav { position:fixed; top:0; left:0; right:0; z-index:100; display:flex; align-items:center; justify-content:space-between; padding:20px 48px; background:rgba(8,8,8,0.85); backdrop-filter:blur(12px); border-bottom:1px solid var(--border); }
+  .nav-logo { font-size:18px; font-weight:800; letter-spacing:-0.5px; color:var(--white); text-decoration:none; }
+  .nav-logo span, .footer-logo span { color:var(--accent); }
+  .nav-cta { font-family:'Inter',sans-serif; font-size:12px; font-weight:500; background:var(--accent); color:var(--black); padding:10px 22px; border-radius:2px; text-decoration:none; letter-spacing:0.5px; }
+  .nav-cta:hover { opacity:.85; }
+  main { position:relative; z-index:1; max-width:760px; margin:0 auto; padding:150px 24px 80px; }
+  .section-tag { font-family:'DM Mono',monospace; font-size:11px; letter-spacing:2px; color:var(--accent); text-transform:uppercase; margin-bottom:20px; }
+  h1 { font-size:clamp(36px,6vw,60px); font-weight:800; letter-spacing:-2px; line-height:1.02; margin-bottom:28px; }
+  h2 { font-size:clamp(24px,3.4vw,32px); font-weight:800; letter-spacing:-1px; line-height:1.1; margin:56px 0 18px; }
+  p, li { font-family:'Inter',sans-serif; font-size:16px; line-height:1.75; color:var(--muted); }
+  p + p { margin-top:14px; }
+  .lead { font-size:18px; color:var(--white); }
+  ol, ul { padding-left:22px; margin-top:12px; }
+  li { margin-top:10px; }
+  li strong, p strong { color:var(--white); font-weight:600; }
+  a { color:var(--accent); }
+  .box { border:1px solid rgba(200,240,64,0.25); background:#0d0d0d; border-radius:4px; padding:22px 24px; margin-top:20px; }
+  .box p { font-size:15px; }
+  code { font-family:'DM Mono',monospace; font-size:14px; color:var(--white); }
+  .actions { display:flex; gap:24px; align-items:center; flex-wrap:wrap; margin-top:40px; }
+  .btn-primary { display:inline-flex; background:var(--accent); color:var(--black); font-family:'Syne',sans-serif; font-size:15px; font-weight:700; padding:16px 32px; border-radius:2px; text-decoration:none; transition:transform .15s, opacity .15s; }
+  .btn-primary:hover { transform:translateY(-2px); opacity:.9; }
+  .btn-ghost { font-family:'Inter',sans-serif; font-size:13px; color:var(--muted); text-decoration:none; border-bottom:1px solid var(--muted); padding-bottom:2px; }
+  .btn-ghost:hover { color:var(--white); border-color:var(--white); }
+  footer { position:relative; z-index:1; padding:48px; border-top:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; gap:24px; }
+  .footer-logo { font-size:16px; font-weight:800; letter-spacing:-0.5px; }
+  .footer-links { display:flex; gap:32px; list-style:none; flex-wrap:wrap; }
+  .footer-links a { font-family:'Inter',sans-serif; font-size:11px; letter-spacing:.5px; color:var(--muted); text-decoration:none; }
+  .footer-links a:hover { color:var(--white); }
+  @media (max-width:768px) {
+    nav { padding:16px 20px; }
+    .nav-cta { font-size:13px; padding:8px 14px; }
+    main { padding:110px 16px 60px; }
+    .actions { flex-direction:column; align-items:stretch; text-align:center; }
+    .btn-primary { justify-content:center; }
+    footer { flex-direction:column; text-align:center; padding:40px 16px; }
+    .footer-links { justify-content:center; gap:20px; }
+  }
+</style>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "url": "https://testpilotapp.dev/test-lovable-app",
+  "mainEntity": [
+    { "@type": "Question", "name": "Do I need to write code to test a Lovable app?",
+      "acceptedAnswer": { "@type": "Answer", "text": "No. With TestPilot you describe the scenario in plain English." } },
+    { "@type": "Question", "name": "Does TestPilot work on apps with a login?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes, it can test as a logged-in user when you choose that option for a run." } },
+    { "@type": "Question", "name": "What does it cost after the free test?",
+      "acceptedAnswer": { "@type": "Answer", "text": "The plan is 15 € per month plus VAT. You connect your own Anthropic key, and a typical run costs between 0,10 € and 0,50 € in Anthropic fees, paid directly to Anthropic." } }
+  ]
+}
+</script>
+</head>
+<body>
+
+<nav>
+  <a href="/" class="nav-logo">Test<span>Pilot</span></a>
+  <a href="/first-run" class="nav-cta">Run a free test →</a>
+</nav>
+
+<main>
+  <p class="section-tag">// how to test a lovable app before launch</p>
+  <h1>Test your Lovable app before your first real users do</h1>
+  <p class="lead">Your Lovable app works in the editor. Real users click in a different order, submit half-filled forms and open pages you never checked. Testing a Lovable app before launch means using it the way a customer would, and writing down every place it breaks. Here is how to do it, by hand or with TestPilot.</p>
+
+  <ol>
+    <li><strong>List the flows that matter.</strong> Write down what a user comes to do: sign up, log in, create a record, pay, send a message. Test those first. If they fail, nothing else matters.</li>
+    <li><strong>Test the unhappy paths.</strong> Leave fields empty. Type an invalid email. Go back mid-flow. Refresh a page. Open a page while logged out. Most bugs in AI-built apps are not in the happy path.</li>
+    <li><strong>Check every role.</strong> If your app has more than one kind of user (admin and customer, for example), log in as each and confirm each sees only what they should.</li>
+    <li><strong>Check security basics.</strong> Try changing the ID in a page address and see whether you can open another user's data. See the page on <a href="/security-testing-ai-built-apps">security testing for AI-built apps</a>.</li>
+    <li><strong>Write down what you find.</strong> For each bug: the steps, what you expected, what happened, and a screenshot.</li>
+  </ol>
+
+  <h2>Doing it with TestPilot</h2>
+  <p>TestPilot crawls your app, learns its pages, buttons and forms, and tests it like a real user. You describe a scenario in plain English, such as:</p>
+  <div class="box">
+    <p><code>Book an appointment and verify it saves</code></p>
+  </div>
+  <p style="margin-top:20px">and TestPilot runs it. You get a report with every step logged, screenshots and bugs flagged by severity. It works on Lovable, Base44, Bolt, v0 and Bubble (beta). Your first test is free, with no credit card and no API key needed.</p>
+
+  <h2>Questions</h2>
+  <p><strong>Do I need to write code to test a Lovable app?</strong><br>No. With TestPilot you describe the scenario in plain English.</p>
+  <p><strong>Does TestPilot work on apps with a login?</strong><br>Yes, it can test as a logged-in user when you choose that option for a run.</p>
+  <p><strong>What does it cost after the free test?</strong><br>The plan is 15 € per month plus VAT. You connect your own Anthropic key, and a typical run costs between 0,10 € and 0,50 € in Anthropic fees, paid directly to Anthropic.</p>
+
+  <h2>Next step</h2>
+  <p>Run your first test free: paste your app's URL and see what breaks.</p>
+  <div class="actions">
+    <a href="/first-run" class="btn-primary">Run your first test free →</a>
+    <a href="/sandbox" class="btn-ghost">Or see a demo</a>
+  </div>
+</main>
+
+<footer>
+  <div class="footer-logo">Test<span>Pilot</span></div>
+  <ul class="footer-links">
+    <li><a href="/">Home</a></li>
+    <li><a href="/first-run">Run a free test</a></li>
+    <li><a href="/sandbox">Sandbox demo</a></li>
+    <li><a href="/security-testing-ai-built-apps">Security testing</a></li>
+    <li><a href="/terms.html">Terms</a></li>
+    <li><a href="/privacy.html">Privacy</a></li>
+  </ul>
+</footer>
+
+<!-- Cloudflare Web Analytics --><script defer src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "2e2922dc7ced4368bd5bea2c224545dd"}'></script><!-- End Cloudflare Web Analytics -->
+</body>
+</html>

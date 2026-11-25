@@ -3,19 +3,38 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TestPilot — AI Testing for No-Code Apps</title>
+<title>TestPilot: AI Testing for No-Code Apps</title>
 <link rel="icon" type="image/png" href="/brand/favicon-32.png">
 <link rel="apple-touch-icon" href="/brand/apple-touch-icon.png">
 <link rel="manifest" href="/brand/site.webmanifest">
+<meta name="description" content="TestPilot tests your no-code app like a real user and gives you a bug report with screenshots. Your first test is free, no credit card needed.">
+<link rel="canonical" href="https://testpilotapp.dev/">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://testpilotapp.dev/">
-<meta property="og:title" content="TestPilot — AI Testing for No-Code Apps">
-<meta property="og:description" content="Test faster. Launch smarter.">
+<meta property="og:title" content="TestPilot: AI Testing for No-Code Apps">
+<meta property="og:description" content="TestPilot tests your no-code app like a real user and gives you a bug report with screenshots. Your first test is free, no credit card needed.">
 <meta property="og:image" content="https://testpilotapp.dev/brand/og-share-card.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
 <meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:description" content="TestPilot tests your no-code app like a real user and gives you a bug report with screenshots. Your first test is free, no credit card needed.">
 <meta name="twitter:image" content="https://testpilotapp.dev/brand/og-share-card.png">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "TestPilot",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "Web",
+  "url": "https://testpilotapp.dev/",
+  "description": "TestPilot tests your no-code app like a real user and gives you a bug report with screenshots. Your first test is free, no credit card needed.",
+  "offers": [
+    { "@type": "Offer", "name": "First test", "price": "0", "priceCurrency": "EUR" },
+    { "@type": "Offer", "name": "Monthly plan", "price": "15", "priceCurrency": "EUR",
+      "priceSpecification": { "@type": "UnitPriceSpecification", "price": "15", "priceCurrency": "EUR", "unitText": "MONTH" } }
+  ]
+}
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300&family=Inter:wght@400;500;600&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
 <style>
@@ -351,6 +370,9 @@
   }
 
   .ticker-sep { opacity: 0.4; }
+  .ticker a { color: inherit; text-decoration: underline; text-underline-offset: 3px; }
+  .feature-link { display: inline-block; margin-top: 12px; color: var(--accent); font-size: 13px; text-decoration: none; }
+  .feature-link:hover { text-decoration: underline; }
 
   @keyframes ticker {
     from { transform: translateX(0); }
@@ -893,7 +915,7 @@
 </style>
 <script type="text/javascript">
 /* Cookie consent — gates Microsoft Clarity (GDPR/ePrivacy: no analytics before opt-in; choice remembered). */
-(function(){var KEY='tp-cookie-consent';function loadClarity(){(function(c,l,a,r,i,t,y){c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y)})(window,document,"clarity","script","w97af8wesr");}function get(){try{return localStorage.getItem(KEY);}catch(e){return null;}}function decide(v){try{localStorage.setItem(KEY,v);}catch(e){}var b=document.getElementById('tp-consent');if(b&&b.parentNode)b.parentNode.removeChild(b);if(v==='granted')loadClarity();}var c=get();if(c==='granted'){loadClarity();return;}if(c==='denied'){return;}function show(){if(document.getElementById('tp-consent'))return;var d=document.createElement('div');d.id='tp-consent';d.setAttribute('role','dialog');d.setAttribute('aria-label','Cookie consent');d.style.cssText='position:fixed;left:16px;right:16px;bottom:16px;z-index:2147483647;max-width:560px;margin:0 auto;background:#111;border:1px solid rgba(200,240,64,0.3);border-radius:6px;padding:16px 18px;font-family:system-ui,-apple-system,sans-serif;box-shadow:0 8px 32px rgba(0,0,0,0.55)';d.innerHTML='<p style="margin:0 0 12px;font-size:13px;line-height:1.6;color:#cfcfcf">We use analytics cookies (Microsoft Clarity) to see how TestPilot is used and improve it. Accept or decline — your choice is remembered. See our <a href="/privacy.html" style="color:#c8f040">Privacy Policy</a>.</p><div style="display:flex;gap:8px;justify-content:flex-end"><button id="tpc-no" style="background:transparent;border:1px solid #444;color:#ccc;font-size:13px;padding:8px 16px;border-radius:4px;cursor:pointer">Decline</button><button id="tpc-yes" style="background:#c8f040;border:none;color:#080808;font-weight:700;font-size:13px;padding:8px 16px;border-radius:4px;cursor:pointer">Accept</button></div>';document.body.appendChild(d);document.getElementById('tpc-yes').onclick=function(){decide('granted');};document.getElementById('tpc-no').onclick=function(){decide('denied');};}if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',show);}else{show();}})();
+(function(){var KEY='tp-cookie-consent';function loadClarity(){(function(c,l,a,r,i,t,y){c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y)})(window,document,"clarity","script","w97af8wesr");}function get(){try{return localStorage.getItem(KEY);}catch(e){return null;}}function decide(v){try{localStorage.setItem(KEY,v);}catch(e){}var b=document.getElementById('tp-consent');if(b&&b.parentNode)b.parentNode.removeChild(b);if(v==='granted')loadClarity();}var c=get();if(c==='granted'){loadClarity();return;}if(c==='denied'){return;}function show(){if(document.getElementById('tp-consent'))return;var d=document.createElement('div');d.id='tp-consent';d.setAttribute('role','dialog');d.setAttribute('aria-label','Cookie consent');d.style.cssText='position:fixed;left:16px;right:16px;bottom:16px;z-index:2147483647;max-width:560px;margin:0 auto;background:#111;border:1px solid rgba(200,240,64,0.3);border-radius:6px;padding:16px 18px;font-family:system-ui,-apple-system,sans-serif;box-shadow:0 8px 32px rgba(0,0,0,0.55)';d.innerHTML='<p style="margin:0 0 12px;font-size:13px;line-height:1.6;color:#cfcfcf">We use analytics cookies (Microsoft Clarity) to see how TestPilot is used and improve it. Accept or decline. Your choice is remembered. See our <a href="/privacy.html" style="color:#c8f040">Privacy Policy</a>.</p><div style="display:flex;gap:8px;justify-content:flex-end"><button id="tpc-no" style="background:transparent;border:1px solid #444;color:#ccc;font-size:13px;padding:8px 16px;border-radius:4px;cursor:pointer">Decline</button><button id="tpc-yes" style="background:#c8f040;border:none;color:#080808;font-weight:700;font-size:13px;padding:8px 16px;border-radius:4px;cursor:pointer">Accept</button></div>';document.body.appendChild(d);document.getElementById('tpc-yes').onclick=function(){decide('granted');};document.getElementById('tpc-no').onclick=function(){decide('denied');};}if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',show);}else{show();}})();
 </script>
 <script src="/attrib.js"></script>
 </head>
@@ -921,7 +943,7 @@
     <li><a href="#pricing">Pricing</a></li>
     <li><a href="#byok">API Key</a></li>
   </ul>
-  <a href="/first-run" class="nav-cta" style="background:transparent;border:1px solid rgba(255,255,255,0.25);color:#d8d8d8;margin-right:8px">Log in</a>
+  <a href="/first-run?login=1" class="nav-cta" style="background:transparent;border:1px solid rgba(255,255,255,0.25);color:#d8d8d8;margin-right:8px">Log in</a>
 <a href="/first-run" class="nav-cta">Run a free test →</a>
 </nav>
 
@@ -930,19 +952,18 @@
   <p class="hero-tag">// AI-powered testing for no-code apps</p>
   <h1>Your app works.<br><em>Are you sure?</em></h1>
   <p class="hero-sub">
-    TestPilot learns your app and tests it like a real user — automatically.<br>
-    <strong>Works on any web app — no-code or hand-coded.</strong>
+    TestPilot tests your app like a real customer would, then tells you in plain words what's broken and how to fix it.
   </p>
   <div class="hero-actions">
-    <a href="/first-run" class="btn-primary">Run your first test — free →</a>
+    <a href="/first-run" class="btn-primary">Test my app free →</a>
     <a href="#how" class="btn-ghost">See how it works</a>
   </div>
-  <p class="hero-price-note">// First test free · No credit card · No API key needed · Just your app's URL</p>
+  <p class="hero-price-note">// Just paste your app's URL. No signup, no credit card, no API key for your first test.</p>
   <div class="hero-deco">TP</div>
   <a href="/sandbox" class="hero-sandbox">
     <span class="hero-sandbox-label">// no signup needed</span>
     <span class="hero-sandbox-title">Try the <span>Sandbox</span> Demo</span>
-    <span class="hero-sandbox-sub">Watch TestPilot learn an app, find a real bug, and heal a broken selector — a fully simulated walkthrough.</span>
+    <span class="hero-sandbox-sub">Watch TestPilot learn an app, find a real bug, and heal a broken selector. A fully simulated walkthrough.</span>
     <span class="hero-sandbox-arrow">Explore it live →</span>
   </a>
 </section>
@@ -952,7 +973,7 @@
   <div class="ticker-inner">
     <span class="ticker-item">WORKS ON ANY APP</span>
     <span class="ticker-item ticker-sep">·</span>
-    <span class="ticker-item">LOVABLE · BASE44 · BOLT · V0 · BUBBLE (BETA)</span>
+    <span class="ticker-item"><a href="/test-lovable-app">LOVABLE</a> · BASE44 · BOLT · V0 · BUBBLE (BETA)</span>
     <span class="ticker-item ticker-sep">·</span>
     <span class="ticker-item">MULTI-ROLE TESTING</span>
     <span class="ticker-item ticker-sep">·</span>
@@ -962,7 +983,7 @@
     <span class="ticker-item ticker-sep">·</span>
     <span class="ticker-item">WORKS ON ANY APP</span>
     <span class="ticker-item ticker-sep">·</span>
-    <span class="ticker-item">LOVABLE · BASE44 · BOLT · V0 · BUBBLE (BETA)</span>
+    <span class="ticker-item"><a href="/test-lovable-app">LOVABLE</a> · BASE44 · BOLT · V0 · BUBBLE (BETA)</span>
     <span class="ticker-item ticker-sep">·</span>
     <span class="ticker-item">MULTI-ROLE TESTING</span>
     <span class="ticker-item ticker-sep">·</span>
@@ -979,19 +1000,19 @@
   <h2 class="reveal">Three steps.<br>Zero code.</h2>
   <div class="steps">
     <div class="step reveal">
-      <p class="step-num">01 —</p>
+      <p class="step-num">01</p>
       <h3>Give it your app URL</h3>
       <p>TestPilot crawls every page, learns every button, form, and flow. Like hiring a QA engineer who reads the whole manual first.</p>
     </div>
     <div class="step reveal">
-      <p class="step-num">02 —</p>
+      <p class="step-num">02</p>
       <h3>Describe what to test</h3>
       <p>Write in plain English. "Book an appointment and verify it saves." "Create a client, add a job, send an invoice." TestPilot figures out the rest.</p>
     </div>
     <div class="step reveal">
-      <p class="step-num">03 —</p>
+      <p class="step-num">03</p>
       <h3>Get a full bug report</h3>
-      <p>Every step logged with screenshots. Bugs flagged by severity. Share it with your team or fix it yourself — TestPilot shows you exactly what broke.</p>
+      <p>Every step logged with screenshots. Bugs flagged by severity. Share it with your team or fix it yourself. TestPilot shows you exactly what broke.</p>
     </div>
   </div>
 </section>
@@ -1004,12 +1025,13 @@
     <div class="feature reveal">
       <span class="feature-icon">🤖</span>
       <h3>Scenario Testing</h3>
-      <p>TestPilot acts like a real user — clicks, fills forms, navigates, verifies results. No selectors to write. No scripts to maintain. Just describe the scenario.</p>
+      <p>TestPilot acts like a real user: clicks, fills forms, navigates, verifies results. No selectors to write. No scripts to maintain. Just describe the scenario.</p>
     </div>
     <div class="feature reveal">
       <span class="feature-icon">🔐</span>
       <h3>Security Testing</h3>
-      <p>Test that User A can't see User B's data. Checks URL manipulation, IDOR, session persistence, role escalation — the vulnerabilities no-code builders miss.</p>
+      <p>Test that User A can't see User B's data. Checks URL manipulation, IDOR, session persistence, role escalation: the vulnerabilities no-code builders miss.</p>
+      <a class="feature-link" href="/security-testing-ai-built-apps">Security testing for AI-built apps →</a>
     </div>
     <div class="feature reveal">
       <span class="feature-icon">👥</span>
@@ -1019,9 +1041,50 @@
     <div class="feature reveal">
       <span class="feature-icon">💬</span>
       <h3>Interactive Mode <span class="badge">BETA</span></h3>
-      <p>Chat with your app through TestPilot. "Go to Clientes. Create Ivan Fernandez." Natural language control over a live browser session.</p>
+      <p>Chat with your app through TestPilot. "Go to Customers. Create Ivan Fernandez." Natural language control over a live browser session.</p>
     </div>
   </div>
+</section>
+
+<!-- PRICING -->
+<section class="section" id="pricing">
+  <p class="section-tag reveal">// pricing</p>
+  <h2 class="reveal">Simple, honest pricing.</h2>
+  <p class="reveal" style="font-family:'Inter',sans-serif;font-size:13px;color:var(--muted);max-width:560px;margin:0 auto 48px;text-align:center;line-height:1.8">Your first test is free, and we cover the AI costs. <strong style="color:var(--white)">After that, it's €15 a month.</strong></p>
+  <div class="pricing-grid" style="grid-template-columns:repeat(auto-fit,minmax(260px,1fr));max-width:720px;margin:0 auto">
+
+    <div class="price-card reveal">
+      <p class="price-label">Free</p>
+      <div class="price-amount">€0</div>
+      <p class="price-per">your first app · no card, no key</p>
+      <ul class="price-features">
+        <li>One full test of your first app</li>
+        <li>A plain-language report</li>
+        <li>A ready-to-paste fix for the first problem</li>
+        <li>No card and no key. AI costs are on us.</li>
+      </ul>
+      <a href="/first-run" class="price-btn">Test my app free</a>
+    </div>
+
+    <div class="price-card featured reveal">
+      <p class="price-label">TestPilot</p>
+      <div class="price-amount">€15</div>
+      <p class="price-per">per month + VAT · unlimited apps</p>
+      <ul class="price-features">
+        <li>Unlimited apps and test runs</li>
+        <li>A fix prompt for every problem</li>
+        <li>Retests, security checks and broken-link scans</li>
+        <li>You connect your own Claude key, so AI usage (usually €0.10 to €0.50 a test) is billed by Anthropic, with no markup from us</li>
+      </ul>
+      <a href="/first-run" class="price-btn">Get started</a>
+    </div>
+
+  </div>
+
+  <p class="reveal" style="font-family:'Inter',sans-serif;font-size:12px;color:var(--muted);max-width:800px;margin:28px auto 0;text-align:center;line-height:1.9">
+    // One plan, everything included. Every app is verified as yours before it is tested.<br>
+    If TestPilot fails on our side, the run doesn't count.
+  </p>
 </section>
 
 <!-- BYOK SECTION -->
@@ -1029,9 +1092,9 @@
   <div class="byok-inner">
     <div class="reveal">
       <p class="section-tag">// api key</p>
-      <h2>Connect your<br>Claude key.</h2>
-      <p style="color:var(--white)">TestPilot uses Claude AI to browse your app and think like a real user. You connect your own Anthropic account — so you only pay for what you actually use, with no hidden costs on top.</p>
-      <p style="color:var(--white)">A typical test run costs between <strong style="color:var(--accent)">€0.10 and €0.50</strong> depending on complexity.</p>
+      <h2>Only needed when<br>you upgrade.</h2>
+      <p style="color:var(--white)">Your first test never needs a key. When you subscribe, you connect your own Claude account, so you only pay for what you use.</p>
+      <p style="color:var(--white)">A typical test costs <strong style="color:var(--accent)">€0.10 to €0.50</strong> in Claude fees, paid directly to Anthropic.</p>
       <div class="byok-tip">
         <strong>💡 Tip:</strong> Set a €10 monthly spending limit in Anthropic's dashboard so you never get a surprise bill.
       </div>
@@ -1072,7 +1135,7 @@
               <span class="byok-step-num t-acc">04</span>
               <div class="byok-step-text">
                 Paste it in TestPilot
-                <span>You're ready to run your first test <span class="t-acc blink">▊</span></span>
+                <span>You're ready to run unlimited tests <span class="t-acc blink">▊</span></span>
               </div>
             </div>
           </div>
@@ -1110,7 +1173,7 @@
   <p class="section-tag reveal">// embeddable widget</p>
   <h2 class="reveal">One line. A “Test” button<br>inside your own app.</h2>
   <p class="reveal" style="color:var(--muted);max-width:660px;font-family:'Inter',sans-serif;font-size:13px;line-height:1.8;margin-top:16px">
-    Paste a single tag and a floating “Test” button appears in your app — so you and your team can run TestPilot on the live page, no dashboard round-trip. It runs on your own Claude key, and your secret key never touches the browser.
+    Paste a single tag and a floating “Test” button appears in your app, so you and your team can run TestPilot on the live page, no dashboard round-trip. It runs on your own Claude key, and your secret key never touches the browser.
   </p>
   <div class="reveal" style="margin-top:26px;max-width:760px;background:var(--dim);border:1px solid var(--border);border-radius:8px;padding:16px 18px;font-family:'DM Mono',monospace;font-size:12.5px;color:var(--accent);overflow-x:auto;white-space:nowrap">
     &lt;script src="https://testpilotapp.dev/embed.js" data-tp-token="pk_live_…" defer&gt;&lt;/script&gt;
@@ -1120,71 +1183,28 @@
     <div style="border:1px solid var(--border);border-radius:8px;padding:22px">
       <div style="font-size:22px;margin-bottom:10px">🔑</div>
       <strong style="display:block;margin-bottom:8px;font-size:14px">Your key never touches the browser</strong>
-      <span style="color:var(--muted);font-size:12.5px;line-height:1.65">Connect your Anthropic key once. It's stored <strong>encrypted (AES-256-GCM)</strong> on our server — the embed only carries a public token. Revoke anytime.</span>
+      <span style="color:var(--muted);font-size:12.5px;line-height:1.65">Connect your Anthropic key once. It's stored <strong>encrypted (AES-256-GCM)</strong> on our server. The embed only carries a public token. Revoke anytime.</span>
     </div>
     <div style="border:1px solid var(--border);border-radius:8px;padding:22px">
       <div style="font-size:22px;margin-bottom:10px">💳</div>
       <strong style="display:block;margin-bottom:8px;font-size:14px">Bring your own key</strong>
-      <span style="color:var(--muted);font-size:12.5px;line-height:1.65">Every test runs on <em>your</em> key — you pay Anthropic directly. No markup, and Anthropic's API doesn't train on your data.</span>
+      <span style="color:var(--muted);font-size:12.5px;line-height:1.65">Every test runs on <em>your</em> key. You pay Anthropic directly. No markup, and Anthropic's API doesn't train on your data.</span>
     </div>
     <div style="border:1px solid var(--border);border-radius:8px;padding:22px">
       <div style="font-size:22px;margin-bottom:10px">🤫</div>
       <strong style="display:block;margin-bottom:8px;font-size:14px">Nothing captured silently</strong>
-      <span style="color:var(--muted);font-size:12.5px;line-height:1.65">Your login token is read <em>only</em> if a user opts into “test as logged-in user” — first-party, over HTTPS, for that one run. Never in the URL, referrer, or history.</span>
+      <span style="color:var(--muted);font-size:12.5px;line-height:1.65">Your login token is read <em>only</em> if a user opts into “test as logged-in user”: first-party, over HTTPS, for that one run. Never in the URL, referrer, or history.</span>
     </div>
     <div style="border:1px solid var(--border);border-radius:8px;padding:22px">
       <div style="font-size:22px;margin-bottom:10px">👁️</div>
-      <strong style="display:block;margin-bottom:8px;font-size:14px">We test your app — we don't harvest it</strong>
-      <span style="color:var(--muted);font-size:12.5px;line-height:1.65">We store only what your report needs — the learned page map + run screenshots — scoped to your account. Never sold or shared, and deletable.</span>
+      <strong style="display:block;margin-bottom:8px;font-size:14px">We test your app, we don't harvest it</strong>
+      <span style="color:var(--muted);font-size:12.5px;line-height:1.65">We store only what your report needs (the learned page map and run screenshots), scoped to your account. Never sold or shared, and deletable.</span>
     </div>
   </div>
-  <p class="reveal" style="color:var(--muted);font-size:12px;margin-top:26px;font-family:'Inter',sans-serif">// hidden from your end users by default — your app reveals it only for your team · runs are rate-limited to protect your budget</p>
+  <p class="reveal" style="color:var(--muted);font-size:12px;margin-top:26px;font-family:'Inter',sans-serif">// hidden from your end users by default. Your app reveals it only for your team · runs are rate-limited to protect your budget</p>
 </section>
 
-<!-- PRICING -->
-<section class="section" id="pricing">
-  <p class="section-tag reveal">// pricing</p>
-  <h2 class="reveal">Simple, honest pricing.</h2>
-  <p class="reveal" style="font-family:'Inter',sans-serif;font-size:13px;color:var(--muted);max-width:560px;margin:0 auto 48px;text-align:center;line-height:1.8">You bring your own Claude API key. TestPilot never touches your data or charges hidden AI fees. <strong style="color:var(--white)">You only pay for what you actually use.</strong></p>
-  <div class="pricing-grid" style="grid-template-columns:repeat(auto-fit,minmax(260px,1fr));max-width:720px;margin:0 auto">
 
-    <div class="price-card reveal">
-      <p class="price-label">Free</p>
-      <div class="price-amount">€0</div>
-      <p class="price-per">your first app · no card, no key</p>
-      <ul class="price-features">
-        <li>One full test of your first app</li>
-        <li>Every problem explained in plain words</li>
-        <li>A ready-to-paste fix for the first problem</li>
-        <li>Claude usage on us</li>
-      </ul>
-      <a href="/first-run" class="price-btn">Test my app free</a>
-    </div>
-
-    <div class="price-card featured reveal">
-      <p class="price-label">TestPilot</p>
-      <div class="price-amount">€15</div>
-      <p class="price-per">per month + VAT · unlimited apps</p>
-      <ul class="price-features">
-        <li>Unlimited apps and test runs</li>
-        <li>A fix prompt for every problem</li>
-        <li>Retest as often as you like while you fix</li>
-        <li>Security check, broken links, keep watching</li>
-      </ul>
-      <a href="/first-run" class="price-btn">Get started</a>
-    </div>
-
-  </div>
-
-  <p class="reveal" style="font-family:'Inter',sans-serif;font-size:12px;color:var(--muted);max-width:800px;margin:28px auto 0;text-align:center;line-height:1.9">
-    // One plan, everything included. Every app is verified as yours before it is tested.<br>
-    If TestPilot fails on its side, the run doesn't count.
-  </p>
-
-  <div style="text-align:center;margin-top:32px;font-family:'Inter',sans-serif;font-size:12px;color:var(--muted)">
-    💡 The €15 plan uses <strong style="color:var(--white)">BYOK (Bring Your Own Key)</strong> — connect your Anthropic account when you upgrade. Typical test costs <strong style="color:var(--white)">€0.10–€0.50</strong> in Claude API fees, paid directly to Anthropic.
-  </div>
-</section>
 
 
 
@@ -1192,7 +1212,7 @@
 <section class="cta-section">
   <h2 class="reveal">Find your first bug today.</h2>
   <p class="reveal">It takes 2 minutes.</p>
-  <a href="/first-run" class="btn-primary reveal" style="display:inline-flex">Run your first test — free →</a>
+  <a href="/first-run" class="btn-primary reveal" style="display:inline-flex">Test my app free →</a>
 </section>
 
 <!-- FOOTER -->
@@ -1202,7 +1222,9 @@
     <li><a href="#how">How it works</a></li>
     <li><a href="#features">Features</a></li>
     <li><a href="#pricing">Pricing</a></li>
-    <li><a href="mailto:hello@testpilotapp.dev">Contact</a></li>
+    <li><a href="/test-lovable-app">How to test a Lovable app</a></li>
+    <li><a href="/security-testing-ai-built-apps">Security testing</a></li>
+    <li><a href="mailto:hello@testpilotapp.dev">Contact: hello@testpilotapp.dev</a></li>
     <li><a href="/terms.html">Terms</a></li>
     <li><a href="/privacy.html">Privacy</a></li>
   </ul>

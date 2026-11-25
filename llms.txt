@@ -1,0 +1,9 @@
+# TestPilot
+> AI testing for no-code apps. TestPilot learns your web app and tests it like a real user from scenarios written in plain English, then returns a bug report with screenshots and severity. Works on Lovable, Base44, Bolt, v0 and Bubble (beta).
+
+## Pages
+- [Home](https://testpilotapp.dev/): what TestPilot does, features and pricing
+- [Run your first test](https://testpilotapp.dev/first-run): the first test is free
+- [Sandbox demo](https://testpilotapp.dev/sandbox): simulated walkthrough, no signup
+- [How to test a Lovable app before launch](https://testpilotapp.dev/test-lovable-app)
+- [Security testing for AI-built apps](https://testpilotapp.dev/security-testing-ai-built-apps)
