@@ -333,7 +333,16 @@ const _intEnv = (v, d) => { const n = Number.parseInt(v, 10); return Number.isFi
 const FREE_RUNS = _intEnv(process.env.TESTPILOT_FREE_RUNS, FREE_RUNS_DEFAULT);
 const TESTER_RUNS = _intEnv(process.env.TESTPILOT_TESTER_RUNS, 3);
 const isTesterEmail = (e) => !!e && TESTER_EMAILS.has(canonicalEmail(e));
-const runsFor = (e) => isTesterEmail(e) ? Math.max(TESTER_RUNS, FREE_RUNS) : FREE_RUNS;
+// The owner's demo accounts (owner request 2026-11-26, for the promo video).
+// Each attempt starts as a brand-new signup (resetDemoAccount), the ownership
+// check is simulated, and an attempt gets DEMO_RUNS runs. Comma-separated
+// TESTPILOT_VERIFY_SIMULATED in .env replaces the default list.
+const VERIFY_SIMULATED = new Set(String(process.env.TESTPILOT_VERIFY_SIMULATED ?? 'fixeratest@proton.me')
+  .split(',').map((e) => e.trim()).filter(Boolean).map((e) => canonicalEmail(e)));
+const simulatesOwnershipProof = (email) => !!email && VERIFY_SIMULATED.has(canonicalEmail(email));
+const DEMO_RUNS = _intEnv(process.env.TESTPILOT_DEMO_RUNS, 20);
+const runsFor = (e) => simulatesOwnershipProof(e) ? Math.max(DEMO_RUNS, FREE_RUNS)
+  : isTesterEmail(e) ? Math.max(TESTER_RUNS, FREE_RUNS) : FREE_RUNS;
 const freeRuns = createFreeRunAllowance({ canonicalEmail, runsFor, file: './free-runs-used.json', fs });
 freeRuns.load();
 // A run counts (is charged) only when it got far enough to judge the app.
@@ -14254,15 +14263,11 @@ app.post('/api/security/leak-check', async (req, res) => {
 // The super admin (the owner) is never asked to prove an app: every check below
 // answers yes for them.
 const skipsOwnershipProof = (email) => !!email && isSuperAdmin(email);
-// The owner's demo accounts (owner request 2026-11-26, for the promo video):
-// they are asked for the ownership step EVERY time, for any app, and pressing
-// Verify always succeeds. The site is never fetched and nothing is saved: a
-// successful check only opens a short in-memory pass for that site, long enough
-// for the learn and the test that follow it. Comma-separated
-// TESTPILOT_VERIFY_SIMULATED in .env replaces the default list.
-const VERIFY_SIMULATED = new Set(String(process.env.TESTPILOT_VERIFY_SIMULATED ?? 'fixeratest@proton.me')
-  .split(',').map((e) => e.trim()).filter(Boolean).map((e) => canonicalEmail(e)));
-const simulatesOwnershipProof = (email) => !!email && VERIFY_SIMULATED.has(canonicalEmail(email));
+// The owner's demo accounts (VERIFY_SIMULATED, defined near the free-run
+// allowance): they are asked for the ownership step EVERY time, for any app,
+// and pressing Verify always succeeds. The site is never fetched and nothing is
+// saved: a successful check only opens a short in-memory pass for that site,
+// long enough for the learn and the test that follow it.
 const SIMULATED_PASS_MS = 20 * 60_000;
 const simulatedPasses = new Map();   // canonical email + '|' + site host -> expiry
 const passKey = (email, origin) => canonicalEmail(email) + '|' + (sameSiteHost(origin) || origin);
@@ -14281,6 +14286,9 @@ async function resetDemoAccount(email) {
   try {
     detachedBase.delete(email);
     refundBaseFreeRun(email);   // DB flag + every live session of this account
+    freeRuns.forget(email);     // extra runs spent on earlier attempts
+    if (freeSecurityUsed.delete(key)) saveFreeSecurityUsed();   // the free security check
+    for (const [, s] of sessions) if (s.email && canonicalEmail(s.email) === key) s.free_security_used = false;
     await supabase('PATCH', 'users', { free_run_used: false, app_slots_used: 0 }, `?email=eq.${encodeURIComponent(email)}`).catch(() => {});
     await supabase('DELETE', 'app_ownership', null, `?owner_email=eq.${encodeURIComponent(email)}`).catch(() => {});
     const h = userHash(email);
