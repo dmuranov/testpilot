@@ -14246,12 +14246,15 @@ app.post('/api/security/leak-check', async (req, res) => {
 });
 
 // The super admin (the owner) is never asked to prove an app: every check below
-// answers yes for them. So are the owner's own test accounts (owner request
-// 2026-11-25: fixeratest@ is his Fixera test identity, any answer is accepted).
-// Comma-separated TESTPILOT_VERIFY_EXEMPT in .env replaces the default list.
-const VERIFY_EXEMPT = new Set(String(process.env.TESTPILOT_VERIFY_EXEMPT ?? 'fixeratest@proton.me')
+// answers yes for them.
+const skipsOwnershipProof = (email) => !!email && isSuperAdmin(email);
+// The owner's demo accounts (owner request 2026-11-26, for the promo video):
+// they see the ownership step like any client, but pressing Verify always
+// succeeds. The site is never fetched, the check is simulated. Comma-separated
+// TESTPILOT_VERIFY_SIMULATED in .env replaces the default list.
+const VERIFY_SIMULATED = new Set(String(process.env.TESTPILOT_VERIFY_SIMULATED ?? 'fixeratest@proton.me')
   .split(',').map((e) => e.trim()).filter(Boolean).map((e) => canonicalEmail(e)));
-const skipsOwnershipProof = (email) => !!email && (isSuperAdmin(email) || VERIFY_EXEMPT.has(canonicalEmail(email)));
+const simulatesOwnershipProof = (email) => !!email && VERIFY_SIMULATED.has(canonicalEmail(email));
 
 async function isSiteVerified(email, origin, pageUrl) {
   if (skipsOwnershipProof(email)) return true;
@@ -14319,14 +14322,23 @@ async function denyUnverifiedApp(res, email, appId) {
 // The file or meta-tag proof for (email, origin). Records a success.
 // reason on failure: 'not_found' | 'other_token' | 'unreachable'.
 async function checkSiteProof(email, origin, pageUrl) {
-  if (skipsOwnershipProof(email)) return { verified: true, method: isSuperAdmin(email) ? 'super_admin' : 'exempt' };
+  if (skipsOwnershipProof(email)) return { verified: true, method: 'super_admin' };
   const token = siteVerifyToken(email, origin);
   let method = null;
+  const scope = appScope(pageUrl);
+  let entry = origin;
+  let reason = 'not_found';
+
+  if (simulatesOwnershipProof(email)) {
+    await new Promise((r) => setTimeout(r, 2500));   // as long as a real check takes
+    method = 'simulated';
+    if (scope) entry = scope;   // what a folder proof would record, when the app sits in a sub-folder
+  }
 
   // File first. A catch-all SPA host answers 200 + index.html here, so require
   // the body to BE the token — not merely contain it. Some 404 pages echo the
   // requested path back into the HTML, which would otherwise verify anything.
-  try {
+  if (!method) try {
     const r = await fetch(origin + '/tp-verify-' + token + '.txt',
       { redirect: 'manual', signal: AbortSignal.timeout(8000) });
     if (r.status === 200 && tokenFileMatches(await r.text(), token)) method = 'file';
@@ -14334,7 +14346,6 @@ async function checkSiteProof(email, origin, pageUrl) {
 
   // Why a check failed, so the client is told what to do next: the home page
   // did not load, it carries a TestPilot tag with another token, or no tag.
-  let reason = 'not_found';
   if (!method) {
     try {
       const r = await fetch(origin + '/', { redirect: 'follow', signal: AbortSignal.timeout(8000) });
@@ -14349,8 +14360,6 @@ async function checkSiteProof(email, origin, pageUrl) {
   // can edit only their own folder, so the FILE there proves that folder and
   // nothing else. File only, no redirects: a page can echo a query or path
   // back into its HTML, so a meta tag found on it would prove nothing.
-  const scope = appScope(pageUrl);
-  let entry = origin;
   if (!method && scope) {
     try {
       const r = await fetch(scope + '/tp-verify-' + token + '.txt', { redirect: 'manual', signal: AbortSignal.timeout(8000) });
