@@ -14249,15 +14249,28 @@ app.post('/api/security/leak-check', async (req, res) => {
 // answers yes for them.
 const skipsOwnershipProof = (email) => !!email && isSuperAdmin(email);
 // The owner's demo accounts (owner request 2026-11-26, for the promo video):
-// they see the ownership step like any client, but pressing Verify always
-// succeeds. The site is never fetched, the check is simulated. Comma-separated
+// they are asked for the ownership step EVERY time, for any app, and pressing
+// Verify always succeeds. The site is never fetched and nothing is saved: a
+// successful check only opens a short in-memory pass for that site, long enough
+// for the learn and the test that follow it. Comma-separated
 // TESTPILOT_VERIFY_SIMULATED in .env replaces the default list.
 const VERIFY_SIMULATED = new Set(String(process.env.TESTPILOT_VERIFY_SIMULATED ?? 'fixeratest@proton.me')
   .split(',').map((e) => e.trim()).filter(Boolean).map((e) => canonicalEmail(e)));
 const simulatesOwnershipProof = (email) => !!email && VERIFY_SIMULATED.has(canonicalEmail(email));
+const SIMULATED_PASS_MS = 20 * 60_000;
+const simulatedPasses = new Map();   // canonical email + '|' + site host -> expiry
+const passKey = (email, origin) => canonicalEmail(email) + '|' + (sameSiteHost(origin) || origin);
+function hasSimulatedPass(email, origin) {
+  const k = passKey(email, origin);
+  const exp = simulatedPasses.get(k);
+  if (exp && exp > Date.now()) return true;
+  simulatedPasses.delete(k);
+  return false;
+}
 
 async function isSiteVerified(email, origin, pageUrl) {
   if (skipsOwnershipProof(email)) return true;
+  if (simulatesOwnershipProof(email)) return false;   // the step is shown every time
   const store = await loadVerifiedSites();
   const rec = store[canonicalEmail(email)];
   if (!rec) return false;
@@ -14293,6 +14306,7 @@ async function isAppVerified(email, appId, { folder = true } = {}) {
   if (skipsOwnershipProof(email)) return true;
   const origin = originForApp(appId);
   if (!origin) return false;
+  if (simulatesOwnershipProof(email)) return hasSimulatedPass(email, origin);
   const store = await loadVerifiedSites();
   const rec = store[canonicalEmail(email)] || {};
   const want = sameSiteHost(origin);
@@ -14324,16 +14338,16 @@ async function denyUnverifiedApp(res, email, appId) {
 async function checkSiteProof(email, origin, pageUrl) {
   if (skipsOwnershipProof(email)) return { verified: true, method: 'super_admin' };
   const token = siteVerifyToken(email, origin);
+  if (simulatesOwnershipProof(email)) {
+    await new Promise((r) => setTimeout(r, 2500));   // as long as a real check takes
+    simulatedPasses.set(passKey(email, origin), Date.now() + SIMULATED_PASS_MS);
+    console.log('[verify-site] simulated pass', canonicalEmail(email), origin);
+    return { verified: true, method: 'simulated' };
+  }
   let method = null;
   const scope = appScope(pageUrl);
   let entry = origin;
   let reason = 'not_found';
-
-  if (simulatesOwnershipProof(email)) {
-    await new Promise((r) => setTimeout(r, 2500));   // as long as a real check takes
-    method = 'simulated';
-    if (scope) entry = scope;   // what a folder proof would record, when the app sits in a sub-folder
-  }
 
   // File first. A catch-all SPA host answers 200 + index.html here, so require
   // the body to BE the token — not merely contain it. Some 404 pages echo the
