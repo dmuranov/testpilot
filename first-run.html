@@ -507,6 +507,9 @@ async function logOut() {
 async function start() {
   let who = null;
   try { const r = await fetch('/api/auth/me'); if (r.ok) who = await r.json(); } catch (e) {}
+  // The owner's demo account (promo video): every visit is a brand-new visitor,
+  // so it is signed out and asked for its email again.
+  if (who && who.demo) { try { await fetch('/api/auth/logout', { method: 'POST' }); } catch (e) {} who = null; }
   // A sign-in link that failed lands here (it used to open the old login box).
   const linkErr = new URLSearchParams(location.search).get('error');
   if (linkErr) history.replaceState({}, '', '/first-run');

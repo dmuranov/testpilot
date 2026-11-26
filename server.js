@@ -1983,6 +1983,10 @@ app.post('/api/funnel/start', watchOnboarding('signup', (req) => ({ email: onboa
     // the founder's account had learned it. The first learner's
     // app_ownership row stays theirs (claims are insert-if-absent); what an
     // account may touch is decided by ownsApp() on its own appIds.
+    // The owner's demo account (promo video, owner request 2026-11-26): every
+    // attempt starts as its very first one, so the account is wiped back to new.
+    if (simulatesOwnershipProof(userEmail)) await resetDemoAccount(userEmail);
+
     const existingApp = await getAppByNormalized(norm.normalized);
 
     // Our own Claude key is failing: say so now, before the visitor does the
@@ -2581,6 +2585,8 @@ app.get('/api/auth/me', (req, res) => {
       ? (session.free_run_used ? 0 : 1) + freeRuns.remaining(session.email) : null,
     free_runs_total: session.plan === 'free' && runsFor(session.email) > 1 ? runsFor(session.email) : null,
     terms_accepted_version: session.terms_accepted_version || null,
+    // The owner's demo account: the chat starts it from scratch on every visit.
+    demo: simulatesOwnershipProof(session.email) || undefined,
   });
 });
 
@@ -14266,6 +14272,28 @@ function hasSimulatedPass(email, origin) {
   if (exp && exp > Date.now()) return true;
   simulatedPasses.delete(k);
   return false;
+}
+
+// Puts a demo account back to a brand-new signup: free run unspent, no app
+// slots, no learned apps (so the crawl runs again), no ownership passes.
+async function resetDemoAccount(email) {
+  const key = canonicalEmail(email);
+  try {
+    detachedBase.delete(email);
+    refundBaseFreeRun(email);   // DB flag + every live session of this account
+    await supabase('PATCH', 'users', { free_run_used: false, app_slots_used: 0 }, `?email=eq.${encodeURIComponent(email)}`).catch(() => {});
+    await supabase('DELETE', 'app_ownership', null, `?owner_email=eq.${encodeURIComponent(email)}`).catch(() => {});
+    const h = userHash(email);
+    let maps = 0;
+    for (const [appId, map] of platformMaps) {
+      if (map.ownerHash !== h) continue;
+      platformMaps.delete(appId);
+      await fs.unlink(path.join(MAPS_DIR, `${appId}.json`)).catch(() => {});
+      maps++;
+    }
+    for (const k of simulatedPasses.keys()) if (k.startsWith(key + '|')) simulatedPasses.delete(k);
+    console.log('[demo-reset]', key, 'maps removed:', maps);
+  } catch (e) { console.warn('[demo-reset] failed', key, e.message); }
 }
 
 async function isSiteVerified(email, origin, pageUrl) {
